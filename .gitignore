@@ -1,0 +1,74 @@
+# 本地环境与密钥
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# C/C++ 构建产物
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+*.o
+*.a
+*.so
+*.out
+
+# 模型、训练结果与运行时制品
+*.pt
+*.pth
+*.onnx
+*.rknn
+*.engine
+*.weights
+models/
+runs/
+mlruns/
+artifacts/
+checkpoints/
+
+# 数据集、采集文件与媒体
+data/
+datasets/
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.webp
+*.mp4
+*.avi
+*.mkv
+
+# 压缩包、日志与诊断包
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.tar.xz
+*.7z
+*.log
+logs/
+diagnostics/
+
+# 生成的运行时配置
+configs/runtime/*.env
+configs/runtime/generated/
+
+# 编辑器与系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
