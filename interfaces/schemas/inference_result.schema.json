@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://visionops.local/schemas/inference_result.schema.json",
+  "title": "C++ RKNN Runtime 标准化推理结果",
+  "description": "描述与模型原始张量无关的推理结果。几何坐标均基于原图像素坐标。",
+  "allOf": [
+    { "$ref": "common.schema.json#/$defs/commonMessage" },
+    {
+      "type": "object",
+      "required": [
+        "frame_id",
+        "result_id",
+        "task_type",
+        "model",
+        "image",
+        "timing"
+      ],
+      "properties": {
+        "message_type": { "const": "inference_result" },
+        "frame_id": { "$ref": "common.schema.json#/$defs/frameId" },
+        "result_id": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "task_type": {
+          "enum": ["detection", "obb", "segmentation", "roi_classification", "classification"]
+        },
+        "model": { "$ref": "#/$defs/model" },
+        "image": { "$ref": "common.schema.json#/$defs/size2d" },
+        "timing": { "$ref": "#/$defs/timing" },
+        "detections": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/detection" }
+        },
+        "classifications": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/classification" }
+        },
+        "measurements": {
+          "type": "object",
+          "additionalProperties": { "type": ["number", "string", "boolean", "null"] }
+        },
+        "final_decision": { "$ref": "#/$defs/finalDecision" },
+        "debug": {
+          "type": "object",
+          "description": "只允许小型诊断元数据，不得包含图片路径、图片内容或原始张量。",
+          "additionalProperties": {
+            "type": ["string", "number", "integer", "boolean", "null"]
+          }
+        }
+      }
+    }
+  ],
+  "unevaluatedProperties": false,
+  "$defs": {
+    "model": {
+      "type": "object",
+      "required": ["model_id", "model_name", "model_version", "backend", "input_size"],
+      "properties": {
+        "model_id": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "model_name": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "model_version": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "backend": { "enum": ["rknn", "onnx", "mock"] },
+        "input_size": { "$ref": "common.schema.json#/$defs/size2d" }
+      },
+      "additionalProperties": false
+    },
+    "timing": {
+      "type": "object",
+      "required": ["preprocess_ms", "inference_ms", "postprocess_ms", "total_ms"],
+      "properties": {
+        "preprocess_ms": { "type": "number", "minimum": 0 },
+        "inference_ms": { "type": "number", "minimum": 0 },
+        "postprocess_ms": { "type": "number", "minimum": 0 },
+        "total_ms": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "obb": {
+      "type": "object",
+      "required": ["cx", "cy", "w", "h", "angle_deg", "points"],
+      "properties": {
+        "cx": { "type": "number" },
+        "cy": { "type": "number" },
+        "w": { "type": "number", "minimum": 0 },
+        "h": { "type": "number", "minimum": 0 },
+        "angle_deg": { "type": "number" },
+        "points": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "$ref": "common.schema.json#/$defs/point2d" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "mask": {
+      "type": "object",
+      "required": ["encoding", "size"],
+      "properties": {
+        "encoding": { "enum": ["coco_rle", "polygon"] },
+        "size": {
+          "type": "array",
+          "prefixItems": [
+            { "type": "integer", "minimum": 1 },
+            { "type": "integer", "minimum": 1 }
+          ],
+          "items": false
+        },
+        "counts": { "type": ["string", "array"] },
+        "polygon": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "minItems": 3,
+            "items": { "$ref": "common.schema.json#/$defs/point2d" }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "detection": {
+      "type": "object",
+      "required": ["id", "class_id", "class_name", "score", "bbox_xyxy"],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "class_id": { "type": "integer", "minimum": 0 },
+        "class_name": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "bbox_xyxy": { "$ref": "common.schema.json#/$defs/bboxXyxy" },
+        "center_xy": { "$ref": "common.schema.json#/$defs/point2d" },
+        "obb": { "$ref": "#/$defs/obb" },
+        "mask": { "$ref": "#/$defs/mask" },
+        "attributes": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "classification": {
+      "type": "object",
+      "required": ["class_id", "class_name", "score", "rank"],
+      "properties": {
+        "class_id": { "type": "integer", "minimum": 0 },
+        "class_name": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "rank": { "type": "integer", "minimum": 1 },
+        "detection_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "finalDecision": {
+      "type": "object",
+      "required": ["code", "label", "ok", "reason"],
+      "properties": {
+        "code": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "label": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "ok": { "type": "boolean" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

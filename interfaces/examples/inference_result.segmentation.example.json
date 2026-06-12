@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.0",
+  "message_type": "inference_result",
+  "device_id": "example-edge-001",
+  "component": "rknn_runtime",
+  "timestamp_ms": 1760000000348,
+  "trace_id": "trace-example-0003",
+  "frame_id": "frame-example-000003",
+  "source": "runtime:primary",
+  "status": "ok",
+  "result_id": "result-segmentation-000003",
+  "task_type": "segmentation",
+  "model": {
+    "model_id": "model-segmentation-example",
+    "model_name": "example-segmenter",
+    "model_version": "1.0.0",
+    "backend": "mock",
+    "input_size": {
+      "width": 640,
+      "height": 640
+    }
+  },
+  "image": {
+    "width": 1920,
+    "height": 1080
+  },
+  "timing": {
+    "preprocess_ms": 2.7,
+    "inference_ms": 20.6,
+    "postprocess_ms": 5.2,
+    "total_ms": 28.5
+  },
+  "detections": [
+    {
+      "id": "det-mask-001",
+      "class_id": 0,
+      "class_name": "surface_region",
+      "score": 0.89,
+      "bbox_xyxy": [300.0, 220.0, 980.0, 820.0],
+      "mask": {
+        "encoding": "polygon",
+        "size": [1080, 1920],
+        "polygon": [
+          [
+            [320.0, 250.0],
+            [940.0, 230.0],
+            [970.0, 790.0],
+            [350.0, 810.0]
+          ]
+        ]
+      }
+    }
+  ],
+  "measurements": {
+    "mask_area_px": 337900,
+    "coverage_ratio": 0.1629
+  }
+}

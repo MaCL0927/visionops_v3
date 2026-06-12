@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "message_type": "runtime_status",
+  "device_id": "example-edge-001",
+  "component": "rknn_runtime",
+  "timestamp_ms": 1760000000500,
+  "trace_id": "trace-status-0001",
+  "source": "runtime:primary",
+  "status": "ok",
+  "running": true,
+  "mode": "detect",
+  "health": "ok",
+  "uptime_s": 3600.5,
+  "loaded_model": {
+    "model_id": "model-detect-example",
+    "model_name": "example-detector",
+    "model_version": "1.0.0",
+    "task_type": "detection",
+    "backend": "mock"
+  },
+  "camera_connected": true,
+  "fps": {
+    "camera_fps": 15.0,
+    "inference_fps": 14.8,
+    "snapshot_fps": 2.0
+  },
+  "latency_ms": {
+    "latest": 16.3,
+    "average": 16.8,
+    "p95": 18.2
+  },
+  "counters": {
+    "frames_in": 54000,
+    "frames_inferred": 53280,
+    "frames_dropped": 720,
+    "errors": 0
+  },
+  "last_result_id": "result-detect-000001",
+  "last_frame_id": "frame-example-000001",
+  "last_error": null,
+  "resources": {
+    "cpu_percent": 24.5,
+    "memory_mb": 186.0,
+    "npu_percent": 61.0,
+    "temperature_c": 54.2
+  }
+}

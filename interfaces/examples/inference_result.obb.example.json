@@ -1,0 +1,62 @@
+{
+  "schema_version": "1.0",
+  "message_type": "inference_result",
+  "device_id": "example-edge-001",
+  "component": "rknn_runtime",
+  "timestamp_ms": 1760000000248,
+  "trace_id": "trace-example-0002",
+  "frame_id": "frame-example-000002",
+  "source": "runtime:primary",
+  "status": "ok",
+  "result_id": "result-obb-000002",
+  "task_type": "obb",
+  "model": {
+    "model_id": "model-obb-example",
+    "model_name": "example-obb-detector",
+    "model_version": "1.0.0",
+    "backend": "mock",
+    "input_size": {
+      "width": 640,
+      "height": 640
+    }
+  },
+  "image": {
+    "width": 1920,
+    "height": 1080
+  },
+  "timing": {
+    "preprocess_ms": 2.3,
+    "inference_ms": 14.1,
+    "postprocess_ms": 2.4,
+    "total_ms": 18.8
+  },
+  "detections": [
+    {
+      "id": "det-obb-001",
+      "class_id": 0,
+      "class_name": "rotated_object",
+      "score": 0.91,
+      "bbox_xyxy": [700.0, 250.0, 1120.0, 690.0],
+      "center_xy": [910.0, 470.0],
+      "obb": {
+        "cx": 910.0,
+        "cy": 470.0,
+        "w": 380.0,
+        "h": 210.0,
+        "angle_deg": -18.5,
+        "points": [
+          [696.5, 430.5],
+          [1057.0, 309.9],
+          [1123.5, 509.5],
+          [763.0, 630.1]
+        ]
+      }
+    }
+  ],
+  "final_decision": {
+    "code": "ORIENTATION_OK",
+    "label": "aligned",
+    "ok": true,
+    "reason": "示例角度处于允许范围"
+  }
+}

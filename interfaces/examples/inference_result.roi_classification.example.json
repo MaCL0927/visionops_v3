@@ -1,0 +1,72 @@
+{
+  "schema_version": "1.0",
+  "message_type": "inference_result",
+  "device_id": "example-edge-001",
+  "component": "rknn_runtime",
+  "timestamp_ms": 1760000000448,
+  "trace_id": "trace-example-0004",
+  "frame_id": "frame-example-000004",
+  "source": "runtime:primary",
+  "status": "ok",
+  "result_id": "result-roi-000004",
+  "task_type": "roi_classification",
+  "model": {
+    "model_id": "model-roi-example",
+    "model_name": "example-roi-pipeline",
+    "model_version": "1.0.0",
+    "backend": "mock",
+    "input_size": {
+      "width": 640,
+      "height": 640
+    }
+  },
+  "image": {
+    "width": 1920,
+    "height": 1080
+  },
+  "timing": {
+    "preprocess_ms": 3.1,
+    "inference_ms": 18.9,
+    "postprocess_ms": 2.8,
+    "total_ms": 24.8
+  },
+  "detections": [
+    {
+      "id": "det-roi-001",
+      "class_id": 0,
+      "class_name": "part",
+      "score": 0.96,
+      "bbox_xyxy": [760.0, 210.0, 1180.0, 870.0],
+      "attributes": {
+        "roi_bbox_xyxy": [810.0, 540.0, 1130.0, 760.0],
+        "roi_mode": "relative_box"
+      }
+    }
+  ],
+  "classifications": [
+    {
+      "class_id": 1,
+      "class_name": "ng",
+      "score": 0.93,
+      "rank": 1,
+      "detection_id": "det-roi-001"
+    },
+    {
+      "class_id": 0,
+      "class_name": "ok",
+      "score": 0.07,
+      "rank": 2,
+      "detection_id": "det-roi-001"
+    }
+  ],
+  "final_decision": {
+    "code": "NG",
+    "label": "ng",
+    "ok": false,
+    "reason": "ROI 分类示例结果为 ng"
+  },
+  "debug": {
+    "roi_mode": "relative_box",
+    "detector_candidates": 1
+  }
+}

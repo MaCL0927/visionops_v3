@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://visionops.local/schemas/runtime_status.schema.json",
+  "title": "C++ Runtime 状态快照",
+  "allOf": [
+    { "$ref": "common.schema.json#/$defs/commonMessage" },
+    {
+      "type": "object",
+      "required": [
+        "running",
+        "mode",
+        "health",
+        "uptime_s",
+        "loaded_model",
+        "camera_connected",
+        "fps",
+        "latency_ms",
+        "counters",
+        "last_result_id",
+        "last_frame_id",
+        "last_error"
+      ],
+      "properties": {
+        "message_type": { "const": "runtime_status" },
+        "running": { "type": "boolean" },
+        "mode": { "enum": ["idle", "preview", "detect", "error", "maintenance"] },
+        "health": { "enum": ["ok", "degraded", "error"] },
+        "uptime_s": { "type": "number", "minimum": 0 },
+        "loaded_model": {
+          "type": ["object", "null"],
+          "properties": {
+            "model_id": { "type": "string" },
+            "model_name": { "type": "string" },
+            "model_version": { "type": "string" },
+            "task_type": { "type": "string" },
+            "backend": { "enum": ["rknn", "onnx", "mock"] }
+          },
+          "additionalProperties": false
+        },
+        "camera_connected": { "type": "boolean" },
+        "fps": {
+          "type": "object",
+          "required": ["camera_fps", "inference_fps", "snapshot_fps"],
+          "properties": {
+            "camera_fps": { "type": "number", "minimum": 0 },
+            "inference_fps": { "type": "number", "minimum": 0 },
+            "snapshot_fps": { "type": "number", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "latency_ms": {
+          "type": "object",
+          "required": ["latest", "average", "p95"],
+          "properties": {
+            "latest": { "type": "number", "minimum": 0 },
+            "average": { "type": "number", "minimum": 0 },
+            "p95": { "type": "number", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "counters": {
+          "type": "object",
+          "required": ["frames_in", "frames_inferred", "frames_dropped", "errors"],
+          "properties": {
+            "frames_in": { "type": "integer", "minimum": 0 },
+            "frames_inferred": { "type": "integer", "minimum": 0 },
+            "frames_dropped": { "type": "integer", "minimum": 0 },
+            "errors": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "last_result_id": { "type": ["string", "null"] },
+        "last_frame_id": { "type": ["string", "null"] },
+        "last_error": { "$ref": "common.schema.json#/$defs/error" },
+        "resources": {
+          "type": "object",
+          "properties": {
+            "cpu_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+            "memory_mb": { "type": "number", "minimum": 0 },
+            "npu_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+            "temperature_c": { "type": "number" }
+          },
+          "additionalProperties": true
+        }
+      }
+    }
+  ],
+  "unevaluatedProperties": false
+}

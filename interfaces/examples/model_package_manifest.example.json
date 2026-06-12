@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0",
+  "message_type": "model_package_manifest",
+  "device_id": "target-platform-template",
+  "component": "model_packager",
+  "timestamp_ms": 1760000000600,
+  "trace_id": "trace-package-0001",
+  "source": "training:export",
+  "status": "ok",
+  "package_id": "package-example-detector-1.0.0-rk3588",
+  "model_name": "example-detector",
+  "model_version": "1.0.0",
+  "task_type": "detection",
+  "created_at": "2025-10-09T08:53:20Z",
+  "target_platform": "rk3588",
+  "files": {
+    "rknn": "model.rknn",
+    "yaml": "model.yaml",
+    "labels": "labels.json",
+    "metadata": "metadata.json"
+  },
+  "checksums": {
+    "model.rknn": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "model.yaml": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "input": {
+    "width": 640,
+    "height": 640,
+    "color_space": "RGB",
+    "layout": "NHWC",
+    "dtype": "uint8"
+  },
+  "output": {
+    "schema": "inference_result/v1",
+    "class_count": 1
+  },
+  "postprocess": {
+    "type": "yolo_detection",
+    "confidence_threshold": 0.25,
+    "nms_threshold": 0.45
+  },
+  "compatibility": {
+    "runtime_api": ">=1.0,<2.0",
+    "rknn_toolkit": "example-version",
+    "target_platforms": [
+      "rk3588"
+    ]
+  },
+  "notes": "仅用于接口演示，不对应真实模型文件。"
+}

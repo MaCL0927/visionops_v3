@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://visionops.local/schemas/camera_frame.schema.json",
+  "title": "Camera Bridge 帧元信息",
+  "description": "描述 Camera Bridge 输出的帧元信息，不包含图片字节、Base64 或其他图像内容。",
+  "allOf": [
+    { "$ref": "common.schema.json#/$defs/commonMessage" },
+    {
+      "type": "object",
+      "required": [
+        "frame_id",
+        "camera_id",
+        "width",
+        "height",
+        "pixel_format",
+        "transport",
+        "sequence",
+        "dropped_count"
+      ],
+      "properties": {
+        "message_type": { "const": "camera_frame" },
+        "frame_id": { "$ref": "common.schema.json#/$defs/frameId" },
+        "camera_id": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "pixel_format": {
+          "type": "string",
+          "enum": ["BGR888", "RGB888", "NV12", "GRAY8"]
+        },
+        "transport": {
+          "type": "string",
+          "enum": ["rtsp", "sdk", "v4l2", "shared_memory", "unix_socket"]
+        },
+        "buffer_ref": {
+          "type": "object",
+          "required": ["kind", "reference"],
+          "properties": {
+            "kind": { "enum": ["shared_memory", "dma_buf", "unix_socket", "frame_cache"] },
+            "reference": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "offset": { "type": "integer", "minimum": 0 },
+            "length": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "dropped_count": { "type": "integer", "minimum": 0 },
+        "exposure_us": { "type": "number", "minimum": 0 },
+        "gain": { "type": "number", "minimum": 0 }
+      }
+    }
+  ],
+  "unevaluatedProperties": false
+}

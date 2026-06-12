@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://visionops.local/schemas/model_package_manifest.schema.json",
+  "title": "边缘模型包清单",
+  "allOf": [
+    { "$ref": "common.schema.json#/$defs/commonMessage" },
+    {
+      "type": "object",
+      "required": [
+        "package_id",
+        "model_name",
+        "model_version",
+        "task_type",
+        "created_at",
+        "target_platform",
+        "files",
+        "input",
+        "output",
+        "postprocess",
+        "compatibility",
+        "notes"
+      ],
+      "properties": {
+        "message_type": { "const": "model_package_manifest" },
+        "package_id": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "model_name": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "model_version": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "task_type": { "enum": ["detection", "obb", "segmentation", "roi_classification", "classification"] },
+        "created_at": { "type": "string", "format": "date-time" },
+        "target_platform": { "enum": ["rk3588", "rk3576", "lb3576", "x86_64"] },
+        "files": {
+          "type": "object",
+          "required": ["rknn", "yaml"],
+          "properties": {
+            "rknn": { "type": "string", "minLength": 1 },
+            "yaml": { "type": "string", "minLength": 1 },
+            "labels": { "type": "string", "minLength": 1 },
+            "metadata": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        },
+        "checksums": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          }
+        },
+        "input": { "type": "object", "minProperties": 1 },
+        "output": { "type": "object", "minProperties": 1 },
+        "postprocess": { "type": "object", "minProperties": 1 },
+        "compatibility": { "type": "object", "minProperties": 1 },
+        "notes": { "type": "string" }
+      }
+    }
+  ],
+  "unevaluatedProperties": false
+}

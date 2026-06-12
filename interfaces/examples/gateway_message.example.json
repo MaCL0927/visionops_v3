@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0",
+  "message_type": "gateway_message",
+  "device_id": "example-edge-001",
+  "component": "modbus_adapter",
+  "timestamp_ms": 1760000000700,
+  "trace_id": "trace-example-0004",
+  "frame_id": "frame-example-000004",
+  "source": "inference_result:result-roi-000004",
+  "status": "ok",
+  "message_id": "gateway-message-000004",
+  "result_id": "result-roi-000004",
+  "app_id": "example-inspection-app",
+  "protocol": "mock",
+  "sequence": 4,
+  "heartbeat": false,
+  "final_code": 2,
+  "final_label": "ng",
+  "ok": false,
+  "reason": "ROI 分类示例结果为 ng",
+  "registers": [
+    {
+      "address": 100,
+      "name": "heartbeat",
+      "type": "uint16",
+      "value": 1,
+      "scale": 1.0,
+      "byte_order": "big"
+    },
+    {
+      "address": 110,
+      "name": "final_code",
+      "type": "uint16",
+      "value": 2,
+      "scale": 1.0,
+      "byte_order": "big"
+    }
+  ],
+  "payload": {
+    "label": "ng",
+    "confidence": 0.93
+  },
+  "ack": {
+    "required": true,
+    "timeout_ms": 1000,
+    "correlation_id": "gateway-message-000004"
+  }
+}

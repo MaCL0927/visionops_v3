@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://visionops.local/schemas/gateway_message.schema.json",
+  "title": "Gateway/Modbus 标准中间消息",
+  "allOf": [
+    { "$ref": "common.schema.json#/$defs/commonMessage" },
+    {
+      "type": "object",
+      "required": [
+        "frame_id",
+        "message_id",
+        "result_id",
+        "app_id",
+        "protocol",
+        "sequence",
+        "heartbeat",
+        "final_code",
+        "final_label",
+        "ok",
+        "reason"
+      ],
+      "properties": {
+        "message_type": { "const": "gateway_message" },
+        "frame_id": { "$ref": "common.schema.json#/$defs/frameId" },
+        "message_id": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "result_id": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "app_id": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+        "protocol": { "enum": ["modbus_tcp", "modbus_rtu", "tcp_push", "http_push", "mock"] },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "heartbeat": { "type": "boolean" },
+        "final_code": { "type": ["string", "integer"] },
+        "final_label": { "type": "string" },
+        "ok": { "type": "boolean" },
+        "reason": { "type": "string" },
+        "registers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["address", "name", "type", "value", "scale", "byte_order"],
+            "properties": {
+              "address": { "type": "integer", "minimum": 0, "maximum": 65535 },
+              "name": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+              "type": { "enum": ["coil", "uint16", "int16", "uint32", "int32", "float32", "string"] },
+              "value": { "type": ["number", "integer", "string", "boolean"] },
+              "scale": { "type": "number" },
+              "byte_order": { "enum": ["big", "little", "big_word_swap", "little_word_swap"] }
+            },
+            "additionalProperties": false
+          }
+        },
+        "payload": { "type": "object" },
+        "ack": {
+          "type": "object",
+          "properties": {
+            "required": { "type": "boolean" },
+            "timeout_ms": { "type": "integer", "minimum": 1 },
+            "correlation_id": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "unevaluatedProperties": false
+}

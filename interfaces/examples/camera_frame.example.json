@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0",
+  "message_type": "camera_frame",
+  "device_id": "example-edge-001",
+  "component": "camera_bridge",
+  "timestamp_ms": 1760000000123,
+  "trace_id": "trace-example-0001",
+  "frame_id": "frame-example-000001",
+  "source": "camera:example-camera-01",
+  "status": "ok",
+  "camera_id": "example-camera-01",
+  "width": 1920,
+  "height": 1080,
+  "pixel_format": "NV12",
+  "transport": "shared_memory",
+  "buffer_ref": {
+    "kind": "shared_memory",
+    "reference": "visionops-frame-slot-0007",
+    "offset": 0,
+    "length": 3110400
+  },
+  "sequence": 1,
+  "dropped_count": 0,
+  "exposure_us": 8000,
+  "gain": 1.25
+}

@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://visionops.local/schemas/common.schema.json",
+  "title": "VisionOps v3 跨模块公共定义",
+  "description": "定义跨模块消息头、状态、错误和常用基础类型。时间戳统一使用 Unix epoch 毫秒。",
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "schemaVersion": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*\\.[0-9]+$"
+    },
+    "timestampMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "degraded", "error"]
+    },
+    "error": {
+      "type": ["object", "null"],
+      "required": ["code", "message", "detail", "recoverable"],
+      "properties": {
+        "code": { "$ref": "#/$defs/nonEmptyString" },
+        "message": { "$ref": "#/$defs/nonEmptyString" },
+        "detail": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "object" },
+            { "type": "array" },
+            { "type": "null" }
+          ]
+        },
+        "recoverable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "frameId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "commonMessage": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "message_type",
+        "device_id",
+        "component",
+        "timestamp_ms",
+        "trace_id",
+        "source",
+        "status"
+      ],
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/schemaVersion" },
+        "message_type": { "$ref": "#/$defs/nonEmptyString" },
+        "device_id": { "$ref": "#/$defs/nonEmptyString" },
+        "component": { "$ref": "#/$defs/nonEmptyString" },
+        "timestamp_ms": { "$ref": "#/$defs/timestampMs" },
+        "trace_id": { "$ref": "#/$defs/nonEmptyString" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "source": { "$ref": "#/$defs/nonEmptyString" },
+        "status": { "$ref": "#/$defs/status" },
+        "error": { "$ref": "#/$defs/error" }
+      }
+    },
+    "size2d": {
+      "type": "object",
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "point2d": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "number" },
+        { "type": "number" }
+      ],
+      "items": false
+    },
+    "bboxXyxy": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "number", "minimum": 0 },
+        { "type": "number", "minimum": 0 },
+        { "type": "number", "minimum": 0 },
+        { "type": "number", "minimum": 0 }
+      ],
+      "items": false
+    }
+  }
+}
