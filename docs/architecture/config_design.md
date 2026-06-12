@@ -137,3 +137,46 @@ configs/runtime/generated/effective-config.yaml
 - **设备重启**：驱动、网络底层或设备节点相关变化，必须显式提示。
 
 每个配置项应标注生效方式，Collector Web 不得假设所有配置都能热更新。
+
+## 9. M1 配置工具
+
+M1 提供统一校验与 env 渲染骨架，工具只依赖 Python 标准库和 PyYAML。JSON Schema 位于：
+
+```text
+interfaces/schemas/config.schema.json
+```
+
+示例配置使用 `*.example.yaml` 命名。edge 配置允许按从低到高的优先级重复传入，首个文件必须是完整的 `kind: edge`，后续平台或设备差异文件使用 `kind: edge_overlay`。task 使用单个配置，app 可以重复传入多个独立应用配置。
+
+校验示例：
+
+```bash
+python tools/config/validate_config.py \
+  --edge configs/edge/base.example.yaml \
+  --edge configs/edge/rk3588.example.yaml \
+  --task configs/task/detection.example.yaml \
+  --app configs/app/collector.example.yaml \
+  --app configs/app/gateway_modbus.example.yaml
+```
+
+渲染到临时位置的示例：
+
+```bash
+python tools/config/render_runtime_env.py \
+  --edge configs/edge/base.example.yaml \
+  --edge configs/edge/rk3588.example.yaml \
+  --task configs/task/detection.example.yaml \
+  --app configs/app/collector.example.yaml \
+  --app configs/app/gateway_modbus.example.yaml \
+  --output /tmp/visionops-runtime.env
+```
+
+不传 `--output` 时只输出到标准输出。生成内容包含配置版本、源文件绝对路径、全部源文件的 SHA-256 摘要、UTC 生成时间和渲染器版本。真实运行时文件仍由后续部署工具写入受控目录，不进入 Git。
+
+校验器当前执行以下跨文件规则：
+
+- edge、task、app 的必要字段和配置版本。
+- `rk3588`、`rk3576` 平台范围以及任务与设备的平台兼容性。
+- 本地 `listen_port`、`metrics_port` 的范围和冲突。
+- `_path`、`_dir`、`_root` 路径字段的绝对路径与主目录依赖检查。
+- `password`、`token`、`secret`、`private_key` 等敏感字段只能使用 `env:NAME` 或 `${NAME}` 引用。

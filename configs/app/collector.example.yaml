@@ -1,0 +1,22 @@
+schema_version: "1.0"
+kind: app
+
+app:
+  name: collector
+  version: "1.0"
+
+collector:
+  preview:
+    enabled: true
+    max_fps: 5
+    jpeg_quality: 85
+  collection:
+    data_root: /var/lib/visionops/collections
+    max_batch_images: 1000
+  diagnostics:
+    enabled: true
+    include_recent_logs: true
+    include_raw_images: false
+  runtime_control:
+    allow_model_switch: true
+    allow_service_restart: true

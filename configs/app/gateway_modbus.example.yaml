@@ -1,0 +1,25 @@
+schema_version: "1.0"
+kind: app
+
+app:
+  name: gateway_modbus
+  version: "1.0"
+
+gateway:
+  enabled: true
+  endpoint_ref: env:VISIONOPS_GATEWAY_ENDPOINT
+  auth_ref: env:VISIONOPS_GATEWAY_AUTH
+  timeout_ms: 1500
+  retry_limit: 3
+  queue_capacity: 100
+
+modbus:
+  enabled: true
+  mode: tcp_client
+  host_ref: env:VISIONOPS_MODBUS_HOST
+  remote_port: 502
+  unit_id: 1
+  byte_order: big
+  heartbeat_register: 100
+  result_register: 110
+  fail_safe_value: 0

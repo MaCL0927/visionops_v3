@@ -1,0 +1,33 @@
+schema_version: "1.0"
+kind: task
+
+task:
+  name: obb-example
+  type: obb
+  version: "1.0"
+
+model:
+  manifest_ref: visionops://models/obb/example
+  compatible_platforms:
+    - rk3588
+    - rk3576
+
+input:
+  width: 640
+  height: 640
+  color_space: RGB
+  layout: NHWC
+
+classes:
+  version: "1.0"
+  names:
+    - rotated_object
+
+postprocess:
+  type: yolo_obb
+  confidence_threshold: 0.25
+  nms_threshold: 0.45
+  max_detections: 100
+
+output:
+  schema: inference_result/v1

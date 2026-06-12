@@ -1,0 +1,48 @@
+schema_version: "1.0"
+kind: edge
+
+metadata:
+  name: edge-base-example
+  environment: example
+
+device:
+  device_id: example-edge-001
+  platform: rk3588
+  model: generic-rockchip-edge
+
+camera:
+  adapter: rtsp
+  source_ref: env:VISIONOPS_CAMERA_SOURCE
+  pixel_format: NV12
+  width: 1920
+  height: 1080
+  fps: 15
+
+runtime:
+  engine: cpp_rknn
+  npu_core: auto
+  worker_threads: 2
+  max_queue_size: 4
+
+services:
+  camera_bridge:
+    listen_port: 8081
+  rknn_runtime:
+    listen_port: 8082
+    metrics_port: 9091
+  collector_web:
+    listen_port: 8090
+  gateway_adapter:
+    listen_port: 8092
+  modbus_adapter:
+    listen_port: 8093
+
+paths:
+  install_root: /opt/visionops
+  state_dir: /var/lib/visionops
+  log_dir: /var/log/visionops
+  model_dir: /opt/visionops/models
+
+time_sync:
+  enabled: true
+  server_ref: env:VISIONOPS_NTP_SERVER

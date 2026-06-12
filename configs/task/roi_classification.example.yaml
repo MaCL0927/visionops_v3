@@ -1,0 +1,40 @@
+schema_version: "1.0"
+kind: task
+
+task:
+  name: roi-classification-example
+  type: roi_classification
+  version: "1.0"
+
+model:
+  manifest_ref: visionops://models/roi-classification/example
+  compatible_platforms:
+    - rk3588
+    - rk3576
+  stages:
+    detector_ref: visionops://models/detection/example
+    classifier_ref: visionops://models/classification/example
+
+input:
+  width: 640
+  height: 640
+  color_space: RGB
+  layout: NHWC
+
+classes:
+  version: "1.0"
+  names:
+    - ok
+    - ng
+
+postprocess:
+  type: roi_classification
+  confidence_threshold: 0.25
+  nms_threshold: 0.45
+  topk: 2
+  roi:
+    mode: full_box
+    padding_ratio: 0.05
+
+output:
+  schema: inference_result/v1

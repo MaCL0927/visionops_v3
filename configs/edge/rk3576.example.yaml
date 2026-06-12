@@ -1,0 +1,17 @@
+schema_version: "1.0"
+kind: edge_overlay
+
+metadata:
+  name: rk3576-platform-example
+
+device:
+  platform: rk3576
+  model: generic-lb3576
+
+camera:
+  pixel_format: NV12
+
+runtime:
+  npu_core: auto
+  worker_threads: 2
+  max_queue_size: 4

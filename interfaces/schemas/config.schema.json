@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://visionops.local/schemas/config.schema.json",
+  "title": "VisionOps v3 统一配置契约",
+  "description": "描述 edge、edge_overlay、task 和 app 四类源配置。跨文件端口冲突、路径安全与敏感字段检查由配置工具执行。",
+  "oneOf": [
+    { "$ref": "#/$defs/edge" },
+    { "$ref": "#/$defs/edgeOverlay" },
+    { "$ref": "#/$defs/task" },
+    { "$ref": "#/$defs/app" }
+  ],
+  "$defs": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "platform": {
+      "type": "string",
+      "enum": ["rk3588", "rk3576"]
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "environment": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "device": {
+      "type": "object",
+      "required": ["device_id", "platform", "model"],
+      "properties": {
+        "device_id": { "type": "string", "minLength": 1 },
+        "platform": { "$ref": "#/$defs/platform" },
+        "model": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "camera": {
+      "type": "object",
+      "required": ["adapter", "source_ref", "pixel_format", "width", "height", "fps"],
+      "properties": {
+        "adapter": { "type": "string", "minLength": 1 },
+        "source_ref": { "type": "string", "pattern": "^(env:[A-Z][A-Z0-9_]*|\\$\\{[A-Z][A-Z0-9_]*\\})$" },
+        "pixel_format": { "type": "string", "enum": ["NV12", "RGB", "BGR"] },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "fps": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": true
+    },
+    "runtime": {
+      "type": "object",
+      "required": ["engine", "npu_core", "worker_threads", "max_queue_size"],
+      "properties": {
+        "engine": { "type": "string", "const": "cpp_rknn" },
+        "npu_core": { "type": ["string", "integer"] },
+        "worker_threads": { "type": "integer", "minimum": 1 },
+        "max_queue_size": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": true
+    },
+    "servicePorts": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "listen_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "metrics_port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+        },
+        "additionalProperties": true
+      }
+    },
+    "paths": {
+      "type": "object",
+      "required": ["install_root", "state_dir", "log_dir", "model_dir"],
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "edge": {
+      "type": "object",
+      "required": ["schema_version", "kind", "metadata", "device", "camera", "runtime", "services", "paths"],
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/schemaVersion" },
+        "kind": { "const": "edge" },
+        "metadata": { "$ref": "#/$defs/metadata" },
+        "device": { "$ref": "#/$defs/device" },
+        "camera": { "$ref": "#/$defs/camera" },
+        "runtime": { "$ref": "#/$defs/runtime" },
+        "services": { "$ref": "#/$defs/servicePorts" },
+        "paths": { "$ref": "#/$defs/paths" },
+        "time_sync": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "edgeOverlay": {
+      "type": "object",
+      "required": ["schema_version", "kind"],
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/schemaVersion" },
+        "kind": { "const": "edge_overlay" },
+        "metadata": { "type": "object" },
+        "device": { "type": "object" },
+        "camera": { "type": "object" },
+        "runtime": { "type": "object" },
+        "services": { "type": "object" },
+        "paths": { "type": "object" },
+        "time_sync": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "task": {
+      "type": "object",
+      "required": ["schema_version", "kind", "task", "model", "input", "classes", "postprocess", "output"],
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/schemaVersion" },
+        "kind": { "const": "task" },
+        "task": {
+          "type": "object",
+          "required": ["name", "type", "version"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "type": { "enum": ["detection", "obb", "roi_classification"] },
+            "version": { "type": "string", "minLength": 1 }
+          }
+        },
+        "model": {
+          "type": "object",
+          "required": ["manifest_ref", "compatible_platforms"],
+          "properties": {
+            "manifest_ref": { "type": "string", "minLength": 1 },
+            "compatible_platforms": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/platform" }
+            },
+            "stages": { "type": "object" }
+          }
+        },
+        "input": {
+          "type": "object",
+          "required": ["width", "height", "color_space", "layout"]
+        },
+        "classes": {
+          "type": "object",
+          "required": ["version", "names"]
+        },
+        "postprocess": {
+          "type": "object",
+          "required": ["type"]
+        },
+        "output": {
+          "type": "object",
+          "required": ["schema"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "app": {
+      "type": "object",
+      "required": ["schema_version", "kind", "app"],
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/schemaVersion" },
+        "kind": { "const": "app" },
+        "app": {
+          "type": "object",
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "version": { "type": "string", "minLength": 1 }
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}
