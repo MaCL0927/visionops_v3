@@ -39,6 +39,12 @@ class RuntimeApp {
       const RknnOutput& inference) const;
   std::string loaded_model_json() const;
   bool runtime_degraded() const;
+  std::string inference_error_json(
+      const InferenceIdentity& identity,
+      const MockFrame& frame,
+      const std::string& code,
+      const std::string& message,
+      const std::string& debug_key = "") const;
 
   AppConfig config_;
   LoadedModelInfo model_info_;

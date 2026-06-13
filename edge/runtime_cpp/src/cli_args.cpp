@@ -43,6 +43,16 @@ CliArgs parse_cli_args(int argc, char* argv[]) {
       args.config.model_config = require_value(argc, argv, index);
     } else if (argument == "--model-dir") {
       args.config.model_dir = require_value(argc, argv, index);
+    } else if (argument == "--test-image") {
+      args.config.test_image = require_value(argc, argv, index);
+    } else if (argument == "--save-debug-output") {
+      args.config.save_debug_output = require_value(argc, argv, index);
+    } else if (argument == "--dump-rknn-io") {
+      args.config.dump_rknn_io = true;
+    } else if (argument == "--score-threshold") {
+      args.config.score_threshold_override = std::stod(require_value(argc, argv, index));
+    } else if (argument == "--nms-threshold") {
+      args.config.nms_threshold_override = std::stod(require_value(argc, argv, index));
     } else {
       throw std::invalid_argument("未知参数: " + argument);
     }
@@ -67,6 +77,11 @@ std::string cli_help_text(const std::string& program) {
          "  --model-manifest <路径>  模型包 manifest JSON\n"
          "  --model-config <路径>    模型 YAML 配置\n"
          "  --model-dir <路径>       模型包目录及相对路径基准\n"
+         "  --test-image <路径>      本地 P6 PPM 测试图片（无 OpenCV 默认构建）\n"
+         "  --save-debug-output <目录> 预留轻量调试输出目录\n"
+         "  --dump-rknn-io           启动时打印 RKNN 输入输出属性\n"
+         "  --score-threshold <值>   覆盖模型置信度阈值\n"
+         "  --nms-threshold <值>     覆盖模型 NMS 阈值\n"
          "  --help                    显示帮助\n";
 }
 

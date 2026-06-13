@@ -1,0 +1,54 @@
+"""使用小型 fake tensor 验证 C++ YOLO 后处理契约。"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from tools.interfaces.validate_interface_examples import validate_example
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(scope="session")
+def postprocess_fixture_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    build_dir = tmp_path_factory.mktemp("postprocess-fixture-build")
+    subprocess.run(["cmake", "-S", str(PROJECT_ROOT), "-B", str(build_dir)], check=True)
+    subprocess.run(
+        ["cmake", "--build", str(build_dir), "-j4", "--target", "visionops_postprocess_fixture"],
+        check=True,
+    )
+    return build_dir / "edge/runtime_cpp/visionops_postprocess_fixture"
+
+
+@pytest.mark.parametrize(
+    ("fixture_task", "expected_task"),
+    [
+        ("detection", "detection"),
+        ("detection_split", "detection"),
+        ("obb", "obb"),
+        ("segmentation", "segmentation"),
+    ],
+)
+def test_postprocess_fixture_matches_inference_contract(
+    postprocess_fixture_binary: Path, fixture_task: str, expected_task: str
+) -> None:
+    completed = subprocess.run(
+        [str(postprocess_fixture_binary), fixture_task],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+    validate_example(result, f"{fixture_task} postprocess fixture")
+    assert result["task_type"] == expected_task
+    assert result["timing"]["total_ms"] == 3
+    assert result["detections"]
+    if fixture_task == "obb":
+        assert len(result["detections"][0]["obb"]["points"]) == 4
+    if fixture_task == "segmentation":
+        assert result["detections"][0]["mask"]["encoding"] == "polygon"

@@ -15,6 +15,11 @@ struct AppConfig {
   std::string model_manifest;
   std::string model_config;
   std::string model_dir;
+  std::string test_image;
+  std::string save_debug_output;
+  bool dump_rknn_io{false};
+  double score_threshold_override{-1.0};
+  double nms_threshold_override{-1.0};
 };
 
 bool is_supported_mock_task_type(const std::string& task_type);

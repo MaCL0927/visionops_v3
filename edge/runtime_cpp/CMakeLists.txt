@@ -6,6 +6,7 @@ set(VISIONOPS_RUNTIME_SOURCES
   src/json_utils.cpp
   src/model_config.cpp
   src/model_package.cpp
+  src/postprocess.cpp
   src/postprocess_detect.cpp
   src/postprocess_obb.cpp
   src/postprocess_seg.cpp
@@ -31,6 +32,10 @@ if(VISIONOPS_ENABLE_RKNN)
   list(APPEND VISIONOPS_RUNTIME_SOURCES src/rknn_runner_real.cpp)
 endif()
 
+if(VISIONOPS_ENABLE_OPENCV)
+  find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc)
+endif()
+
 add_executable(visionops_runtime_mock ${VISIONOPS_RUNTIME_SOURCES})
 
 target_include_directories(visionops_runtime_mock
@@ -44,6 +49,12 @@ if(VISIONOPS_ENABLE_RKNN)
   target_link_libraries(visionops_runtime_mock PRIVATE ${VISIONOPS_RKNN_LIBRARY})
 endif()
 
+if(VISIONOPS_ENABLE_OPENCV)
+  target_compile_definitions(visionops_runtime_mock PRIVATE VISIONOPS_HAS_OPENCV=1)
+  target_include_directories(visionops_runtime_mock PRIVATE ${OpenCV_INCLUDE_DIRS})
+  target_link_libraries(visionops_runtime_mock PRIVATE ${OpenCV_LIBS})
+endif()
+
 target_compile_options(visionops_runtime_mock
   PRIVATE
     -Wall
@@ -53,3 +64,14 @@ target_compile_options(visionops_runtime_mock
 
 find_package(Threads REQUIRED)
 target_link_libraries(visionops_runtime_mock PRIVATE Threads::Threads)
+
+add_executable(visionops_postprocess_fixture
+  tests/postprocess_fixture.cpp
+  src/json_utils.cpp
+  src/postprocess.cpp
+  src/postprocess_detect.cpp
+  src/postprocess_obb.cpp
+  src/postprocess_seg.cpp
+)
+target_include_directories(visionops_postprocess_fixture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_options(visionops_postprocess_fixture PRIVATE -Wall -Wextra -Wpedantic)

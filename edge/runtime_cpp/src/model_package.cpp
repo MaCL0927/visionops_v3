@@ -214,21 +214,21 @@ void append_error(std::string& target, const std::string& error) {
   target += error;
 }
 
-int count_labels(const fs::path& path) {
+std::vector<std::string> read_labels(const fs::path& path) {
   std::ifstream input(path);
   if (!input) {
-    return 0;
+    return {};
   }
-  int count = 0;
+  std::vector<std::string> labels;
   std::string line;
   while (std::getline(input, line)) {
     if (std::any_of(line.begin(), line.end(), [](unsigned char ch) {
           return std::isspace(ch) == 0;
         })) {
-      ++count;
+      labels.push_back(line);
     }
   }
-  return count;
+  return labels;
 }
 
 }  // namespace
@@ -297,16 +297,21 @@ LoadedModelInfo load_model_package(const AppConfig& app_config) {
       if (yaml.score_threshold >= 0.0) info.score_threshold = yaml.score_threshold;
       if (yaml.nms_threshold >= 0.0) info.nms_threshold = yaml.nms_threshold;
       info.labels_count = static_cast<int>(yaml.class_names.size());
+      info.class_names = yaml.class_names;
     } else {
       append_error(info.model_load_error, error);
     }
   }
 
   if (!info.labels_path.empty()) {
-    const int labels_file_count = count_labels(info.labels_path);
-    if (labels_file_count > 0) {
-      info.labels_count = labels_file_count;
+    const auto labels = read_labels(info.labels_path);
+    if (!labels.empty()) {
+      info.class_names = labels;
+      info.labels_count = static_cast<int>(labels.size());
     }
+  }
+  if (info.class_names.empty()) {
+    info.class_names.push_back("object");
   }
   if (!is_supported_mock_task_type(info.task_type)) {
     append_error(info.model_load_error, "不支持的模型 task_type: " + info.task_type);

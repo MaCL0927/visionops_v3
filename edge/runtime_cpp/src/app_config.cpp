@@ -24,6 +24,9 @@ void validate_app_config(const AppConfig& config) {
   if (config.backend != "mock" && config.backend != "rknn") {
     throw std::invalid_argument("backend 仅支持 mock 或 rknn");
   }
+  if (config.score_threshold_override > 1.0 || config.nms_threshold_override > 1.0) {
+    throw std::invalid_argument("score-threshold 和 nms-threshold 必须位于 0 到 1");
+  }
 }
 
 }  // namespace visionops::runtime

@@ -45,6 +45,8 @@ class RknnRunnerMock final : public RknnRunner {
   }
 
   std::string last_error() const override { return {}; }
+  std::uint32_t input_count() const override { return 1; }
+  std::uint32_t output_count() const override { return 1; }
 
  private:
   std::string task_type_;
@@ -77,6 +79,8 @@ class RknnRunnerUnavailable final : public RknnRunner {
   }
 
   std::string last_error() const override { return error_; }
+  std::uint32_t input_count() const override { return 0; }
+  std::uint32_t output_count() const override { return 0; }
 
  private:
   std::string task_type_;

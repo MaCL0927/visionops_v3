@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(VISIONOPS_BUILD_RUNTIME_MOCK "构建 C++ Runtime Mock HTTP 服务" ON)
 option(VISIONOPS_ENABLE_RKNN "启用真实 RKNN Runtime Runner" OFF)
+option(VISIONOPS_ENABLE_OPENCV "启用 OpenCV 测试图片解码（M9.3 默认未使用）" OFF)
 set(VISIONOPS_RKNN_INCLUDE_DIR "" CACHE PATH "RKNN Runtime 头文件目录")
 set(VISIONOPS_RKNN_LIBRARY "" CACHE FILEPATH "RKNN Runtime 动态或静态库路径")
 

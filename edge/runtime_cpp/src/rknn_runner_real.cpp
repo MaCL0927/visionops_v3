@@ -6,6 +6,8 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
+#include <iostream>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,6 +26,7 @@ class RknnRunnerReal final : public RknnRunner {
     task_type_ = config.task_type;
     input_width_ = config.input_width;
     input_height_ = config.input_height;
+    dump_io_ = config.dump_io;
 
     std::ifstream input(path, std::ios::binary | std::ios::ate);
     if (!input) {
@@ -66,7 +69,31 @@ class RknnRunnerReal final : public RknnRunner {
     }
     input_count_ = io_count.n_input;
     output_count_ = io_count.n_output;
+    input_infos_.clear();
+    input_infos_.reserve(input_count_);
+    for (std::uint32_t index = 0; index < input_count_; ++index) {
+      rknn_tensor_attr attribute{};
+      attribute.index = index;
+      const int attribute_result = rknn_query(
+          context_, RKNN_QUERY_INPUT_ATTR, &attribute, sizeof(attribute));
+      if (attribute_result < 0) {
+        last_error_ = "RKNN 输入属性查询失败，索引 " + std::to_string(index) +
+            "，错误码 " + std::to_string(attribute_result);
+        release();
+        return false;
+      }
+      TensorInfo info;
+      info.name = attribute.name;
+      info.data_type = std::to_string(static_cast<int>(attribute.type));
+      info.layout = std::to_string(static_cast<int>(attribute.fmt));
+      info.byte_size = attribute.size;
+      for (std::uint32_t dimension = 0; dimension < attribute.n_dims; ++dimension) {
+        info.dimensions.push_back(attribute.dims[dimension]);
+      }
+      input_infos_.push_back(std::move(info));
+    }
     output_infos_.clear();
+    input_infos_.clear();
     output_infos_.reserve(output_count_);
     for (std::uint32_t index = 0; index < output_count_; ++index) {
       rknn_tensor_attr attribute{};
@@ -89,6 +116,14 @@ class RknnRunnerReal final : public RknnRunner {
       }
       output_infos_.push_back(std::move(info));
     }
+    if (dump_io_) {
+      std::cout << "RKNN IO: inputs=" << input_count_ << " outputs=" << output_count_ << '\n';
+      for (std::size_t index = 0; index < output_infos_.size(); ++index) {
+        std::cout << "  output[" << index << "] " << output_infos_[index].name << " dims=";
+        for (const auto dimension : output_infos_[index].dimensions) std::cout << dimension << 'x';
+        std::cout << " bytes=" << output_infos_[index].byte_size << '\n';
+      }
+    }
     loaded_ = true;
     last_error_.clear();
     return true;
@@ -98,6 +133,7 @@ class RknnRunnerReal final : public RknnRunner {
   std::string backend_name() const override { return "rknn"; }
 
   RknnOutput infer(const RknnInput& input) override {
+    std::lock_guard<std::mutex> lock(mutex_);
     RknnOutput result;
     result.runner_called = true;
     result.task_type = task_type_;
@@ -167,6 +203,8 @@ class RknnRunnerReal final : public RknnRunner {
   }
 
   std::string last_error() const override { return last_error_; }
+  std::uint32_t input_count() const override { return input_count_; }
+  std::uint32_t output_count() const override { return output_count_; }
 
  private:
   void release() {
@@ -186,11 +224,14 @@ class RknnRunnerReal final : public RknnRunner {
   int input_width_{640};
   int input_height_{640};
   bool loaded_{false};
+  bool dump_io_{false};
   rknn_context context_{0};
   std::uint32_t input_count_{0};
   std::uint32_t output_count_{0};
   std::vector<std::uint8_t> model_data_;
   std::vector<TensorInfo> output_infos_;
+  std::vector<TensorInfo> input_infos_;
+  std::mutex mutex_;
 };
 
 }  // namespace

@@ -82,6 +82,18 @@ void RuntimeState::complete_inference(
   health_ = "ok";
 }
 
+void RuntimeState::complete_inference_error(
+    const InferenceIdentity& identity,
+    std::string error_json) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  ++counters_.errors;
+  last_frame_id_ = identity.frame_id;
+  last_result_id_ = identity.result_id;
+  latest_result_json_ = std::move(error_json);
+  health_ = "degraded";
+  mode_ = "error";
+}
+
 void RuntimeState::record_error() {
   std::lock_guard<std::mutex> lock(mutex_);
   ++counters_.errors;

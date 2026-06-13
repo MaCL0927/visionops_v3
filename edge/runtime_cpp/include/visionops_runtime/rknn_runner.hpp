@@ -43,6 +43,7 @@ struct RunnerModelConfig {
   std::string task_type{"detection"};
   int input_width{640};
   int input_height{640};
+  bool dump_io{false};
 };
 
 class RknnRunner {
@@ -54,6 +55,8 @@ class RknnRunner {
   virtual std::string backend_name() const = 0;
   virtual RknnOutput infer(const RknnInput& input) = 0;
   virtual std::string last_error() const = 0;
+  virtual std::uint32_t input_count() const = 0;
+  virtual std::uint32_t output_count() const = 0;
 };
 
 std::unique_ptr<RknnRunner> create_rknn_runner(

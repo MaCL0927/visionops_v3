@@ -134,8 +134,8 @@ def test_rknn_backend_degrades_cleanly_when_not_compiled(
 
         result = _request_json(f"{base_url}/api/runtime/infer_once", method="POST")
         assert result["message_type"] == "inference_result"
-        assert result["detections"]
+        assert result["status"] == "error"
+        assert result["error"]["code"] == "RKNN_MODEL_NOT_LOADED"
         assert result["debug"]["rknn_runner_called"] is False
-        assert result["debug"]["runner_success"] is False
         assert result["debug"]["raw_outputs_count"] == 0
-        assert "未启用 RKNN" in result["debug"]["runner_error"]
+        assert "未启用 RKNN" in result["error"]["message"]

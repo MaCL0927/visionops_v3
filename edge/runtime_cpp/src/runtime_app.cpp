@@ -1,6 +1,9 @@
 #include "visionops_runtime/runtime_app.hpp"
 
 #include <iomanip>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <utility>
 
@@ -39,11 +42,25 @@ RuntimeApp::RuntimeApp(AppConfig config)
       model_info_(load_model_package(config_)),
       rknn_runner_(create_rknn_runner(config_.backend, model_info_.task_type)) {
   validate_app_config(config_);
+  if (config_.score_threshold_override >= 0.0) {
+    model_info_.score_threshold = config_.score_threshold_override;
+  }
+  if (config_.nms_threshold_override >= 0.0) {
+    model_info_.nms_threshold = config_.nms_threshold_override;
+  }
   model_info_.backend = rknn_runner_->backend_name();
+  if (config_.backend == "rknn" &&
+      (model_info_.rknn_path.empty() || !std::filesystem::exists(model_info_.rknn_path))) {
+    append_error(
+        model_info_.model_load_error,
+        "RKNN 模型文件不存在: " +
+            (model_info_.rknn_path.empty() ? std::string("<未配置>") : model_info_.rknn_path));
+  }
   const RunnerModelConfig runner_config{
       model_info_.task_type,
       model_info_.input_width,
-      model_info_.input_height};
+      model_info_.input_height,
+      config_.dump_rknn_io};
   if (!rknn_runner_->load_model(model_info_.rknn_path, runner_config)) {
     append_error(model_info_.model_load_error, rknn_runner_->last_error());
   }
@@ -115,6 +132,8 @@ std::string RuntimeApp::loaded_model_json() const {
          << ",\"backend\":\"" << json_escape(model_info_.backend) << '"'
          << ",\"runner_loaded\":" << json_bool(rknn_runner_->is_loaded())
          << ",\"rknn_compiled\":" << json_bool(rknn_backend_compiled())
+         << ",\"input_count\":" << rknn_runner_->input_count()
+         << ",\"output_count\":" << rknn_runner_->output_count()
          << ",\"runner_error\":"
          << (rknn_runner_->last_error().empty()
                  ? "null"
@@ -148,18 +167,111 @@ std::string RuntimeApp::stop_preview() {
 std::string RuntimeApp::infer_once() {
   const auto identity = state_.begin_inference();
   const auto frame = stream_worker_.next_frame(identity.sequence);
-  const auto preprocess = preprocess_mock_frame(frame);
-  RknnInput input;
-  input.width = model_info_.input_width;
-  input.height = model_info_.input_height;
-  if (config_.backend == "rknn") {
-    // M9.2 尚未接真实相机，使用零值 NHWC 输入验证 Runner 调用链。
-    const auto byte_count = static_cast<std::size_t>(input.width) *
-        static_cast<std::size_t>(input.height) * static_cast<std::size_t>(input.channels);
-    input.data.assign(byte_count, 0);
+  if (config_.backend == "rknn" && !rknn_runner_->is_loaded()) {
+    const auto error = inference_error_json(
+        identity,
+        frame,
+        "RKNN_MODEL_NOT_LOADED",
+        rknn_runner_->last_error());
+    state_.complete_inference_error(identity, error);
+    return error;
   }
+
+  ImageBuffer source_image;
+  std::string image_error;
+  if (config_.backend == "rknn" && !config_.test_image.empty()) {
+    load_test_image(config_.test_image, source_image, image_error);
+  } else {
+    source_image = make_mock_image(frame);
+  }
+  if (!image_error.empty()) {
+    const auto error = inference_error_json(
+        identity, frame, "TEST_IMAGE_LOAD_FAILED", image_error);
+    state_.complete_inference_error(identity, error);
+    return error;
+  }
+
+  const auto preprocess = preprocess_image(
+      frame, source_image, model_info_.input_width, model_info_.input_height);
+  if (!preprocess.error.empty()) {
+    const auto error = inference_error_json(
+        identity, frame, "PREPROCESS_FAILED", preprocess.error);
+    state_.complete_inference_error(identity, error);
+    return error;
+  }
+  RknnInput input;
+  input.width = preprocess.input.width;
+  input.height = preprocess.input.height;
+  input.channels = preprocess.input.channels;
+  input.data = preprocess.input.data;
   auto inference = rknn_runner_->infer(input);
-  if (inference.result_payload_json.empty()) {
+  if (!inference.success) {
+    const auto error = inference_error_json(
+        identity,
+        frame,
+        "RKNN_INFERENCE_FAILED",
+        inference.error.empty() ? rknn_runner_->last_error() : inference.error);
+    state_.complete_inference_error(identity, error);
+    return error;
+  }
+
+  if (config_.backend == "rknn") {
+    const auto postprocess_started = std::chrono::steady_clock::now();
+    const PostprocessConfig postprocess_config{
+        model_info_.class_names,
+        static_cast<float>(model_info_.score_threshold),
+        static_cast<float>(model_info_.nms_threshold),
+        100};
+    PostprocessResult postprocess;
+    if (model_info_.task_type == "detection" || model_info_.task_type == "detect") {
+      postprocess = postprocess_detection(inference.tensors, postprocess_config, preprocess.letterbox);
+    } else if (model_info_.task_type == "obb") {
+      postprocess = postprocess_obb(inference.tensors, postprocess_config, preprocess.letterbox);
+    } else if (model_info_.task_type == "segmentation" || model_info_.task_type == "segment") {
+      postprocess = postprocess_segmentation(inference.tensors, postprocess_config, preprocess.letterbox);
+    } else {
+      const auto error = inference_error_json(
+          identity,
+          frame,
+          "UNSUPPORTED_TASK_TYPE",
+          "RKNN 后处理暂不支持 task_type: " + model_info_.task_type,
+          "unsupported_task_type");
+      state_.complete_inference_error(identity, error);
+      return error;
+    }
+    inference.postprocess_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - postprocess_started).count();
+    if (!postprocess.success) {
+      const auto error = inference_error_json(
+          identity,
+          frame,
+          postprocess.error_code.empty() ? "POSTPROCESS_FAILED" : postprocess.error_code,
+          postprocess.error_message,
+          postprocess.error_code == "UNSUPPORTED_OUTPUT_SHAPE"
+              ? "unsupported_output_shape"
+              : "postprocess_failed");
+      state_.complete_inference_error(identity, error);
+      return error;
+    }
+    inference.result_payload_json = postprocess.payload_json;
+    inference.error = postprocess.warning;
+    if (!config_.save_debug_output.empty()) {
+      std::error_code filesystem_error;
+      std::filesystem::create_directories(config_.save_debug_output, filesystem_error);
+      if (!filesystem_error) {
+        const auto summary_path = std::filesystem::path(config_.save_debug_output) /
+            (identity.result_id + ".json");
+        std::ofstream summary(summary_path);
+        if (summary) {
+          summary << "{\"result_id\":\"" << json_escape(identity.result_id)
+                  << "\",\"task_type\":\"" << json_escape(model_info_.task_type)
+                  << "\",\"raw_outputs_count\":" << inference.tensors.size()
+                  << ",\"postprocess_count\":" << postprocess.result_count
+                  << ",\"warning\":\"" << json_escape(postprocess.warning) << "\"}";
+        }
+      }
+    }
+  } else if (inference.result_payload_json.empty()) {
     inference.result_payload_json = fallback_postprocess(model_info_.task_type);
     inference.postprocess_ms = 2.0;
   }
@@ -174,6 +286,7 @@ std::string RuntimeApp::inference_result_json(
     const PreprocessOutput& preprocess,
     const RknnOutput& inference) const {
   const auto now = now_timestamp_ms();
+  (void)frame;
   const double total_ms = preprocess.elapsed_ms + inference.inference_ms + inference.postprocess_ms;
   std::ostringstream stream;
   stream << "{\"schema_version\":\"1.0\",\"message_type\":\"inference_result\""
@@ -186,7 +299,8 @@ std::string RuntimeApp::inference_result_json(
          << ",\"result_id\":\"" << json_escape(identity.result_id) << '"'
          << ",\"task_type\":\"" << json_escape(inference.task_type) << '"'
          << ",\"model\":" << loaded_model_json()
-         << ",\"image\":{\"width\":" << frame.width << ",\"height\":" << frame.height << '}'
+         << ",\"image\":{\"width\":" << preprocess.letterbox.orig_width
+         << ",\"height\":" << preprocess.letterbox.orig_height << '}'
          << ",\"timing\":{\"preprocess_ms\":" << preprocess.elapsed_ms
          << ",\"inference_ms\":" << inference.inference_ms
          << ",\"postprocess_ms\":" << inference.postprocess_ms
@@ -200,9 +314,40 @@ std::string RuntimeApp::inference_result_json(
            << (inference.error.empty()
                    ? "null"
                    : '"' + json_escape(inference.error) + '"')
-           << '}';
+           << ",\"letterbox\":{\"scale\":" << preprocess.letterbox.scale
+           << ",\"pad_x\":" << preprocess.letterbox.pad_x
+           << ",\"pad_y\":" << preprocess.letterbox.pad_y << "}}";
   }
   stream << '}';
+  return stream.str();
+}
+
+std::string RuntimeApp::inference_error_json(
+    const InferenceIdentity& identity,
+    const MockFrame& frame,
+    const std::string& code,
+    const std::string& message,
+    const std::string& debug_key) const {
+  const auto now = now_timestamp_ms();
+  std::ostringstream stream;
+  stream << "{\"schema_version\":\"1.0\",\"message_type\":\"inference_result\""
+         << ",\"device_id\":\"" << json_escape(config_.device_id) << '"'
+         << ",\"component\":\"" << json_escape(config_.component) << '"'
+         << ",\"timestamp_ms\":" << now
+         << ",\"trace_id\":\"" << make_trace_id(now) << '"'
+         << ",\"frame_id\":\"" << json_escape(identity.frame_id) << '"'
+         << ",\"result_id\":\"" << json_escape(identity.result_id) << '"'
+         << ",\"task_type\":\"" << json_escape(model_info_.task_type) << '"'
+         << ",\"source\":\"runtime:rknn\",\"status\":\"error\""
+         << ",\"model\":" << loaded_model_json()
+         << ",\"image\":{\"width\":" << frame.width << ",\"height\":" << frame.height << '}'
+         << ",\"timing\":{\"preprocess_ms\":0.0,\"inference_ms\":0.0,\"postprocess_ms\":0.0,\"total_ms\":0.0}"
+         << ",\"error\":{\"code\":\"" << json_escape(code)
+         << "\",\"message\":\"" << json_escape(message)
+         << "\",\"detail\":null,\"recoverable\":true}"
+         << ",\"debug\":{\"rknn_runner_called\":false,\"raw_outputs_count\":0";
+  if (!debug_key.empty()) stream << ",\"" << json_escape(debug_key) << "\":true";
+  stream << "}}";
   return stream.str();
 }
 

@@ -42,6 +42,7 @@ class RuntimeState {
   RuntimeSnapshot stop_preview();
   InferenceIdentity begin_inference();
   void complete_inference(const InferenceIdentity& identity, std::string result_json);
+  void complete_inference_error(const InferenceIdentity& identity, std::string error_json);
   void record_error();
 
  private:

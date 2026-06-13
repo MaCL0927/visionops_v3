@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "visionops_runtime/app_config.hpp"
 
@@ -16,6 +17,7 @@ struct LoadedModelInfo {
   std::string rknn_path;
   std::string config_path;
   std::string labels_path;
+  std::vector<std::string> class_names;
   int labels_count{0};
   int input_width{640};
   int input_height{640};

@@ -64,7 +64,11 @@ M9.2 在 `rknn_runner` 边界加入统一 Runner 接口：
 - 未编译 RKNN 却选择 `--backend rknn` 时，Unavailable Runner 让服务保持可诊断，并明确报告降级原因。
 - Runtime status 暴露 backend、Runner 加载状态、SDK 编译状态和错误；原始 tensor 不直接发送给 Gateway 或 Web。
 
-M9.2 尚未迁移完整 YOLO detection、OBB 或 segmentation decode，`infer_once` 仍用标准 Mock 后处理维持接口契约，并通过 `debug` 标记 Real Runner 调用与原始输出数量。完整后处理将在 M9.3 接入；M10 再将真实相机取流放入 `stream_worker` 边界。设备逻辑不得重新堆入 `main.cpp` 或 `HttpServer`。
+M9.3 已将真实 RKNN 推理链路接到模块化边界：`Preprocess` 生成 RGB uint8 letterbox 输入和坐标元数据，`RknnRunnerReal` 只管理 Context 与原始 tensor，`PostprocessDetect/Obb/Seg` 独立完成阈值过滤、NMS、几何解析和标准 JSON 片段，`RuntimeApp` 只负责编排与错误映射。
+
+当前布局支持范围是：detect 支持单输出 YOLOv8 和 Rockchip split-DFL；OBB 支持单输出角度布局；segmentation 支持单输出候选加 proto，并在默认无 OpenCV 路径输出简化 polygon。无法识别的输出 shape 返回 `UNSUPPORTED_OUTPUT_SHAPE`，原始 tensor 不进入 HTTP、Collector 或 Gateway。默认 `VISIONOPS_ENABLE_RKNN=OFF` 仍只构建 Mock；RK3576/RK3588 部署需要显式提供 SDK 头文件和 Runtime 库。
+
+M9.3 仍不连接相机。测试图片或内存 Mock frame 进入相同 preprocess 接口，M10 再把真实 Camera Bridge/StreamWorker 帧接到该入口。设备逻辑不得重新堆入 `main.cpp` 或 `HttpServer`。
 
 ## 4. Collector Web
 
