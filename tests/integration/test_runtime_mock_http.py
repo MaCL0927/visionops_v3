@@ -8,6 +8,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -39,32 +40,12 @@ def _request_json(url: str, method: str = "GET") -> tuple[int, dict]:
         return error.code, json.loads(error.read().decode("utf-8"))
 
 
-@pytest.fixture(scope="session")
-def runtime_mock_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    build_dir = tmp_path_factory.mktemp("runtime-mock-build")
-    subprocess.run(
-        ["cmake", "-S", str(PROJECT_ROOT), "-B", str(build_dir)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(
-        ["cmake", "--build", str(build_dir), "-j4", "--target", "visionops_runtime_mock"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    binary = build_dir / "edge/runtime_cpp/visionops_runtime_mock"
-    assert binary.is_file()
-    return binary
-
-
-@pytest.fixture
-def runtime_server(runtime_mock_binary: Path):
+@contextmanager
+def _running_runtime(binary: Path, task_type: str):
     port = _free_port()
     process = subprocess.Popen(
         [
-            str(runtime_mock_binary),
+            str(binary),
             "--host",
             "127.0.0.1",
             "--port",
@@ -74,7 +55,7 @@ def runtime_server(runtime_mock_binary: Path):
             "--component",
             "rknn_runtime",
             "--mock-task-type",
-            "detection",
+            task_type,
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -97,15 +78,42 @@ def runtime_server(runtime_mock_binary: Path):
         process.wait(timeout=3)
         pytest.fail("Runtime Mock 未在超时时间内启动")
 
-    yield base_url
-
-    process.terminate()
     try:
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=3)
-    assert process.returncode == 0
+        yield base_url
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+        assert process.returncode == 0
+
+
+@pytest.fixture(scope="session")
+def runtime_mock_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    build_dir = tmp_path_factory.mktemp("runtime-mock-build")
+    subprocess.run(
+        ["cmake", "-S", str(PROJECT_ROOT), "-B", str(build_dir)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["cmake", "--build", str(build_dir), "-j4", "--target", "visionops_runtime_mock"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    binary = build_dir / "edge/runtime_cpp/visionops_runtime_mock"
+    assert binary.is_file()
+    return binary
+
+
+@pytest.fixture
+def runtime_server(runtime_mock_binary: Path):
+    with _running_runtime(runtime_mock_binary, "detection") as base_url:
+        yield base_url
 
 
 def test_runtime_mock_state_and_inference_flow(runtime_server: str) -> None:
@@ -142,6 +150,7 @@ def test_runtime_mock_state_and_inference_flow(runtime_server: str) -> None:
     assert first_result["task_type"] == "detection"
     assert first_result["frame_id"] == "frame-mock-00000001"
     assert first_result["result_id"] == "result-mock-00000001"
+    assert first_result["detections"]
     validate_example(first_result, "first inference response")
 
     status_code, second_result = _request_json(
@@ -181,3 +190,28 @@ def test_runtime_mock_snapshot_is_embedded_jpeg(runtime_server: str) -> None:
         assert response.headers["Cache-Control"] == "no-store"
     assert body.startswith(b"\xff\xd8")
     assert body.endswith(b"\xff\xd9")
+
+
+@pytest.mark.parametrize("task_type", ["obb", "segmentation"])
+def test_runtime_mock_task_specific_payloads(
+    runtime_mock_binary: Path, task_type: str
+) -> None:
+    with _running_runtime(runtime_mock_binary, task_type) as base_url:
+        status_code, result = _request_json(
+            f"{base_url}/api/runtime/infer_once", method="POST"
+        )
+        assert status_code == 200
+        assert result["task_type"] == task_type
+        validate_example(result, f"{task_type} inference response")
+        if task_type == "obb":
+            assert len(result["detections"][0]["obb"]["points"]) == 4
+        else:
+            assert result["detections"][0]["mask"]["encoding"] == "polygon"
+
+
+def test_runtime_mock_returns_method_not_allowed(runtime_server: str) -> None:
+    status_code, error = _request_json(
+        f"{runtime_server}/api/runtime/status", method="POST"
+    )
+    assert status_code == 405
+    assert error["error"]["code"] == "METHOD_NOT_ALLOWED"

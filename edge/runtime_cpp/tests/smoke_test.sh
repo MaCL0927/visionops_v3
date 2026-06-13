@@ -45,12 +45,18 @@ for _ in $(seq 1 50); do
 done
 curl --silent --fail "${BASE_URL}/health" | python -m json.tool >/dev/null
 curl --silent --fail "${BASE_URL}/api/runtime/status" | python -m json.tool >/dev/null
+MISSING_CODE="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  "${BASE_URL}/api/runtime/latest_result")"
+[[ "${MISSING_CODE}" == "404" ]]
 curl --silent --fail -X POST -H 'Content-Type: application/json' -d '{}' \
   "${BASE_URL}/api/runtime/start_preview" | python -m json.tool >/dev/null
 curl --silent --fail -X POST -H 'Content-Type: application/json' -d '{}' \
   "${BASE_URL}/api/runtime/infer_once" | python -m json.tool >/dev/null
 curl --silent --fail "${BASE_URL}/api/runtime/latest_result" | python -m json.tool >/dev/null
 curl --silent --fail "${BASE_URL}/api/runtime/snapshot.jpg" -o "${SNAPSHOT_FILE}"
+curl --silent --fail -X POST -H 'Content-Type: application/json' -d '{}' \
+  "${BASE_URL}/api/runtime/stop_preview" | python -c \
+  'import json, sys; data=json.load(sys.stdin); assert data["mode"] == "idle" and data["running"] is False'
 
 python -c 'import pathlib, sys; data=pathlib.Path(sys.argv[1]).read_bytes(); assert data[:2] == b"\xff\xd8" and data[-2:] == b"\xff\xd9"' "${SNAPSHOT_FILE}"
 

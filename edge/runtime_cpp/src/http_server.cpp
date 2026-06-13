@@ -13,9 +13,8 @@
 #include <iostream>
 #include <limits>
 #include <sstream>
-#include <string_view>
 
-#include "visionops_runtime/mock_data.hpp"
+#include "visionops_runtime/json_utils.hpp"
 
 namespace visionops::runtime {
 
@@ -48,20 +47,13 @@ std::vector<std::uint8_t> bytes(std::string value) {
 
 std::string status_reason(int status_code) {
   switch (status_code) {
-    case 200:
-      return "OK";
-    case 400:
-      return "Bad Request";
-    case 404:
-      return "Not Found";
-    case 405:
-      return "Method Not Allowed";
-    case 413:
-      return "Payload Too Large";
-    case 500:
-      return "Internal Server Error";
-    default:
-      return "Error";
+    case 200: return "OK";
+    case 400: return "Bad Request";
+    case 404: return "Not Found";
+    case 405: return "Method Not Allowed";
+    case 413: return "Payload Too Large";
+    case 500: return "Internal Server Error";
+    default: return "Error";
   }
 }
 
@@ -70,17 +62,11 @@ std::string status_reason(int status_code) {
 HttpServer::HttpServer(
     std::string host,
     std::uint16_t port,
-    std::string device_id,
-    std::string component,
-    std::string mock_task_type,
-    RuntimeState& state,
+    RuntimeApp& app,
     std::atomic_bool& stop_requested)
     : host_(std::move(host)),
       port_(port),
-      device_id_(std::move(device_id)),
-      component_(std::move(component)),
-      mock_task_type_(std::move(mock_task_type)),
-      state_(state),
+      app_(app),
       stop_requested_(stop_requested) {}
 
 HttpServer::~HttpServer() { close_listener(); }
@@ -135,7 +121,7 @@ int HttpServer::run() {
     return 1;
   }
   std::cout << "VisionOps Runtime Mock 正在监听 " << host_ << ':' << port_
-            << "，task=" << mock_task_type_ << '\n';
+            << "，task=" << app_.config().mock_task_type << '\n';
 
   while (!stop_requested_.load()) {
     pollfd descriptor{};
@@ -179,14 +165,26 @@ void HttpServer::handle_client(int client_fd) {
   HttpRequest request;
   std::string error_message;
   if (!read_request(client_fd, request, error_message)) {
-    const auto response = json_response(
-        error_message == "请求体过大" ? 413 : 400,
-        error_message == "请求体过大" ? "Payload Too Large" : "Bad Request",
-        make_error_json(device_id_, component_, "INVALID_HTTP_REQUEST", error_message, true));
-    write_response(client_fd, response);
+    const bool too_large = error_message == "请求体过大";
+    write_response(
+        client_fd,
+        error_response(
+            too_large ? 413 : 400,
+            too_large ? "Payload Too Large" : "Bad Request",
+            "INVALID_HTTP_REQUEST",
+            error_message,
+            true));
     return;
   }
-  write_response(client_fd, route(request));
+
+  try {
+    write_response(client_fd, route(request));
+  } catch (const std::exception& error) {
+    app_.record_error();
+    write_response(
+        client_fd,
+        error_response(500, "Internal Server Error", "INTERNAL_ERROR", error.what(), true));
+  }
 }
 
 bool HttpServer::read_request(
@@ -278,93 +276,51 @@ bool HttpServer::read_request(
 
 HttpResponse HttpServer::route(const HttpRequest& request) {
   if (request.path == "/health") {
-    if (request.method != "GET") {
-      return method_not_allowed("GET");
-    }
-    const auto snapshot = state_.snapshot();
-    return json_response(200, "OK", make_health_json(device_id_, component_, snapshot.uptime_s));
+    return request.method == "GET" ? json_response(200, "OK", app_.health_json())
+                                   : method_not_allowed("GET");
   }
-
   if (request.path == "/api/runtime/status") {
-    if (request.method != "GET") {
-      return method_not_allowed("GET");
-    }
-    return json_response(
-        200,
-        "OK",
-        make_runtime_status_json(device_id_, component_, mock_task_type_, state_.snapshot()));
+    return request.method == "GET" ? json_response(200, "OK", app_.status_json())
+                                   : method_not_allowed("GET");
   }
-
   if (request.path == "/api/runtime/start_preview") {
-    if (request.method != "POST") {
-      return method_not_allowed("POST");
-    }
-    return json_response(
-        200,
-        "OK",
-        make_runtime_status_json(device_id_, component_, mock_task_type_, state_.start_preview()));
+    return request.method == "POST" ? json_response(200, "OK", app_.start_preview())
+                                    : method_not_allowed("POST");
   }
-
   if (request.path == "/api/runtime/stop_preview") {
-    if (request.method != "POST") {
-      return method_not_allowed("POST");
-    }
-    return json_response(
-        200,
-        "OK",
-        make_runtime_status_json(device_id_, component_, mock_task_type_, state_.stop_preview()));
+    return request.method == "POST" ? json_response(200, "OK", app_.stop_preview())
+                                    : method_not_allowed("POST");
   }
-
   if (request.path == "/api/runtime/infer_once") {
-    if (request.method != "POST") {
-      return method_not_allowed("POST");
-    }
-    const auto identity = state_.begin_inference();
-    const std::string result = make_inference_result_json(
-        device_id_, component_, mock_task_type_, identity);
-    state_.complete_inference(identity, result);
-    return json_response(200, "OK", result);
+    return request.method == "POST" ? json_response(200, "OK", app_.infer_once())
+                                    : method_not_allowed("POST");
   }
-
   if (request.path == "/api/runtime/latest_result") {
     if (request.method != "GET") {
       return method_not_allowed("GET");
     }
-    const auto snapshot = state_.snapshot();
-    if (!snapshot.latest_result_json) {
-      return json_response(
-          404,
-          "Not Found",
-          make_error_json(
-              device_id_,
-              component_,
-              "LATEST_RESULT_NOT_FOUND",
-              "尚未生成推理结果",
-              true));
-    }
-    return json_response(200, "OK", *snapshot.latest_result_json);
+    const auto result = app_.latest_result_json();
+    return result ? json_response(200, "OK", *result)
+                  : error_response(
+                        404,
+                        "Not Found",
+                        "LATEST_RESULT_NOT_FOUND",
+                        "尚未生成推理结果",
+                        true);
   }
-
   if (request.path == "/api/runtime/snapshot.jpg") {
     if (request.method != "GET") {
       return method_not_allowed("GET");
     }
     HttpResponse response;
     response.content_type = "image/jpeg";
-    response.body = placeholder_jpeg();
-    const auto snapshot = state_.snapshot();
-    response.headers.emplace_back(
-        "X-Frame-Id",
-        snapshot.last_frame_id.value_or("frame-mock-placeholder"));
-    response.headers.emplace_back("X-Timestamp-Ms", std::to_string(timestamp_ms()));
+    response.body = app_.snapshot_jpeg();
+    response.headers.emplace_back("X-Frame-Id", app_.snapshot_frame_id());
+    response.headers.emplace_back("X-Timestamp-Ms", std::to_string(now_timestamp_ms()));
     response.headers.emplace_back("Cache-Control", "no-store");
     return response;
   }
-
-  return json_response(
-      404,
-      "Not Found",
-      make_error_json(device_id_, component_, "ROUTE_NOT_FOUND", "接口不存在", true));
+  return error_response(404, "Not Found", "ROUTE_NOT_FOUND", "接口不存在", true);
 }
 
 HttpResponse HttpServer::json_response(
@@ -379,17 +335,31 @@ HttpResponse HttpServer::json_response(
 }
 
 HttpResponse HttpServer::method_not_allowed(const std::string& expected_method) const {
-  HttpResponse response = json_response(
+  HttpResponse response = error_response(
       405,
       "Method Not Allowed",
-      make_error_json(
-          device_id_,
-          component_,
-          "METHOD_NOT_ALLOWED",
-          "请求方法不支持，期望 " + expected_method,
-          true));
+      "METHOD_NOT_ALLOWED",
+      "请求方法不支持，期望 " + expected_method,
+      true);
   response.headers.emplace_back("Allow", expected_method);
   return response;
+}
+
+HttpResponse HttpServer::error_response(
+    int status_code,
+    std::string reason,
+    const std::string& code,
+    const std::string& message,
+    bool recoverable) const {
+  return json_response(
+      status_code,
+      std::move(reason),
+      make_error_json(
+          app_.config().device_id,
+          app_.config().component,
+          code,
+          message,
+          recoverable));
 }
 
 bool HttpServer::write_response(int client_fd, const HttpResponse& response) const {

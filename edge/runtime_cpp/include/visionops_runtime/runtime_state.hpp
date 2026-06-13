@@ -21,6 +21,7 @@ struct RuntimeSnapshot {
   std::string health{"ok"};
   double uptime_s{0.0};
   RuntimeCounters counters;
+  std::uint64_t sequence{0};
   std::optional<std::string> last_frame_id;
   std::optional<std::string> last_result_id;
   std::optional<std::string> latest_result_json;
@@ -29,6 +30,7 @@ struct RuntimeSnapshot {
 struct InferenceIdentity {
   std::string frame_id;
   std::string result_id;
+  std::uint64_t sequence{0};
 };
 
 class RuntimeState {
@@ -40,6 +42,7 @@ class RuntimeState {
   RuntimeSnapshot stop_preview();
   InferenceIdentity begin_inference();
   void complete_inference(const InferenceIdentity& identity, std::string result_json);
+  void record_error();
 
  private:
   double uptime_seconds() const;
@@ -50,8 +53,7 @@ class RuntimeState {
   std::string mode_{"idle"};
   std::string health_{"ok"};
   RuntimeCounters counters_;
-  std::uint64_t frame_sequence_{0};
-  std::uint64_t result_sequence_{0};
+  std::uint64_t sequence_{0};
   std::optional<std::string> last_frame_id_;
   std::optional<std::string> last_result_id_;
   std::optional<std::string> latest_result_json_;

@@ -55,6 +55,18 @@ M7.1 进一步确认：旧版的界面结构和现场用词属于可保留的用
 
 后续 Web 功能迁移必须继续遵守：页面经 Collector 后端访问 Runtime/Gateway/App；推理留在 C++ Runtime；纸筒、隔板等决策留在 Gateway app 层；不得因为前端便利而重新引入跨端口直连。
 
+M8 对 v3 C++ Runtime 做的是内部结构拆分，不是把 v2 `edge/inference_cpp/src/main.cpp` 搬入新仓库。v2 入口文件只可用于识别取流、预处理、RKNN、后处理、状态和服务控制等功能边界，不得原样复制其控制流、硬编码路径或设备依赖。
+
+M8 已固定以下迁移落点：
+
+1. `main.cpp` 保持薄入口，不维护 Frame ID、Result ID、计数器或业务 JSON。
+2. 真实 RKNN 能力在后续 M9 进入 `rknn_runner`，并通过标准后处理输出 M2 `inference_result`。
+3. 真实相机能力在后续 M10 进入 `stream_worker`，不让 HTTP 层直接读设备。
+4. `RuntimeApp` 负责能力编排，`RuntimeState` 负责线程安全状态，`HttpServer` 只负责协议。
+5. 在真实硬件迁入前，M3 的 HTTP 路径和 Mock 行为继续作为 Collector、Gateway 与业务 App 的兼容基线。
+
+禁止为了快速迁移而把 v2 的 RKNN 初始化、相机循环、全局状态和 HTTP 处理重新合并到一个入口文件中。
+
 旧 Gateway/Modbus 服务不得原样复制。v3 先以标准 `inference_result -> gateway_message -> register map` 重新建立边界：
 
 - M5 Gateway / Modbus Mock 只用于本机契约联调，不连接真实 PLC。

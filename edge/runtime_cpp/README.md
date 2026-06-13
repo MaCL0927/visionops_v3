@@ -1,6 +1,6 @@
 # VisionOps C++ Runtime Mock
 
-本目录实现 M3 阶段的最小 HTTP Mock，用于在没有相机、RKNN、NPU、模型文件和现场通信设备的环境中验证 Runtime 接口契约。
+本目录实现 M3 阶段的 HTTP Mock，并在 M8 完成第一期结构拆分，用于在没有相机、RKNN、NPU、模型文件和现场通信设备的环境中验证 Runtime 接口契约与模块边界。
 
 Mock 不包含生产推理能力，也不是 Python RKNN 链路的替代实现。后续真实 Runtime 仍应保持 `Camera Bridge -> C++ RKNN Runtime -> Collector Web -> Gateway/Modbus` 主链路，并复用 M2 定义的标准接口。
 
@@ -63,6 +63,25 @@ GET  /api/runtime/snapshot.jpg
 完整契约见 `interfaces/protocols/runtime_http_api.md`。当前控制接口读取有界请求体，但不解析业务参数；这是 M3 Mock 的明确限制，后续实现请求 schema 时再增加严格 JSON 解析。
 
 `infer_once` 每次生成新的 `frame_id` 和 `result_id`，并更新状态计数器。快照由编译进程序的 1x1 JPEG 占位数据生成，不读取或提交图片文件。
+
+## M8 模块边界
+
+M8 是结构重构，不是接入真实 RKNN、RGA 或相机。M3 的接口路径、错误语义和 Mock 结果保持兼容。
+
+| 模块 | 当前职责 | 后续演进 |
+| --- | --- | --- |
+| `main.cpp` | 解析 CLI、注册信号、组装并启动服务 | 保持薄入口，不承载业务 JSON 或运行状态 |
+| `AppConfig / CliArgs` | 默认值、参数解析与合法性检查 | 后续可接入统一配置渲染结果 |
+| `RuntimeApp` | 编排状态、取帧、预处理、推理、后处理和快照 | 保持 HTTP 之外的 Runtime 对外能力入口 |
+| `RuntimeState` | 线程安全维护模式、计数器、序号和最近结果 | 为多线程取流与推理队列保留互斥边界 |
+| `HttpServer` | POSIX socket、请求解析、路由和 JSON/JPEG 响应 | 不生成推理结果，不维护业务状态 |
+| `JsonUtils` | 时间戳、JSON 转义和统一错误响应 | 继续保持无第三方 JSON 依赖 |
+| `RknnRunnerMock` | 生成 Mock 推理输出 | M9 在 `rknn_runner` 边界迁入真实 RKNN 能力 |
+| `StreamWorkerMock` | 生成 Mock Frame、维护预览开关 | M10 在 `stream_worker` 边界迁入真实相机取流 |
+| `Postprocess` | 按 detection、OBB、segmentation 等任务生成标准结果片段 | 后续接真实张量解析，但输出继续遵守 M2 契约 |
+| `SnapshotProvider` | 返回内置极小 JPEG | 后续从受控帧缓存产生低频快照 |
+
+`RuntimeState` 当前仍运行在单线程 HTTP 请求模型下，但所有状态读写均通过互斥锁保护。后续加入取流线程和推理线程时，不应绕过该边界直接修改计数器。
 
 ## 冒烟测试
 

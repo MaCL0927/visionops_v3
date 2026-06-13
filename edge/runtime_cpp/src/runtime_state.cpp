@@ -31,6 +31,7 @@ RuntimeSnapshot RuntimeState::snapshot() const {
   value.health = health_;
   value.uptime_s = uptime_seconds();
   value.counters = counters_;
+  value.sequence = sequence_;
   value.last_frame_id = last_frame_id_;
   value.last_result_id = last_result_id_;
   value.latest_result_json = latest_result_json_;
@@ -59,14 +60,14 @@ RuntimeSnapshot RuntimeState::stop_preview() {
 
 InferenceIdentity RuntimeState::begin_inference() {
   std::lock_guard<std::mutex> lock(mutex_);
-  ++frame_sequence_;
-  ++result_sequence_;
+  ++sequence_;
   ++counters_.frames_in;
   running_ = true;
   mode_ = "detect";
   return {
-      sequence_id("frame-mock", frame_sequence_),
-      sequence_id("result-mock", result_sequence_),
+      sequence_id("frame-mock", sequence_),
+      sequence_id("result-mock", sequence_),
+      sequence_,
   };
 }
 
@@ -79,6 +80,13 @@ void RuntimeState::complete_inference(
   last_result_id_ = identity.result_id;
   latest_result_json_ = std::move(result_json);
   health_ = "ok";
+}
+
+void RuntimeState::record_error() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  ++counters_.errors;
+  health_ = "error";
+  mode_ = "error";
 }
 
 }  // namespace visionops::runtime

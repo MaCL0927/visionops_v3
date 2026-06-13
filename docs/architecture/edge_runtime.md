@@ -43,6 +43,17 @@ C++ RKNN Runtime 是生产推理核心，职责包括：
 
 Runtime 不直接读写 Web 表单，不直接映射 PLC 寄存器，也不依赖 Python 解释器。模型特定后处理可以插件化，但必须遵守统一 Runtime 接口。
 
+M8 对 `edge/runtime_cpp/` 完成第一期结构拆分，但不接入真实 RKNN、RGA 或相机：
+
+- `main.cpp` 只处理 CLI、信号和服务组装，是薄启动入口。
+- `RuntimeApp` 编排健康状态、预览、单次推理、最近结果和快照能力。
+- `RuntimeState` 通过互斥锁维护运行模式、序号、计数器和最近 Frame/Result。
+- `HttpServer` 只负责 POSIX socket、HTTP 解析、路由和 JSON/JPEG 响应。
+- `RknnRunnerMock` 与任务后处理模块生成标准 Mock `inference_result`，不调用 NPU。
+- `StreamWorkerMock` 与 `SnapshotProvider` 提供 Mock Frame 和内置 JPEG，不连接设备。
+
+该拆分保持 M3 HTTP API 完全兼容。后续 M9 将真实 RKNN 模型加载与推理放入 `rknn_runner` 边界，M10 将真实相机取流放入 `stream_worker` 边界；两者都不应把设备逻辑重新堆入 `main.cpp` 或 `HttpServer`。
+
 ## 4. Collector Web
 
 Collector Web 默认由 Python Web 服务和静态前端组成，负责：
@@ -65,7 +76,7 @@ M4 阶段进一步固定以下边界：
 - Collector 聚合状态在 Runtime 不可达时仍可用，以便现场判断是管理面故障还是 Runtime 故障。
 - Runtime 的业务状态码由代理保留，例如尚无结果时的 404 不转换为 Collector 500。
 
-`edge/runtime_cpp/` 中的 Runtime Mock 是后续真实 C++ RKNN Runtime 的接口替身。它只用于契约、Collector 和 Gateway 集成开发，不能作为生产推理能力或性能基准。
+`edge/runtime_cpp/` 中的 Runtime Mock 是后续真实 C++ RKNN Runtime 的接口替身。它只用于契约、Collector 和 Gateway 集成开发，不能作为生产推理能力或性能基准。M8 改变的是内部职责组织，不改变这个定位。
 
 M7 将 Collector Web 实际功能固定为三个工作区：Capture 通过 Collector 代理读取 Runtime snapshot；Validate 通过 Collector 触发 `infer_once` 并仅对标准结果做 bbox/OBB 可视化；Production 聚合 Runtime、Gateway 和 Business App 状态及寄存器。
 
