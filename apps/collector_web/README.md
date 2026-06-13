@@ -2,6 +2,8 @@
 
 Collector Web 是边缘设备上的轻量管理入口。M7 按 v3 进程边界重建了采集上传、模型验证和生产运行三个核心页面，开始承载实际 Web 功能，但仍不越过 Collector 后端直接操作相机、模型或业务规则。
 
+M7.1 将界面结构调整回 VisionOps v2 现场用户熟悉的使用习惯：顶部主导航为“校验、采集上传、模型验证、设置、切换生产模式”，页面使用左侧步骤、大图像工作区、状态卡片和设置面板。这是界面组织的回归，不是旧代码或旧接口的回归。
+
 ## 职责边界
 
 Collector Web 负责：
@@ -99,13 +101,15 @@ Gateway 和 Business App 的 status 接口在下游不可达时返回稳定 `unr
 
 前端只访问上述 Collector 同源接口，不包含 Runtime、Gateway 或 Business App 的直连地址。
 
-## 三个核心页面
+## 核心页面
 
-- **Capture**：显示、刷新和本地下载 Runtime JPEG 快照；采集包导出按钮仅作为后续入口。
-- **Validate**：调用 `infer_once`，显示标准结果和四段耗时，在快照上绘制 detection bbox 与 OBB points。
-- **Production**：聚合 Collector、Runtime、Gateway、Business App 状态和寄存器快照。
+- **校验**：包含摄像头位置校验和光照校验两步。快照来自 Runtime 代理，标准图与亮度指标目前使用 CSS/状态占位。
+- **采集上传**：显示和刷新 Runtime JPEG 快照，支持本地下载和浏览器临时采集记录；采集包导出与上传为待接入入口。
+- **模型验证**：调用 `infer_once`，支持单次、拍照和低频实时检测，显示 Runtime/模型状态、标准结果、四段耗时、bbox 和 OBB points。
+- **设置**：分组显示 Runtime、Gateway、Business App、刷新间隔和设备信息。M7.1 只保存前端临时刷新间隔，不写 `.env` 或源 YAML。
+- **生产模式**：聚合 Collector、Runtime、Gateway、Business App 状态、寄存器快照和最新结果/消息/决策摘要。
 
-前端使用原生 ES modules，按 `api`、`state`、`pages`、`render` 拆分。v2 的顶部页签和工作区布局仅作为功能参考，未复制其巨型 `app.js`。
+前端使用原生 ES modules，按 `api`、`state`、`pages`、`render` 拆分。v2 的顶部页签、左侧步骤、工作区和设置面板作为界面参考，未复制其巨型 `app.js`。后续真实相机、RKNN 和业务接入只替换 Collector 后端代理的数据来源，不需重做 Web 总体结构。
 
 ## 实现说明
 

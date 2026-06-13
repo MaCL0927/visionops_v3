@@ -49,6 +49,10 @@
 
 M7 已按 v3 边界重建 Capture、Validate 和 Production 三个核心 Web 页面。迁移仅参考 v2 的页签位置、预览工作区和状态展示意图，没有复制旧巨型 `app.js`、旧相机请求、旧模型加载或旧业务判断。
 
+M7.1 进一步确认：旧版的界面结构和现场用词属于可保留的用户习惯。v3 恢复“校验、采集上传、模型验证、设置、切换生产模式”顶部导航，并参考左侧步骤、大预览区和状态卡片布局。但所有 JavaScript 按 ES modules 重新实现，不复制 v2 `app.js`。
+
+迁移时必须把“界面习惯”与“旧数据通路”分开：可以保留按钮名称、页面层级和工位操作顺序；不得恢复浏览器直连相机/Runtime/Gateway、Python 推理、前端业务判断或旧配置写入方式。
+
 后续 Web 功能迁移必须继续遵守：页面经 Collector 后端访问 Runtime/Gateway/App；推理留在 C++ Runtime；纸筒、隔板等决策留在 Gateway app 层；不得因为前端便利而重新引入跨端口直连。
 
 旧 Gateway/Modbus 服务不得原样复制。v3 先以标准 `inference_result -> gateway_message -> register map` 重新建立边界：

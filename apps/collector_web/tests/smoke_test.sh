@@ -96,9 +96,14 @@ for _ in $(seq 1 50); do
 done
 
 curl --silent --fail "${BASE_URL}/health" | python -m json.tool >/dev/null
-curl --silent --fail "${BASE_URL}/" | grep -q 'Production'
+INDEX_HTML="$(curl --silent --fail "${BASE_URL}/")"
+for label in '校验' '采集上传' '模型验证' '设置' '切换生产模式'; do
+  grep -q "${label}" <<<"${INDEX_HTML}"
+done
 curl --silent --fail "${BASE_URL}/static/css/main.css" >/dev/null
 curl --silent --fail "${BASE_URL}/static/js/main.js" >/dev/null
+curl --silent --fail "${BASE_URL}/static/js/pages/calibration.js" >/dev/null
+curl --silent --fail "${BASE_URL}/static/js/pages/settings.js" >/dev/null
 curl --silent --fail "${BASE_URL}/api/collector/status" | python -m json.tool >/dev/null
 curl --silent --fail "${BASE_URL}/api/runtime/status" | python -m json.tool >/dev/null
 curl --silent --fail -X POST -H 'Content-Type: application/json' -d '{}' \

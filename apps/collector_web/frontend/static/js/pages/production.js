@@ -20,8 +20,11 @@ function renderRegisters(id, payload) {
 async function safe(path) { try { return await requestJson(path); } catch (error) { return error.body || { status: "unreachable", reachable: false, error: { message: error.message } }; } }
 
 export async function refreshProduction() {
-  const [collector, runtime, gateway, app] = await Promise.all([safe(endpoints.collectorStatus), safe(endpoints.runtimeStatus), safe(endpoints.gatewayStatus), safe(endpoints.appStatus)]);
+  const [collector, runtime, gateway, app, latestResult] = await Promise.all([safe(endpoints.collectorStatus), safe(endpoints.runtimeStatus), safe(endpoints.gatewayStatus), safe(endpoints.appStatus), safe(endpoints.latestResult)]);
   renderStatus("collector-status", "collector-badge", collector.collector || collector); renderStatus("runtime-status", "runtime-badge", collector.runtime?.status_response || runtime); renderStatus("gateway-status", "gateway-badge", gateway); renderStatus("app-status", "app-badge", app);
+  document.getElementById("production-result-summary").textContent = JSON.stringify(latestResult, null, 2);
+  document.getElementById("production-gateway-summary").textContent = JSON.stringify(gateway.latest_gateway_message || { status: gateway.status || "no_message" }, null, 2);
+  document.getElementById("production-app-summary").textContent = JSON.stringify(app.latest_decision || { status: app.status || "no_decision" }, null, 2);
   const [gatewayRegisters, appRegisters] = await Promise.all([gateway.reachable === false ? null : safe(endpoints.gatewayRegisters), app.reachable === false ? null : safe(endpoints.appRegisters)]);
   renderRegisters("gateway-registers", gatewayRegisters); renderRegisters("app-registers", appRegisters);
 }

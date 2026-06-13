@@ -5,10 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 BUILD_DIR="${VISIONOPS_BUILD_DIR:-${ROOT_DIR}/build}"
 RUNTIME_BINARY="${BUILD_DIR}/edge/runtime_cpp/visionops_runtime_mock"
-RUNTIME_PORT="18080"
-COLLECTOR_PORT="8090"
-GATEWAY_PORT="19090"
-MODBUS_PORT="1502"
+RUNTIME_PORT="${VISIONOPS_RUNTIME_PORT:-18080}"
+COLLECTOR_PORT="${VISIONOPS_COLLECTOR_PORT:-8090}"
+GATEWAY_PORT="${VISIONOPS_GATEWAY_PORT:-19090}"
+MODBUS_PORT="${VISIONOPS_MODBUS_PORT:-1502}"
 RUNTIME_LOG="$(mktemp /tmp/visionops-runtime.XXXXXX.log)"
 COLLECTOR_LOG="$(mktemp /tmp/visionops-collector.XXXXXX.log)"
 GATEWAY_LOG="$(mktemp /tmp/visionops-gateway.XXXXXX.log)"
@@ -28,8 +28,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-python -c 'import socket
-for port in (18080, 8090, 19090, 1502):
+python -c 'import socket, sys
+for port in map(int, sys.argv[1:]):
     sock = socket.socket()
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -37,7 +37,7 @@ for port in (18080, 8090, 19090, 1502):
     except OSError as exc:
         raise SystemExit(f"端口 {port} 不可用: {exc}")
     finally:
-        sock.close()'
+        sock.close()' "${RUNTIME_PORT}" "${COLLECTOR_PORT}" "${GATEWAY_PORT}" "${MODBUS_PORT}"
 
 cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}"
 cmake --build "${BUILD_DIR}" -j4 --target visionops_runtime_mock

@@ -69,7 +69,11 @@ M4 阶段进一步固定以下边界：
 
 M7 将 Collector Web 实际功能固定为三个工作区：Capture 通过 Collector 代理读取 Runtime snapshot；Validate 通过 Collector 触发 `infer_once` 并仅对标准结果做 bbox/OBB 可视化；Production 聚合 Runtime、Gateway 和 Business App 状态及寄存器。
 
+M7.1 不改变这些数据边界，但将交互外壳回归旧版现场使用习惯：默认进入校验，顶部导航提供校验、采集上传、模型验证、设置和生产模式。校验和采集采用左侧步骤与大图像工作区，模型验证采用模型状态侧栏，生产模式使用状态、摘要和寄存器卡片。
+
 三个页面都只访问 Collector 同源 API。Web 不直接取相机、不加载模型、不执行业务判断；下游不可达时页面显示 `unreachable`，Collector 本身保持可诊断。
+
+因此 Web 结构与实际设备实现解耦：将 Runtime Mock 替换为真实 C++ RKNN Runtime，或将 Gateway/Business App Mock 替换为现场服务时，Collector 同源 API 契约保持稳定，前端总体导航和页面不需重写。
 
 ## 5. Gateway Adapter
 

@@ -140,6 +140,10 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         send_json(self, 200, {
             "schema_version": "1.0",
             "message_type": "collector_frontend_config",
+            "runtime_url": config.runtime_url,
+            "gateway_url": config.gateway_url,
+            "business_app_url": config.business_app_url,
+            "device_id": config.device_id,
             "snapshot_refresh_interval_ms": config.snapshot_refresh_interval_ms,
             "status_refresh_interval_ms": config.status_refresh_interval_ms,
         })

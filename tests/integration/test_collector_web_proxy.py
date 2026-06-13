@@ -168,12 +168,15 @@ def test_collector_status_survives_unreachable_runtime() -> None:
 
         status, content_type, html, _ = _request(f"{collector_url}/")
         assert status == 200 and content_type == "text/html"
-        assert b"Capture" in html and b"Validate" in html and b"Production" in html
+        for label in ("校验", "采集上传", "模型验证", "设置", "切换生产模式"):
+            assert label.encode("utf-8") in html
 
         for path, expected_type in (
             ("/static/css/main.css", "text/css"),
             ("/static/js/main.js", "text/javascript"),
+            ("/static/js/pages/calibration.js", "text/javascript"),
             ("/static/js/pages/capture.js", "text/javascript"),
+            ("/static/js/pages/settings.js", "text/javascript"),
             ("/static/js/pages/production.js", "text/javascript"),
             ("/static/js/render/overlay.js", "text/javascript"),
         ):
@@ -191,6 +194,16 @@ def test_collector_status_survives_unreachable_runtime() -> None:
         assert status == 200
         assert app["status"] == "unreachable"
         assert app["reachable"] is False
+
+        status, frontend_config = _request_json(f"{collector_url}/api/collector/config")
+        assert status == 200
+        assert frontend_config["device_id"] == "example-edge-collector-test"
+
+        frontend_root = PROJECT_ROOT / "apps/collector_web/frontend/static/js"
+        source = "\n".join(path.read_text(encoding="utf-8") for path in frontend_root.rglob("*.js"))
+        for direct_port in ("18080", "19090", "19110"):
+            assert direct_port not in source
+        assert 'fetch("http' not in source and "fetch('http" not in source
 
 
 def test_collector_proxies_runtime_mock(
