@@ -17,6 +17,9 @@ ImageBuffer make_mock_image(const MockFrame& frame) {
   image.width = frame.width;
   image.height = frame.height;
   image.channels = 3;
+  image.pixel_format = "RGB888";
+  image.source = "mock";
+  image.sequence = frame.sequence;
   image.data.assign(
       static_cast<std::size_t>(image.width) * image.height * image.channels,
       114);
@@ -38,6 +41,8 @@ bool load_ppm_image(const std::string& path, ImageBuffer& image, std::string& er
     return false;
   }
   image.channels = 3;
+  image.pixel_format = "RGB888";
+  image.source = "test_image:ppm";
   image.data.resize(static_cast<std::size_t>(image.width) * image.height * image.channels);
   if (!input.read(reinterpret_cast<char*>(image.data.data()), image.data.size())) {
     error = "PPM 测试图片数据不完整";
@@ -62,6 +67,8 @@ bool load_test_image(const std::string& path, ImageBuffer& image, std::string& e
   image.width = rgb.cols;
   image.height = rgb.rows;
   image.channels = 3;
+  image.pixel_format = "RGB888";
+  image.source = "test_image:opencv";
   image.data.assign(rgb.data, rgb.data + rgb.total() * rgb.elemSize());
   return true;
 #else
@@ -78,7 +85,7 @@ PreprocessOutput preprocess_image(
   const auto started_at = std::chrono::steady_clock::now();
   PreprocessOutput output;
   output.frame = frame;
-  if (image.width <= 0 || image.height <= 0 || image.channels != 3 || image.data.empty()) {
+  if (!image_buffer_valid_rgb(image)) {
     output.error = "输入图像必须是非空 RGB 三通道 buffer";
     return output;
   }
@@ -96,7 +103,14 @@ PreprocessOutput preprocess_image(
   meta.pad_x = (input_width - meta.resized_width) / 2.0F;
   meta.pad_y = (input_height - meta.resized_height) / 2.0F;
 
-  output.input = ImageBuffer{input_width, input_height, 3, {}};
+  output.input.width = input_width;
+  output.input.height = input_height;
+  output.input.channels = 3;
+  output.input.pixel_format = "RGB888";
+  output.input.source = "preprocess:letterbox";
+  output.input.sequence = image.sequence;
+  output.input.timestamp_ms = image.timestamp_ms;
+  output.input.camera_id = image.camera_id;
   output.input.data.assign(static_cast<std::size_t>(input_width) * input_height * 3, 114);
   const int left = static_cast<int>(std::round(meta.pad_x - 0.1F));
   const int top = static_cast<int>(std::round(meta.pad_y - 0.1F));

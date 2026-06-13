@@ -4,16 +4,10 @@
 #include <string>
 #include <vector>
 
+#include "visionops_runtime/image_buffer.hpp"
 #include "visionops_runtime/stream_worker.hpp"
 
 namespace visionops::runtime {
-
-struct ImageBuffer {
-  int width{0};
-  int height{0};
-  int channels{3};
-  std::vector<std::uint8_t> data;
-};
 
 struct LetterboxMeta {
   int orig_width{0};

@@ -106,7 +106,7 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         send_bytes(self, 200, body, content_type, {"Cache-Control": "no-cache"})
 
     def _serve_static(self, request_path: str) -> None:
-        relative = request_path.removeprefix("/static/")
+        relative = request_path[len("/static/"):] if request_path.startswith("/static/") else request_path.lstrip("/")
         if not relative or ".." in Path(relative).parts:
             self._send_collector_error(404, "STATIC_FILE_NOT_FOUND", "静态资源不存在", False)
             return

@@ -201,3 +201,79 @@ bash edge/runtime_cpp/tests/smoke_test.sh
 - 单线程顺序处理请求；状态仍通过互斥锁封装，便于后续演进。
 - 请求头限制为 64 KiB，请求体限制为 1 MiB。
 - SIGINT 与 SIGTERM 设置停止标记，监听循环在短超时后退出。
+
+## M10：真实相机取流接入一期
+
+M10 在 `stream_worker` 边界加入统一帧源抽象，Runtime 现在支持：
+
+- `--frame-source mock`：默认模式，继续生成灰色 Mock Frame；
+- `--frame-source test_image`：使用 `--test-image` 指定的本地测试图片，默认无 OpenCV 时仅支持 P6 PPM；
+- `--frame-source v4l2`：在 Linux 上通过 V4L2 读取 `/dev/videoX`，M10 一期优先支持 YUYV 输入并转换为 RGB888。
+
+新增常用参数：
+
+```text
+--frame-source mock/test_image/v4l2
+--camera-device /dev/video0
+--camera-width 640
+--camera-height 480
+--camera-fps 30
+--camera-pixel-format YUYV
+--enable-camera-thread true/false
+--camera-read-timeout-ms 1000
+```
+
+`GET /api/runtime/status` 会返回 `frame_source` 字段，包含帧源类型、设备、打开状态、尺寸、帧率、像素格式、最近帧时间戳和最近错误。Collector Web 仍然只访问 Runtime HTTP API，不直接访问相机。
+
+当前 `snapshot.jpg` 仍返回内置 Mock JPEG，占位字段 `frame_source.snapshot_encoder=mock_jpeg` 会明确说明这一点。这样做是为了避免 M10 一期强制依赖 libjpeg/OpenCV。真实 JPEG 编码可在后续用可选 `VISIONOPS_ENABLE_JPEG` 或 OpenCV 扩展。
+
+### 3576 V4L2 手动测试
+
+查看设备能力：
+
+```bash
+v4l2-ctl --list-devices
+v4l2-ctl -d /dev/video0 --list-formats-ext
+```
+
+构建 RKNN 版本：
+
+```bash
+cmake -S . -B build-rknn \
+  -DVISIONOPS_ENABLE_RKNN=ON \
+  -DVISIONOPS_RKNN_INCLUDE_DIR=/usr/include \
+  -DVISIONOPS_RKNN_LIBRARY=/usr/lib/librknnrt.so
+cmake --build build-rknn -j4
+```
+
+启动真实相机帧源与 RKNN 后端：
+
+```bash
+MODEL_DIR=/opt/visionops_v3/models/test_rknn_model
+
+./build-rknn/edge/runtime_cpp/visionops_runtime_mock \
+  --backend rknn \
+  --frame-source v4l2 \
+  --camera-device /dev/video0 \
+  --camera-width 640 \
+  --camera-height 480 \
+  --camera-pixel-format YUYV \
+  --model-manifest "$MODEL_DIR/manifest.json" \
+  --model-config "$MODEL_DIR/model.yaml" \
+  --model-dir "$MODEL_DIR" \
+  --host 0.0.0.0 \
+  --port 18081 \
+  --device-id lb3576-dev
+```
+
+测试接口：
+
+```bash
+curl http://127.0.0.1:18081/api/runtime/status | python3 -m json.tool
+curl -X POST http://127.0.0.1:18081/api/runtime/start_preview | python3 -m json.tool
+curl -X POST http://127.0.0.1:18081/api/runtime/infer_once | python3 -m json.tool
+curl http://127.0.0.1:18081/api/runtime/latest_result | python3 -m json.tool
+curl -I http://127.0.0.1:18081/api/runtime/snapshot.jpg
+```
+
+M10 的核心验收标准是：`frame_source.type=v4l2`、`camera_connected=true`、`infer_once` 的 `image.width/height` 来自真实相机帧，并且 `backend=rknn` 仍然能完成推理闭环。是否检测到目标取决于现场画面、模型和阈值，不作为 M10 一期唯一通过条件。

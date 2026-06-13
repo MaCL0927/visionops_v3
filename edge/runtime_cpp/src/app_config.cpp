@@ -27,6 +27,17 @@ void validate_app_config(const AppConfig& config) {
   if (config.score_threshold_override > 1.0 || config.nms_threshold_override > 1.0) {
     throw std::invalid_argument("score-threshold 和 nms-threshold 必须位于 0 到 1");
   }
+  if (config.frame_source != "mock" && config.frame_source != "test_image" &&
+      config.frame_source != "v4l2") {
+    throw std::invalid_argument("frame-source 仅支持 mock、test_image 或 v4l2");
+  }
+  if (config.camera_width <= 0 || config.camera_height <= 0 || config.camera_fps <= 0) {
+    throw std::invalid_argument("camera-width、camera-height、camera-fps 必须为正数");
+  }
+  if (config.camera_open_timeout_ms <= 0 || config.camera_read_timeout_ms <= 0) {
+    throw std::invalid_argument("camera timeout 必须为正数");
+  }
 }
+
 
 }  // namespace visionops::runtime

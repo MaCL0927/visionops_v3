@@ -35,12 +35,49 @@ std::string fallback_postprocess(const std::string& task_type) {
   return make_detection_payload_json();
 }
 
+FrameSourceConfig make_frame_source_config(const AppConfig& config) {
+  FrameSourceConfig frame_config;
+  frame_config.type = config.frame_source;
+  frame_config.camera_device = config.camera_device;
+  frame_config.camera_width = config.camera_width;
+  frame_config.camera_height = config.camera_height;
+  frame_config.camera_fps = config.camera_fps;
+  frame_config.camera_pixel_format = config.camera_pixel_format;
+  frame_config.test_image = config.test_image;
+  frame_config.snapshot_source = config.snapshot_source;
+  frame_config.enable_camera_thread = config.enable_camera_thread;
+  frame_config.camera_open_timeout_ms = config.camera_open_timeout_ms;
+  frame_config.camera_read_timeout_ms = config.camera_read_timeout_ms;
+  return frame_config;
+}
+
+std::string frame_source_json(const FrameSourceStatus& frame_source) {
+  std::ostringstream stream;
+  stream << "{\"type\":\"" << json_escape(frame_source.type) << '"'
+         << ",\"camera_id\":\"" << json_escape(frame_source.camera_id) << '"'
+         << ",\"device\":\"" << json_escape(frame_source.device) << '"'
+         << ",\"opened\":" << json_bool(frame_source.opened)
+         << ",\"width\":" << frame_source.width
+         << ",\"height\":" << frame_source.height
+         << ",\"fps\":" << frame_source.fps
+         << ",\"pixel_format\":\"" << json_escape(frame_source.pixel_format) << '"'
+         << ",\"latest_frame_id\":"
+         << (frame_source.latest_frame_id.empty() ? "null" : '"' + json_escape(frame_source.latest_frame_id) + '"')
+         << ",\"latest_timestamp_ms\":" << frame_source.latest_timestamp_ms
+         << ",\"snapshot_encoder\":\"" << json_escape(frame_source.snapshot_encoder) << '"'
+         << ",\"last_error\":"
+         << (frame_source.last_error.empty() ? "null" : '"' + json_escape(frame_source.last_error) + '"')
+         << '}';
+  return stream.str();
+}
+
 }  // namespace
 
 RuntimeApp::RuntimeApp(AppConfig config)
     : config_(std::move(config)),
       model_info_(load_model_package(config_)),
-      rknn_runner_(create_rknn_runner(config_.backend, model_info_.task_type)) {
+      rknn_runner_(create_rknn_runner(config_.backend, model_info_.task_type)),
+      stream_worker_(make_frame_source_config(config_)) {
   validate_app_config(config_);
   if (config_.score_threshold_override >= 0.0) {
     model_info_.score_threshold = config_.score_threshold_override;
@@ -67,7 +104,9 @@ RuntimeApp::RuntimeApp(AppConfig config)
 }
 
 bool RuntimeApp::runtime_degraded() const {
-  return model_info_.degraded() || !rknn_runner_->is_loaded();
+  const auto frame_source = stream_worker_.status();
+  return model_info_.degraded() || !rknn_runner_->is_loaded() ||
+         (config_.frame_source == "v4l2" && !frame_source.last_error.empty());
 }
 
 std::string RuntimeApp::health_json() const {
@@ -91,8 +130,9 @@ std::string RuntimeApp::status_json() const { return status_json(state_.snapshot
 
 std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
   const auto now = now_timestamp_ms();
+  const auto frame_source = stream_worker_.status();
   const double inference_fps = snapshot.running && snapshot.mode == "detect" ? 1.0 : 0.0;
-  const double snapshot_fps = snapshot.running && snapshot.mode == "preview" ? 2.0 : 0.0;
+  const double snapshot_fps = snapshot.running && snapshot.mode == "preview" ? frame_source.fps : 0.0;
   std::ostringstream stream;
   stream << std::fixed << std::setprecision(3)
          << "{\"schema_version\":\"1.0\",\"message_type\":\"runtime_status\""
@@ -107,8 +147,9 @@ std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
          << json_escape(runtime_degraded() ? "degraded" : snapshot.health) << '"'
          << ",\"uptime_s\":" << snapshot.uptime_s
          << ",\"loaded_model\":" << loaded_model_json()
-         << ",\"camera_connected\":true"
-         << ",\"fps\":{\"camera_fps\":15.0,\"inference_fps\":" << inference_fps
+         << ",\"camera_connected\":" << json_bool(frame_source.opened && frame_source.last_error.empty())
+         << ",\"frame_source\":" << frame_source_json(frame_source)
+         << ",\"fps\":{\"camera_fps\":" << frame_source.fps << ",\"inference_fps\":" << inference_fps
          << ",\"snapshot_fps\":" << snapshot_fps << '}'
          << ",\"latency_ms\":{\"latest\":16.0,\"average\":16.0,\"p95\":16.0}"
          << ",\"counters\":{\"frames_in\":" << snapshot.counters.frames_in
@@ -166,7 +207,14 @@ std::string RuntimeApp::stop_preview() {
 
 std::string RuntimeApp::infer_once() {
   const auto identity = state_.begin_inference();
-  const auto frame = stream_worker_.next_frame(identity.sequence);
+  auto frame_result = stream_worker_.next_frame(identity.sequence);
+  auto frame = frame_result.frame;
+  if (!frame_result.ok) {
+    const auto error = inference_error_json(
+        identity, frame, "CAMERA_FRAME_UNAVAILABLE", frame_result.error, "frame_source_error");
+    state_.complete_inference_error(identity, error);
+    return error;
+  }
   if (config_.backend == "rknn" && !rknn_runner_->is_loaded()) {
     const auto error = inference_error_json(
         identity,
@@ -179,8 +227,13 @@ std::string RuntimeApp::infer_once() {
 
   ImageBuffer source_image;
   std::string image_error;
-  if (config_.backend == "rknn" && !config_.test_image.empty()) {
+  if ((config_.frame_source == "test_image" || !config_.test_image.empty()) &&
+      !config_.test_image.empty()) {
     load_test_image(config_.test_image, source_image, image_error);
+    source_image.sequence = identity.sequence;
+    source_image.source = "frame_source:test_image";
+  } else if (image_buffer_valid_rgb(frame_result.image)) {
+    source_image = frame_result.image;
   } else {
     source_image = make_mock_image(frame);
   }
@@ -189,6 +242,10 @@ std::string RuntimeApp::infer_once() {
         identity, frame, "TEST_IMAGE_LOAD_FAILED", image_error);
     state_.complete_inference_error(identity, error);
     return error;
+  }
+  if (source_image.width > 0 && source_image.height > 0) {
+    frame.width = source_image.width;
+    frame.height = source_image.height;
   }
 
   const auto preprocess = preprocess_image(
@@ -295,7 +352,7 @@ std::string RuntimeApp::inference_result_json(
          << ",\"timestamp_ms\":" << now
          << ",\"trace_id\":\"" << make_trace_id(now) << '"'
          << ",\"frame_id\":\"" << json_escape(identity.frame_id) << '"'
-         << ",\"source\":\"runtime:mock\",\"status\":\"ok\""
+         << ",\"source\":\"runtime:" << json_escape(config_.backend) << "\",\"status\":\"ok\""
          << ",\"result_id\":\"" << json_escape(identity.result_id) << '"'
          << ",\"task_type\":\"" << json_escape(inference.task_type) << '"'
          << ",\"model\":" << loaded_model_json()
@@ -336,7 +393,7 @@ std::string RuntimeApp::inference_error_json(
          << ",\"timestamp_ms\":" << now
          << ",\"trace_id\":\"" << make_trace_id(now) << '"'
          << ",\"frame_id\":\"" << json_escape(identity.frame_id) << '"'
-         << ",\"result_id\":\"" << json_escape(identity.result_id) << '"'
+         << ",\"source\":\"runtime:" << json_escape(config_.backend) << "\",\"status\":\"ok\""
          << ",\"task_type\":\"" << json_escape(model_info_.task_type) << '"'
          << ",\"source\":\"runtime:rknn\",\"status\":\"error\""
          << ",\"model\":" << loaded_model_json()

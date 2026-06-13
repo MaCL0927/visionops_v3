@@ -53,6 +53,27 @@ CliArgs parse_cli_args(int argc, char* argv[]) {
       args.config.score_threshold_override = std::stod(require_value(argc, argv, index));
     } else if (argument == "--nms-threshold") {
       args.config.nms_threshold_override = std::stod(require_value(argc, argv, index));
+    } else if (argument == "--frame-source") {
+      args.config.frame_source = require_value(argc, argv, index);
+    } else if (argument == "--camera-device") {
+      args.config.camera_device = require_value(argc, argv, index);
+    } else if (argument == "--camera-width") {
+      args.config.camera_width = std::stoi(require_value(argc, argv, index));
+    } else if (argument == "--camera-height") {
+      args.config.camera_height = std::stoi(require_value(argc, argv, index));
+    } else if (argument == "--camera-fps") {
+      args.config.camera_fps = std::stoi(require_value(argc, argv, index));
+    } else if (argument == "--camera-pixel-format") {
+      args.config.camera_pixel_format = require_value(argc, argv, index);
+    } else if (argument == "--snapshot-source") {
+      args.config.snapshot_source = require_value(argc, argv, index);
+    } else if (argument == "--enable-camera-thread") {
+      const auto value = require_value(argc, argv, index);
+      args.config.enable_camera_thread = !(value == "false" || value == "0" || value == "no");
+    } else if (argument == "--camera-open-timeout-ms") {
+      args.config.camera_open_timeout_ms = std::stoi(require_value(argc, argv, index));
+    } else if (argument == "--camera-read-timeout-ms") {
+      args.config.camera_read_timeout_ms = std::stoi(require_value(argc, argv, index));
     } else {
       throw std::invalid_argument("未知参数: " + argument);
     }
@@ -82,6 +103,16 @@ std::string cli_help_text(const std::string& program) {
          "  --dump-rknn-io           启动时打印 RKNN 输入输出属性\n"
          "  --score-threshold <值>   覆盖模型置信度阈值\n"
          "  --nms-threshold <值>     覆盖模型 NMS 阈值\n"
+         "  --frame-source <类型>     mock、test_image 或 v4l2，默认 mock\n"
+         "  --camera-device <设备>    V4L2 设备，默认 /dev/video0\n"
+         "  --camera-width <宽>       V4L2 宽度，默认 640\n"
+         "  --camera-height <高>      V4L2 高度，默认 480\n"
+         "  --camera-fps <帧率>       V4L2 帧率，默认 30\n"
+         "  --camera-pixel-format <格式> V4L2 像素格式，M10 一期支持 YUYV\n"
+         "  --snapshot-source <来源>  latest_frame 或 mock，当前 JPEG 编码默认仍为 mock\n"
+         "  --enable-camera-thread <true/false> 是否开启取流线程，默认 true\n"
+         "  --camera-open-timeout-ms <毫秒> 摄像头打开超时占位参数\n"
+         "  --camera-read-timeout-ms <毫秒> 摄像头读取超时，默认 1000\n"
          "  --help                    显示帮助\n";
 }
 

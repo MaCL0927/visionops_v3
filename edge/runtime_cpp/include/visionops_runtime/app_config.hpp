@@ -20,6 +20,16 @@ struct AppConfig {
   bool dump_rknn_io{false};
   double score_threshold_override{-1.0};
   double nms_threshold_override{-1.0};
+  std::string frame_source{"mock"};
+  std::string camera_device{"/dev/video0"};
+  int camera_width{640};
+  int camera_height{480};
+  int camera_fps{30};
+  std::string camera_pixel_format{"YUYV"};
+  std::string snapshot_source{"latest_frame"};
+  bool enable_camera_thread{true};
+  int camera_open_timeout_ms{3000};
+  int camera_read_timeout_ms{1000};
 };
 
 bool is_supported_mock_task_type(const std::string& task_type);
