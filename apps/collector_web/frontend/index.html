@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>VisionOps Collector Web</title>
+    <style>
+      body { font-family: sans-serif; margin: 24px; line-height: 1.5; }
+      button { margin: 4px; padding: 8px 12px; }
+      pre { background: #f4f4f4; border: 1px solid #ddd; padding: 12px; overflow: auto; }
+      img { max-width: 640px; border: 1px solid #ddd; min-height: 1px; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+      .panel { border: 1px solid #ccc; padding: 16px; }
+    </style>
+  </head>
+  <body>
+    <h1>VisionOps Collector Web</h1>
+    <p>本页面只通过 Collector 后端代理访问 Runtime，不直接连接相机或 Runtime 端口。</p>
+
+    <div>
+      <button id="refresh-status">刷新状态</button>
+      <button id="start-preview">启动预览</button>
+      <button id="stop-preview">停止预览</button>
+      <button id="infer-once">单次推理</button>
+    </div>
+
+    <div class="grid">
+      <section class="panel">
+        <h2>Collector 健康状态</h2>
+        <pre id="collector-health">尚未加载</pre>
+      </section>
+      <section class="panel">
+        <h2>Runtime 状态</h2>
+        <pre id="runtime-status">尚未加载</pre>
+      </section>
+      <section class="panel">
+        <h2>Latest Result</h2>
+        <pre id="latest-result">尚未生成结果</pre>
+      </section>
+      <section class="panel">
+        <h2>Snapshot</h2>
+        <img id="snapshot" alt="Runtime snapshot">
+      </section>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

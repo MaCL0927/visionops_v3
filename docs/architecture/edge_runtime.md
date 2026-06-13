@@ -56,6 +56,17 @@ Collector Web 默认由 Python Web 服务和静态前端组成，负责：
 
 Collector Web 通过受控接口与 Camera Bridge、Runtime 和通信适配器交互。它不得加载 RKNN 模型作为生产推理路径，也不得通过修改其他服务内部文件来控制服务。
 
+M4 阶段进一步固定以下边界：
+
+- Collector Web 只做配置、状态、诊断、低频预览和 Runtime HTTP 代理。
+- Collector Web 不做生产推理，不加载模型，不调用 RKNN 或 NPU。
+- Collector Web 不直接连接相机；相机接入只能属于 Camera Bridge。
+- 浏览器前端只访问 Collector 同源接口，不直接访问 Runtime 端口。
+- Collector 聚合状态在 Runtime 不可达时仍可用，以便现场判断是管理面故障还是 Runtime 故障。
+- Runtime 的业务状态码由代理保留，例如尚无结果时的 404 不转换为 Collector 500。
+
+`edge/runtime_cpp/` 中的 Runtime Mock 是后续真实 C++ RKNN Runtime 的接口替身。它只用于契约、Collector 和 Gateway 集成开发，不能作为生产推理能力或性能基准。
+
 ## 5. Gateway Adapter
 
 Gateway Adapter 将标准化 `InferenceResult` 转换为上层 Gateway 所需消息，负责：
