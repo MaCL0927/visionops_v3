@@ -55,6 +55,15 @@
 - Modbus 寄存器只表达心跳和业务结果，不承载图片或大块 JSON。
 - `carton_tube_check`、`carton_partition_check` 等应用按业务契约重建专用 register map，并单独验收 PLC 握手、字节序、超时和故障安全值。
 
+M6 仅重新实现两个业务的 Mock 规则与契约，不迁移 v2 的取图、深度、模板文件、系统服务、`.env` 或 Modbus 实现。可保留的只是经业务方重新确认的行为经验，例如 signed int16 寄存器编码、数量异常和缺陷优先级。
+
+后续迁移真实 `carton_tube_check` 或 `carton_partition_check` 时，应：
+
+1. 先用真实 Runtime/Collector 的标准 `latest_result` 替换 `file` Mock upstream。
+2. 使用标注样例重新校准阈值，不沿用 v2 `.env` 默认值。
+3. 单独定义 PLC 触发、应答、超时和故障安全值。
+4. 保持 AppDecision 和 GatewayMessage 契约，避免把业务判断回填到 C++ Runtime 或 Collector Web。
+
 ## 5. 禁止迁移的历史残留
 
 - 未使用脚本、重复入口和一次性修复文件。

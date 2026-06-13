@@ -82,6 +82,20 @@ M5 的 `edge/gateway_adapter/` 是 Gateway Mock，它从 Collector Web 或 Runti
 
 Gateway 必须保持模型无关：只消费标准结果中的决策、detections、几何和耗时字段，不读取 RKNN 原始张量。`carton_tube_check`、`carton_partition_check` 等业务应在 Gateway app 层扩展专用 register map。
 
+M6 将该扩展点具体化为业务 App Mock 层：
+
+```text
+standard inference_result
+  -> business rules
+  -> AppDecision
+  -> GatewayMessage
+  -> app-specific Holding Registers
+```
+
+`carton_tube_check` 使用 `100..119`，`carton_partition_check` 使用 `200..219`。两者复用 M5 Modbus Adapter，不重复实现 Modbus 协议栈。业务 App 可用 `file` Mock 输入独立调试，也可从 Collector 或 Runtime 读取相同的 `/api/runtime/latest_result`。未来切换真实 upstream 时不改业务决策和寄存器协议。
+
+Collector Web 可聚合展示 AppDecision 和寄存器状态，但不执行纸筒或隔板判断。C++ Runtime 只产生标准推理结果，不包含现场业务阈值、PLC 寄存器或最终工位语义。
+
 ## 6. Modbus Adapter
 
 Modbus Adapter 负责将业务结果映射到 Modbus TCP/RTU 寄存器或线圈，并与 PLC 交互。映射关系属于应用配置，不应写死在 Runtime 中。

@@ -42,3 +42,12 @@ bash edge/gateway_adapter/tests/smoke_test.sh
 ```
 
 M5 不使用 v2 Modbus 服务源码。未来接入真实 PLC 时必须重新定义应用寄存器契约、超时、重连和故障安全值。
+
+## M6 业务 App Mock
+
+`apps/` 在通用 Gateway 之上增加可独立测试的业务规则层，当前包含：
+
+- `carton_tube_check`：纸筒类别、置信度、多目标、ROI、中心偏差和尺寸规则。
+- `carton_partition_check`：隔板 cell 数量、置信度和 defect 类别规则。
+
+业务 App 消费标准 `inference_result`，输出统一 `AppDecision`、`GatewayMessage` 和专用 Holding Registers。业务规则不进入 C++ Runtime，Collector Web 只展示状态与结果。M6 不连接真实设备，也不把 v2 的两个业务服务原样复制到 v3。

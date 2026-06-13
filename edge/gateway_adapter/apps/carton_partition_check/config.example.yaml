@@ -1,0 +1,15 @@
+schema_version: "1.0"
+kind: app
+app:
+  name: carton_partition_check
+  version: "1.0"
+rules:
+  target_class_names: [cell, partition_cell, slot]
+  defect_class_names: [missing_cell, broken_partition, foreign_body, defect]
+  score_threshold: 0.50
+  defect_score_threshold: 0.50
+  expected_cell_count: 12
+  min_cell_count: 12
+  max_cell_count: 12
+  roi_xyxy: [0, 0, 1280, 720]
+  register_base: 200

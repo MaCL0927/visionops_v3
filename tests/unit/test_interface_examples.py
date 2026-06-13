@@ -15,14 +15,14 @@ EXAMPLE_DIR = PROJECT_ROOT / "interfaces/examples"
 
 def test_all_interface_examples_pass_lightweight_validation() -> None:
     examples = validate_directories(SCHEMA_DIR, EXAMPLE_DIR)
-    assert len(examples) == 8
+    assert len(examples) == 12
 
 
 def test_interface_summary_contains_expected_types() -> None:
     summary = build_summary(SCHEMA_DIR, EXAMPLE_DIR)
     assert summary["message_types"] == {
         "camera_frame": 1,
-        "gateway_message": 1,
+        "gateway_message": 5,
         "inference_result": 4,
         "model_package_manifest": 1,
         "runtime_status": 1,
