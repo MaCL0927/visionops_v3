@@ -69,7 +69,11 @@ M8 已固定以下迁移落点：
 
 M9.1 仅迁移“描述模型”的配置能力，不迁移 v2 的模型加载和推理代码。v3 使用独立 manifest、YAML 和标签文本形成 `LoadedModelInfo`，允许在 x86 环境验证模型名称、版本、任务类型、输入尺寸、阈值和文件路径。示例模型包只用于文本解析测试，manifest 中的 `model.rknn` 是占位引用，仓库中不存在该文件。
 
-进入 M9.2 前必须继续遵守：真实 `.rknn/.pt/.onnx`、模型数据和完整发布包不进入 Git；RKNN SDK 与目标平台库通过部署环境提供；模型配置错误应形成可诊断的 `degraded/model_load_error`，不能把硬编码路径或静默回退从 v2 带入 v3。
+M9.2 已迁移 RKNN Runner 的生命周期外壳，但没有迁移 v2 的完整推理主循环和后处理。v2 C++ `main.cpp` 仍只作为功能参考；模型读取、Context 初始化、输入设置、执行、输出获取和释放被约束在 `RknnRunnerReal` 内，不允许反向侵入 `RuntimeApp`、HTTP 层或入口文件。
+
+默认构建不依赖 RKNN SDK。只有 RK3576/RK3588 部署构建显式开启 `VISIONOPS_ENABLE_RKNN` 时，才允许从部署环境注入头文件和 Runtime 库路径。未启用 SDK 时选择 `rknn` backend 必须可诊断地降级，不能崩溃或静默改用生产推理结论。
+
+进入 M9.3 前必须继续遵守：真实 `.rknn/.pt/.onnx`、模型数据和完整发布包不进入 Git；原始 tensor 只停留在 Runner/后处理边界；detect、OBB、segmentation decode 需按任务拆分并输出标准 `inference_result`，不得把 v2 的整段后处理原样复制回来。
 
 旧 Gateway/Modbus 服务不得原样复制。v3 先以标准 `inference_result -> gateway_message -> register map` 重新建立边界：
 

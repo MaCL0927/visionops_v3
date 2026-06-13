@@ -21,6 +21,9 @@ void validate_app_config(const AppConfig& config) {
   if (!is_supported_mock_task_type(config.mock_task_type)) {
     throw std::invalid_argument("不支持的 mock task type: " + config.mock_task_type);
   }
+  if (config.backend != "mock" && config.backend != "rknn") {
+    throw std::invalid_argument("backend 仅支持 mock 或 rknn");
+  }
 }
 
 }  // namespace visionops::runtime

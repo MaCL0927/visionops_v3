@@ -54,7 +54,17 @@ M8 对 `edge/runtime_cpp/` 完成第一期结构拆分，但不接入真实 RKNN
 
 该拆分保持 M3 HTTP API 完全兼容。M9.1 已在 `RuntimeApp` 初始化阶段加入轻量模型包元数据读取：manifest 提供模型包、平台和相对文件信息，YAML 提供任务、类别、输入尺寸和后处理阈值。解析结果统一进入 `loaded_model`，并供 Mock `inference_result.model` 复用。
 
-M9.1 不打开 manifest 中的 `.rknn` 文件，不创建 RKNN Context，也不改变 Mock 推理路径。配置缺失时 Runtime 以 `degraded` 状态继续提供诊断接口。真实 RKNN 模型加载与推理将在 M9.2 放入 `rknn_runner` 边界；M10 再将真实相机取流放入 `stream_worker` 边界。设备逻辑不得重新堆入 `main.cpp` 或 `HttpServer`。
+M9.1 不打开 manifest 中的 `.rknn` 文件，不创建 RKNN Context，也不改变 Mock 推理路径。配置缺失时 Runtime 以 `degraded` 状态继续提供诊断接口。
+
+M9.2 在 `rknn_runner` 边界加入统一 Runner 接口：
+
+- 默认 `VISIONOPS_ENABLE_RKNN=OFF`，x86 和普通 CI 只构建 Mock Runner，不要求 SDK。
+- RK3576/RK3588 部署构建可指定 RKNN 头文件与 Runtime 库，条件编译 `RknnRunnerReal`。
+- Real Runner 管理模型二进制、RKNN Context、输入设置、执行、原始输出获取和资源释放。
+- 未编译 RKNN 却选择 `--backend rknn` 时，Unavailable Runner 让服务保持可诊断，并明确报告降级原因。
+- Runtime status 暴露 backend、Runner 加载状态、SDK 编译状态和错误；原始 tensor 不直接发送给 Gateway 或 Web。
+
+M9.2 尚未迁移完整 YOLO detection、OBB 或 segmentation decode，`infer_once` 仍用标准 Mock 后处理维持接口契约，并通过 `debug` 标记 Real Runner 调用与原始输出数量。完整后处理将在 M9.3 接入；M10 再将真实相机取流放入 `stream_worker` 边界。设备逻辑不得重新堆入 `main.cpp` 或 `HttpServer`。
 
 ## 4. Collector Web
 

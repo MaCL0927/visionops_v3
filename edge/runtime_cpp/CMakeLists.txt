@@ -1,4 +1,4 @@
-add_executable(visionops_runtime_mock
+set(VISIONOPS_RUNTIME_SOURCES
   src/main.cpp
   src/app_config.cpp
   src/cli_args.cpp
@@ -11,16 +11,38 @@ add_executable(visionops_runtime_mock
   src/postprocess_seg.cpp
   src/preprocess.cpp
   src/rknn_runner_mock.cpp
+  src/rknn_runner_factory.cpp
   src/runtime_app.cpp
   src/runtime_state.cpp
   src/snapshot_provider.cpp
   src/stream_worker_mock.cpp
 )
 
+if(VISIONOPS_ENABLE_RKNN)
+  if(NOT VISIONOPS_RKNN_INCLUDE_DIR OR
+     NOT EXISTS "${VISIONOPS_RKNN_INCLUDE_DIR}/rknn_api.h")
+    message(FATAL_ERROR
+      "VISIONOPS_ENABLE_RKNN=ON 时必须设置 VISIONOPS_RKNN_INCLUDE_DIR，且目录中包含 rknn_api.h")
+  endif()
+  if(NOT VISIONOPS_RKNN_LIBRARY OR NOT EXISTS "${VISIONOPS_RKNN_LIBRARY}")
+    message(FATAL_ERROR
+      "VISIONOPS_ENABLE_RKNN=ON 时必须设置有效的 VISIONOPS_RKNN_LIBRARY")
+  endif()
+  list(APPEND VISIONOPS_RUNTIME_SOURCES src/rknn_runner_real.cpp)
+endif()
+
+add_executable(visionops_runtime_mock ${VISIONOPS_RUNTIME_SOURCES})
+
 target_include_directories(visionops_runtime_mock
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+
+if(VISIONOPS_ENABLE_RKNN)
+  target_include_directories(visionops_runtime_mock PRIVATE ${VISIONOPS_RKNN_INCLUDE_DIR})
+  target_compile_definitions(visionops_runtime_mock PRIVATE VISIONOPS_HAS_RKNN=1)
+  target_link_libraries(visionops_runtime_mock PRIVATE ${VISIONOPS_RKNN_LIBRARY})
+endif()
 
 target_compile_options(visionops_runtime_mock
   PRIVATE

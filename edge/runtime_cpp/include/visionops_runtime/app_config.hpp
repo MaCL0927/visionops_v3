@@ -11,6 +11,7 @@ struct AppConfig {
   std::string device_id{"example-edge-001"};
   std::string component{"rknn_runtime"};
   std::string mock_task_type{"detection"};
+  std::string backend{"mock"};
   std::string model_manifest;
   std::string model_config;
   std::string model_dir;
