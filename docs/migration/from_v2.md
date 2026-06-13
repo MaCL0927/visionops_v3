@@ -60,12 +60,16 @@ M8 对 v3 C++ Runtime 做的是内部结构拆分，不是把 v2 `edge/inference
 M8 已固定以下迁移落点：
 
 1. `main.cpp` 保持薄入口，不维护 Frame ID、Result ID、计数器或业务 JSON。
-2. 真实 RKNN 能力在后续 M9 进入 `rknn_runner`，并通过标准后处理输出 M2 `inference_result`。
+2. 真实 RKNN 能力在后续 M9.2 进入 `rknn_runner`，并通过标准后处理输出 M2 `inference_result`。
 3. 真实相机能力在后续 M10 进入 `stream_worker`，不让 HTTP 层直接读设备。
 4. `RuntimeApp` 负责能力编排，`RuntimeState` 负责线程安全状态，`HttpServer` 只负责协议。
 5. 在真实硬件迁入前，M3 的 HTTP 路径和 Mock 行为继续作为 Collector、Gateway 与业务 App 的兼容基线。
 
 禁止为了快速迁移而把 v2 的 RKNN 初始化、相机循环、全局状态和 HTTP 处理重新合并到一个入口文件中。
+
+M9.1 仅迁移“描述模型”的配置能力，不迁移 v2 的模型加载和推理代码。v3 使用独立 manifest、YAML 和标签文本形成 `LoadedModelInfo`，允许在 x86 环境验证模型名称、版本、任务类型、输入尺寸、阈值和文件路径。示例模型包只用于文本解析测试，manifest 中的 `model.rknn` 是占位引用，仓库中不存在该文件。
+
+进入 M9.2 前必须继续遵守：真实 `.rknn/.pt/.onnx`、模型数据和完整发布包不进入 Git；RKNN SDK 与目标平台库通过部署环境提供；模型配置错误应形成可诊断的 `degraded/model_load_error`，不能把硬编码路径或静默回退从 v2 带入 v3。
 
 旧 Gateway/Modbus 服务不得原样复制。v3 先以标准 `inference_result -> gateway_message -> register map` 重新建立边界：
 

@@ -52,7 +52,9 @@ M8 对 `edge/runtime_cpp/` 完成第一期结构拆分，但不接入真实 RKNN
 - `RknnRunnerMock` 与任务后处理模块生成标准 Mock `inference_result`，不调用 NPU。
 - `StreamWorkerMock` 与 `SnapshotProvider` 提供 Mock Frame 和内置 JPEG，不连接设备。
 
-该拆分保持 M3 HTTP API 完全兼容。后续 M9 将真实 RKNN 模型加载与推理放入 `rknn_runner` 边界，M10 将真实相机取流放入 `stream_worker` 边界；两者都不应把设备逻辑重新堆入 `main.cpp` 或 `HttpServer`。
+该拆分保持 M3 HTTP API 完全兼容。M9.1 已在 `RuntimeApp` 初始化阶段加入轻量模型包元数据读取：manifest 提供模型包、平台和相对文件信息，YAML 提供任务、类别、输入尺寸和后处理阈值。解析结果统一进入 `loaded_model`，并供 Mock `inference_result.model` 复用。
+
+M9.1 不打开 manifest 中的 `.rknn` 文件，不创建 RKNN Context，也不改变 Mock 推理路径。配置缺失时 Runtime 以 `degraded` 状态继续提供诊断接口。真实 RKNN 模型加载与推理将在 M9.2 放入 `rknn_runner` 边界；M10 再将真实相机取流放入 `stream_worker` 边界。设备逻辑不得重新堆入 `main.cpp` 或 `HttpServer`。
 
 ## 4. Collector Web
 

@@ -4,6 +4,8 @@ add_executable(visionops_runtime_mock
   src/cli_args.cpp
   src/http_server.cpp
   src/json_utils.cpp
+  src/model_config.cpp
+  src/model_package.cpp
   src/postprocess_detect.cpp
   src/postprocess_obb.cpp
   src/postprocess_seg.cpp

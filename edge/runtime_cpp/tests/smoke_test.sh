@@ -44,7 +44,8 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 curl --silent --fail "${BASE_URL}/health" | python -m json.tool >/dev/null
-curl --silent --fail "${BASE_URL}/api/runtime/status" | python -m json.tool >/dev/null
+curl --silent --fail "${BASE_URL}/api/runtime/status" | python -c \
+  'import json, sys; data=json.load(sys.stdin); model=data["loaded_model"]; assert model["backend"] == "mock" and model["model_load_error"] is None'
 MISSING_CODE="$(curl --silent --output /dev/null --write-out '%{http_code}' \
   "${BASE_URL}/api/runtime/latest_result")"
 [[ "${MISSING_CODE}" == "404" ]]

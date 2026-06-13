@@ -18,7 +18,9 @@ std::string optional_json(const std::optional<std::string>& value) {
 }  // namespace
 
 RuntimeApp::RuntimeApp(AppConfig config)
-    : config_(std::move(config)), rknn_runner_(config_.mock_task_type) {
+    : config_(std::move(config)),
+      model_info_(load_model_package(config_)),
+      rknn_runner_(model_info_.task_type) {
   validate_app_config(config_);
 }
 
@@ -33,7 +35,8 @@ std::string RuntimeApp::health_json() const {
          << ",\"timestamp_ms\":" << now
          << ",\"trace_id\":\"" << make_trace_id(now) << '"'
          << ",\"source\":\"runtime:mock\",\"status\":\"ok\""
-         << ",\"health\":\"ok\",\"ready\":true,\"version\":\"0.1.0\""
+         << ",\"health\":\"" << (model_info_.degraded() ? "degraded" : "ok") << '"'
+         << ",\"ready\":true,\"version\":\"0.1.0\""
          << ",\"uptime_s\":" << snapshot.uptime_s << '}';
   return stream.str();
 }
@@ -54,10 +57,10 @@ std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
          << ",\"source\":\"runtime:mock\",\"status\":\"ok\""
          << ",\"running\":" << json_bool(snapshot.running)
          << ",\"mode\":\"" << json_escape(snapshot.mode) << '"'
-         << ",\"health\":\"" << json_escape(snapshot.health) << '"'
+         << ",\"health\":\""
+         << json_escape(model_info_.degraded() ? "degraded" : snapshot.health) << '"'
          << ",\"uptime_s\":" << snapshot.uptime_s
-         << ",\"loaded_model\":{\"model_id\":\"model-mock-001\",\"model_name\":\"visionops-runtime-mock\",\"model_version\":\"1.0.0\",\"task_type\":\""
-         << json_escape(config_.mock_task_type) << "\",\"backend\":\"mock\"}"
+         << ",\"loaded_model\":" << loaded_model_json()
          << ",\"camera_connected\":true"
          << ",\"fps\":{\"camera_fps\":15.0,\"inference_fps\":" << inference_fps
          << ",\"snapshot_fps\":" << snapshot_fps << '}'
@@ -70,6 +73,30 @@ std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
          << ",\"last_frame_id\":" << optional_json(snapshot.last_frame_id)
          << ",\"last_error\":null"
          << ",\"resources\":{\"cpu_percent\":0.0,\"memory_mb\":0.0,\"npu_percent\":0.0,\"temperature_c\":0.0}}";
+  return stream.str();
+}
+
+std::string RuntimeApp::loaded_model_json() const {
+  std::ostringstream stream;
+  stream << std::fixed << std::setprecision(3)
+         << "{\"model_id\":\"" << json_escape(model_info_.model_id) << '"'
+         << ",\"model_name\":\"" << json_escape(model_info_.model_name) << '"'
+         << ",\"model_version\":\"" << json_escape(model_info_.model_version) << '"'
+         << ",\"task_type\":\"" << json_escape(model_info_.task_type) << '"'
+         << ",\"backend\":\"" << json_escape(model_info_.backend) << '"'
+         << ",\"target_platform\":\"" << json_escape(model_info_.target_platform) << '"'
+         << ",\"rknn_path\":\"" << json_escape(model_info_.rknn_path) << '"'
+         << ",\"config_path\":\"" << json_escape(model_info_.config_path) << '"'
+         << ",\"labels_count\":" << model_info_.labels_count
+         << ",\"input_size\":{\"width\":" << model_info_.input_width
+         << ",\"height\":" << model_info_.input_height << '}'
+         << ",\"score_threshold\":" << model_info_.score_threshold
+         << ",\"nms_threshold\":" << model_info_.nms_threshold
+         << ",\"model_load_error\":"
+         << (model_info_.model_load_error.empty()
+                 ? "null"
+                 : '"' + json_escape(model_info_.model_load_error) + '"')
+         << '}';
   return stream.str();
 }
 
@@ -110,8 +137,7 @@ std::string RuntimeApp::inference_result_json(
          << ",\"source\":\"runtime:mock\",\"status\":\"ok\""
          << ",\"result_id\":\"" << json_escape(identity.result_id) << '"'
          << ",\"task_type\":\"" << json_escape(inference.task_type) << '"'
-         << ",\"model\":{\"model_id\":\"model-mock-001\",\"model_name\":\"visionops-runtime-mock\",\"model_version\":\"1.0.0\",\"backend\":\"mock\",\"input_size\":{\"width\":"
-         << preprocess.input_width << ",\"height\":" << preprocess.input_height << "}}"
+         << ",\"model\":" << loaded_model_json()
          << ",\"image\":{\"width\":" << frame.width << ",\"height\":" << frame.height << '}'
          << ",\"timing\":{\"preprocess_ms\":" << preprocess.elapsed_ms
          << ",\"inference_ms\":" << inference.inference_ms

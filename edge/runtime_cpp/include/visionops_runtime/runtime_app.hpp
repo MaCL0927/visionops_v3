@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "visionops_runtime/app_config.hpp"
+#include "visionops_runtime/model_package.hpp"
 #include "visionops_runtime/rknn_runner.hpp"
 #include "visionops_runtime/runtime_state.hpp"
 #include "visionops_runtime/snapshot_provider.hpp"
@@ -35,8 +36,10 @@ class RuntimeApp {
       const MockFrame& frame,
       const PreprocessOutput& preprocess,
       const MockInferenceOutput& inference) const;
+  std::string loaded_model_json() const;
 
   AppConfig config_;
+  LoadedModelInfo model_info_;
   RuntimeState state_;
   RknnRunnerMock rknn_runner_;
   StreamWorkerMock stream_worker_;

@@ -35,6 +35,12 @@ CliArgs parse_cli_args(int argc, char* argv[]) {
       args.config.component = require_value(argc, argv, index);
     } else if (argument == "--mock-task-type") {
       args.config.mock_task_type = require_value(argc, argv, index);
+    } else if (argument == "--model-manifest") {
+      args.config.model_manifest = require_value(argc, argv, index);
+    } else if (argument == "--model-config") {
+      args.config.model_config = require_value(argc, argv, index);
+    } else if (argument == "--model-dir") {
+      args.config.model_dir = require_value(argc, argv, index);
     } else {
       throw std::invalid_argument("未知参数: " + argument);
     }
@@ -55,6 +61,9 @@ std::string cli_help_text(const std::string& program) {
          "  --component <名称>        组件名称，默认 rknn_runtime\n"
          "  --mock-task-type <类型>   detection、obb、segmentation、"
          "roi_classification 或 classification\n"
+         "  --model-manifest <路径>  模型包 manifest JSON\n"
+         "  --model-config <路径>    模型 YAML 配置\n"
+         "  --model-dir <路径>       模型包目录及相对路径基准\n"
          "  --help                    显示帮助\n";
 }
 

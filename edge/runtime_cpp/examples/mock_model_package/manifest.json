@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "message_type": "model_package_manifest",
+  "package_id": "package-mock-tube-detector-2.1.0-rk3588",
+  "model_name": "mock-tube-detector",
+  "model_version": "2.1.0",
+  "task_type": "detection",
+  "target_platform": "rk3588",
+  "files": {
+    "rknn": "model.rknn",
+    "yaml": "model.yaml",
+    "labels": "labels.txt"
+  },
+  "input": {
+    "size": [640, 640]
+  },
+  "postprocess": {
+    "score_threshold": 0.4,
+    "nms_threshold": 0.5
+  },
+  "notes": "仅用于 M9.1 配置解析测试，不包含真实模型文件。"
+}
