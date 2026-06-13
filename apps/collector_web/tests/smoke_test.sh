@@ -29,6 +29,7 @@ trap cleanup EXIT INT TERM
 python -c 'import socket, sys
 for port in (18080, 8090):
     sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind(("127.0.0.1", port))
     except OSError as exc:

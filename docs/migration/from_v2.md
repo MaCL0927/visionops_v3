@@ -47,6 +47,14 @@
 - 前端只访问 Collector，不直接访问 Runtime 或设备内部其他端口。
 - Runtime Mock 仅作为真实 C++ RKNN Runtime 的接口替身，迁移验收不能把 Mock 当作硬件推理结论。
 
+旧 Gateway/Modbus 服务不得原样复制。v3 先以标准 `inference_result -> gateway_message -> register map` 重新建立边界：
+
+- M5 Gateway / Modbus Mock 只用于本机契约联调，不连接真实 PLC。
+- Mock 默认使用 Modbus TCP `1502` 端口，不使用 `502`。
+- Gateway 只消费标准推理结果，不继承 v2 对模型张量、文件路径或进程内部状态的隐式依赖。
+- Modbus 寄存器只表达心跳和业务结果，不承载图片或大块 JSON。
+- `carton_tube_check`、`carton_partition_check` 等应用按业务契约重建专用 register map，并单独验收 PLC 握手、字节序、超时和故障安全值。
+
 ## 5. 禁止迁移的历史残留
 
 - 未使用脚本、重复入口和一次性修复文件。
