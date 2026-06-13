@@ -47,6 +47,10 @@
 - 前端只访问 Collector，不直接访问 Runtime 或设备内部其他端口。
 - Runtime Mock 仅作为真实 C++ RKNN Runtime 的接口替身，迁移验收不能把 Mock 当作硬件推理结论。
 
+M7 已按 v3 边界重建 Capture、Validate 和 Production 三个核心 Web 页面。迁移仅参考 v2 的页签位置、预览工作区和状态展示意图，没有复制旧巨型 `app.js`、旧相机请求、旧模型加载或旧业务判断。
+
+后续 Web 功能迁移必须继续遵守：页面经 Collector 后端访问 Runtime/Gateway/App；推理留在 C++ Runtime；纸筒、隔板等决策留在 Gateway app 层；不得因为前端便利而重新引入跨端口直连。
+
 旧 Gateway/Modbus 服务不得原样复制。v3 先以标准 `inference_result -> gateway_message -> register map` 重新建立边界：
 
 - M5 Gateway / Modbus Mock 只用于本机契约联调，不连接真实 PLC。

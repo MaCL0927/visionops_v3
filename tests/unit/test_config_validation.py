@@ -12,6 +12,7 @@ from tools.config.validate_config import (
     load_configuration,
     validate_configuration,
 )
+from apps.collector_web.backend.config_loader import load_config as load_collector_config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -60,3 +61,16 @@ def test_port_conflict_fails() -> None:
 
     with pytest.raises(ConfigValidationError, match="端口冲突"):
         validate_configuration(invalid_edge, task, apps)
+
+
+def test_collector_config_loads_m7_downstreams() -> None:
+    config = load_collector_config([
+        "--config", str(APP_COLLECTOR),
+        "--port", "18090",
+    ])
+    assert config.port == 18090
+    assert config.runtime_url == "http://127.0.0.1:18080"
+    assert config.gateway_url == "http://127.0.0.1:19090"
+    assert config.business_app_url == "http://127.0.0.1:19110"
+    assert config.snapshot_refresh_interval_ms == 1000
+    assert config.status_refresh_interval_ms == 2000

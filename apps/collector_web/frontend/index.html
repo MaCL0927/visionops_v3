@@ -3,46 +3,69 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>VisionOps Collector Web</title>
-    <style>
-      body { font-family: sans-serif; margin: 24px; line-height: 1.5; }
-      button { margin: 4px; padding: 8px 12px; }
-      pre { background: #f4f4f4; border: 1px solid #ddd; padding: 12px; overflow: auto; }
-      img { max-width: 640px; border: 1px solid #ddd; min-height: 1px; }
-      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
-      .panel { border: 1px solid #ccc; padding: 16px; }
-    </style>
+    <title>VisionOps Edge Console</title>
+    <link rel="stylesheet" href="/static/css/main.css">
   </head>
   <body>
-    <h1>VisionOps Collector Web</h1>
-    <p>本页面只通过 Collector 后端代理访问 Runtime，不直接连接相机或 Runtime 端口。</p>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">VISIONOPS V3 / EDGE</p>
+        <h1>边缘视觉工作台</h1>
+      </div>
+      <div class="topbar-status"><span id="global-status-dot" class="status-dot"></span><span id="global-status">Collector 检查中</span></div>
+    </header>
 
-    <div>
-      <button id="refresh-status">刷新状态</button>
-      <button id="start-preview">启动预览</button>
-      <button id="stop-preview">停止预览</button>
-      <button id="infer-once">单次推理</button>
-    </div>
+    <nav class="tabs" aria-label="核心页面">
+      <button class="tab active" data-page="capture">采集上传 <small>Capture</small></button>
+      <button class="tab" data-page="validate">模型验证 <small>Validate</small></button>
+      <button class="tab" data-page="production">生产运行 <small>Production</small></button>
+    </nav>
 
-    <div class="grid">
-      <section class="panel">
-        <h2>Collector 健康状态</h2>
-        <pre id="collector-health">尚未加载</pre>
+    <main>
+      <section id="page-capture" class="page active">
+        <div class="page-heading">
+          <div><p class="eyebrow">采集上传 / Capture</p><h2>当前 Runtime 快照</h2><p>图像仅通过 Collector 代理读取，不直接连接相机。</p></div>
+          <div class="actions"><button id="capture-refresh" class="primary">刷新快照</button><button id="capture-download">保存到本地</button><button id="capture-export" disabled>导出采集包（预留）</button></div>
+        </div>
+        <div class="workspace capture-workspace">
+          <article class="viewer-card"><img id="capture-image" alt="Runtime snapshot"><div id="capture-empty" class="empty-state">等待 Runtime 快照</div></article>
+          <aside class="info-card"><h3>采集说明</h3><dl><dt>来源</dt><dd>/api/runtime/snapshot.jpg</dd><dt>刷新方式</dt><dd>手动或配置间隔</dd><dt>上传状态</dt><dd>本阶段未接服务端上传</dd></dl><p id="capture-message" class="message">尚未刷新</p></aside>
+        </div>
       </section>
-      <section class="panel">
-        <h2>Runtime 状态</h2>
-        <pre id="runtime-status">尚未加载</pre>
-      </section>
-      <section class="panel">
-        <h2>Latest Result</h2>
-        <pre id="latest-result">尚未生成结果</pre>
-      </section>
-      <section class="panel">
-        <h2>Snapshot</h2>
-        <img id="snapshot" alt="Runtime snapshot">
-      </section>
-    </div>
 
-    <script src="/static/app.js"></script>
+      <section id="page-validate" class="page">
+        <div class="page-heading">
+          <div><p class="eyebrow">模型验证 / Validate</p><h2>单帧推理与结果叠加</h2><p>Collector 触发 Runtime 单次推理，前端只绘制标准结果。</p></div>
+          <div class="actions"><button id="validate-infer" class="primary">执行 infer_once</button><button id="validate-refresh">读取 latest_result</button></div>
+        </div>
+        <div class="workspace validate-workspace">
+          <article class="viewer-card overlay-viewer"><img id="validate-image" alt="Validation snapshot"><canvas id="validate-overlay"></canvas><div id="validate-empty" class="empty-state">执行单次推理后显示结果</div></article>
+          <aside class="info-card">
+            <h3>推理耗时</h3>
+            <div class="metrics"><div><span>预处理</span><b id="timing-preprocess">--</b></div><div><span>推理</span><b id="timing-inference">--</b></div><div><span>后处理</span><b id="timing-postprocess">--</b></div><div><span>总耗时</span><b id="timing-total">--</b></div></div>
+            <h3>Latest Result</h3><pre id="validate-result">尚无结果</pre>
+          </aside>
+        </div>
+      </section>
+
+      <section id="page-production" class="page">
+        <div class="page-heading">
+          <div><p class="eyebrow">生产运行 / Production</p><h2>组件与业务状态</h2><p>依赖服务离线时显示 unreachable，不影响 Collector 页面。</p></div>
+          <div class="actions"><button id="production-refresh" class="primary">手动刷新状态</button></div>
+        </div>
+        <div class="status-grid">
+          <article class="status-card"><div class="card-title"><h3>Collector</h3><span id="collector-badge" class="badge">unknown</span></div><pre id="collector-status">加载中</pre></article>
+          <article class="status-card"><div class="card-title"><h3>Runtime</h3><span id="runtime-badge" class="badge">unknown</span></div><pre id="runtime-status">加载中</pre></article>
+          <article class="status-card"><div class="card-title"><h3>Gateway</h3><span id="gateway-badge" class="badge">unknown</span></div><pre id="gateway-status">加载中</pre></article>
+          <article class="status-card"><div class="card-title"><h3>Business App</h3><span id="app-badge" class="badge">unknown</span></div><pre id="app-status">加载中</pre></article>
+        </div>
+        <div class="register-grid">
+          <article class="register-card"><h3>Gateway Holding Registers</h3><div id="gateway-registers" class="register-table empty-copy">服务未连接</div></article>
+          <article class="register-card"><h3>Business App Registers</h3><div id="app-registers" class="register-table empty-copy">服务未连接</div></article>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/static/js/main.js"></script>
   </body>
 </html>

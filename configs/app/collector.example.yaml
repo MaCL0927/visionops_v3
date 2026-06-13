@@ -6,6 +6,15 @@ app:
   version: "1.0"
 
 collector:
+  device_id: example-edge-001
+  component: collector_web
+  downstream:
+    runtime_url: http://127.0.0.1:18080
+    gateway_url: http://127.0.0.1:19090
+    business_app_url: http://127.0.0.1:19110
+  refresh:
+    snapshot_refresh_interval_ms: 1000
+    status_refresh_interval_ms: 2000
   preview:
     enabled: true
     max_fps: 5

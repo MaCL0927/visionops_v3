@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import signal
 import threading
 import time
@@ -28,6 +29,12 @@ PROXY_PATHS = {
     "/api/runtime/latest_result": "GET",
     "/api/runtime/snapshot.jpg": "GET",
 }
+DOWNSTREAM_PATHS = {
+    "/api/gateway/status": ("gateway", "/api/gateway/status", True),
+    "/api/gateway/registers": ("gateway", "/api/gateway/registers", False),
+    "/api/app/status": ("business_app", "/api/app/status", True),
+    "/api/app/registers": ("business_app", "/api/app/registers", False),
+}
 
 
 class CollectorServer(ThreadingHTTPServer):
@@ -41,6 +48,8 @@ class CollectorServer(ThreadingHTTPServer):
         self.config = config
         self.started_at = time.monotonic()
         self.runtime_client = RuntimeClient(config.runtime_url)
+        self.gateway_client = RuntimeClient(config.gateway_url)
+        self.business_app_client = RuntimeClient(config.business_app_url)
 
     def uptime_s(self) -> float:
         return time.monotonic() - self.started_at
@@ -60,14 +69,21 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         if path == "/":
             self._serve_file(FRONTEND_DIR / "index.html", "text/html; charset=utf-8")
             return
-        if path == "/static/app.js":
-            self._serve_file(FRONTEND_DIR / "static/app.js", "text/javascript; charset=utf-8")
+        if path.startswith("/static/"):
+            self._serve_static(path)
             return
         if path == "/health":
             self._send_health()
             return
         if path == "/api/collector/status":
             self._send_collector_status()
+            return
+        if path == "/api/collector/config":
+            self._send_frontend_config()
+            return
+        if path in DOWNSTREAM_PATHS:
+            name, target, status_endpoint = DOWNSTREAM_PATHS[path]
+            self._proxy_downstream(name, target, status_endpoint)
             return
         if path in PROXY_PATHS:
             self._proxy_runtime(path, expected_method=PROXY_PATHS[path])
@@ -89,6 +105,17 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             return
         send_bytes(self, 200, body, content_type, {"Cache-Control": "no-cache"})
 
+    def _serve_static(self, request_path: str) -> None:
+        relative = request_path.removeprefix("/static/")
+        if not relative or ".." in Path(relative).parts:
+            self._send_collector_error(404, "STATIC_FILE_NOT_FOUND", "静态资源不存在", False)
+            return
+        target = FRONTEND_DIR / "static" / relative
+        content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        if content_type in {"text/javascript", "text/css"}:
+            content_type += "; charset=utf-8"
+        self._serve_file(target, content_type)
+
     def _send_health(self) -> None:
         config = self.server.config
         send_json(
@@ -103,8 +130,19 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
                 "timestamp_ms": timestamp_ms(),
                 "uptime_s": round(self.server.uptime_s(), 3),
                 "runtime_url": config.runtime_url,
+                "gateway_url": config.gateway_url,
+                "business_app_url": config.business_app_url,
             },
         )
+
+    def _send_frontend_config(self) -> None:
+        config = self.server.config
+        send_json(self, 200, {
+            "schema_version": "1.0",
+            "message_type": "collector_frontend_config",
+            "snapshot_refresh_interval_ms": config.snapshot_refresh_interval_ms,
+            "status_refresh_interval_ms": config.status_refresh_interval_ms,
+        })
 
     def _collector_snapshot(self) -> dict[str, Any]:
         config = self.server.config
@@ -151,11 +189,51 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
                 "runtime": runtime,
                 "proxy": {
                     "runtime_url": self.server.config.runtime_url,
+                    "gateway_url": self.server.config.gateway_url,
+                    "business_app_url": self.server.config.business_app_url,
                     "timeout_s": self.server.runtime_client.timeout_s,
                     "mode": "http",
                 },
             },
         )
+
+    def _proxy_downstream(self, name: str, target: str, status_endpoint: bool) -> None:
+        clients = {
+            "gateway": (self.server.gateway_client, self.server.config.gateway_url),
+            "business_app": (self.server.business_app_client, self.server.config.business_app_url),
+        }
+        client, service_url = clients[name]
+        try:
+            response = client.request("GET", target)
+        except RuntimeUnavailable as error:
+            if status_endpoint:
+                send_json(self, 200, {
+                    "schema_version": "1.0",
+                    "message_type": f"{name}_proxy_status",
+                    "status": "unreachable",
+                    "health": "unreachable",
+                    "reachable": False,
+                    "service": name,
+                    "error": {
+                        "code": f"{name.upper()}_UNREACHABLE",
+                        "message": f"Collector 无法连接 {name}",
+                        "detail": str(error),
+                        "recoverable": True,
+                    },
+                })
+            else:
+                self._send_collector_error(
+                    502, f"{name.upper()}_UNREACHABLE", f"Collector 无法连接 {name}",
+                    True, detail=str(error),
+                )
+            return
+        if response.content_type != "application/json":
+            self._send_collector_error(502, "INVALID_DOWNSTREAM_RESPONSE", "下游返回非 JSON 内容", True, detail={"service": name, "content_type": response.content_type})
+            return
+        send_bytes(self, response.status_code, response.body, "application/json; charset=utf-8", {
+            "X-VisionOps-Proxied-By": self.server.config.component,
+            "X-VisionOps-Downstream-Url": service_url,
+        })
 
     def _decode_runtime_json(self, response: RuntimeResponse) -> dict[str, Any]:
         if response.content_type != "application/json":
@@ -271,7 +349,7 @@ def run(config: CollectorConfig) -> int:
     signal.signal(signal.SIGTERM, request_shutdown)
     print(
         f"VisionOps Collector Web 正在监听 {config.host}:{config.port}，"
-        f"Runtime={config.runtime_url}"
+        f"Runtime={config.runtime_url}，Gateway={config.gateway_url}，App={config.business_app_url}"
     )
     try:
         server.serve_forever(poll_interval=0.2)

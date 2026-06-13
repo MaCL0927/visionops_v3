@@ -5,15 +5,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 BUILD_DIR="${VISIONOPS_BUILD_DIR:-${ROOT_DIR}/build}"
 RUNTIME_BINARY="${BUILD_DIR}/edge/runtime_cpp/visionops_runtime_mock"
-RUNTIME_PORT="18080"
-COLLECTOR_PORT="8090"
+RUNTIME_PORT="${VISIONOPS_RUNTIME_PORT:-18080}"
+COLLECTOR_PORT="${VISIONOPS_COLLECTOR_PORT:-8090}"
+GATEWAY_PORT="${VISIONOPS_GATEWAY_PORT:-19090}"
+MODBUS_PORT="${VISIONOPS_MODBUS_PORT:-1502}"
+BUSINESS_APP_PORT="${VISIONOPS_BUSINESS_APP_PORT:-19119}"
 RUNTIME_LOG="$(mktemp /tmp/visionops-runtime.XXXXXX.log)"
 COLLECTOR_LOG="$(mktemp /tmp/visionops-collector.XXXXXX.log)"
+GATEWAY_LOG="$(mktemp /tmp/visionops-gateway.XXXXXX.log)"
 SNAPSHOT_FILE="$(mktemp /tmp/visionops-collector-snapshot.XXXXXX.jpg)"
 RUNTIME_PID=""
 COLLECTOR_PID=""
+GATEWAY_PID=""
 
 cleanup() {
+  if [[ -n "${GATEWAY_PID}" ]] && kill -0 "${GATEWAY_PID}" 2>/dev/null; then
+    kill -TERM "${GATEWAY_PID}" 2>/dev/null || true
+    wait "${GATEWAY_PID}" 2>/dev/null || true
+  fi
   if [[ -n "${COLLECTOR_PID}" ]] && kill -0 "${COLLECTOR_PID}" 2>/dev/null; then
     kill -TERM "${COLLECTOR_PID}" 2>/dev/null || true
     wait "${COLLECTOR_PID}" 2>/dev/null || true
@@ -22,12 +31,12 @@ cleanup() {
     kill -TERM "${RUNTIME_PID}" 2>/dev/null || true
     wait "${RUNTIME_PID}" 2>/dev/null || true
   fi
-  rm -f "${RUNTIME_LOG}" "${COLLECTOR_LOG}" "${SNAPSHOT_FILE}"
+  rm -f "${RUNTIME_LOG}" "${COLLECTOR_LOG}" "${GATEWAY_LOG}" "${SNAPSHOT_FILE}"
 }
 trap cleanup EXIT INT TERM
 
 python -c 'import socket, sys
-for port in (18080, 8090):
+for port in map(int, sys.argv[1:]):
     sock = socket.socket()
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -35,7 +44,7 @@ for port in (18080, 8090):
     except OSError as exc:
         raise SystemExit(f"端口 {port} 不可用: {exc}")
     finally:
-        sock.close()'
+        sock.close()' "${RUNTIME_PORT}" "${COLLECTOR_PORT}" "${GATEWAY_PORT}" "${MODBUS_PORT}" "${BUSINESS_APP_PORT}"
 
 cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}"
 cmake --build "${BUILD_DIR}" -j4 --target visionops_runtime_mock
@@ -54,10 +63,23 @@ python -m apps.collector_web.backend.main \
   --host 127.0.0.1 \
   --port "${COLLECTOR_PORT}" \
   --runtime-url "http://127.0.0.1:${RUNTIME_PORT}" \
+  --gateway-url "http://127.0.0.1:${GATEWAY_PORT}" \
+  --business-app-url "http://127.0.0.1:${BUSINESS_APP_PORT}" \
   --device-id example-edge-smoke \
   --component collector_web \
   >"${COLLECTOR_LOG}" 2>&1 &
 COLLECTOR_PID=$!
+
+python -m edge.gateway_adapter.gateway_mock_service \
+  --host 127.0.0.1 \
+  --port "${GATEWAY_PORT}" \
+  --upstream-url "http://127.0.0.1:${COLLECTOR_PORT}" \
+  --upstream-kind collector \
+  --modbus-host 127.0.0.1 \
+  --modbus-port "${MODBUS_PORT}" \
+  --poll-interval-ms 5000 \
+  >"${GATEWAY_LOG}" 2>&1 &
+GATEWAY_PID=$!
 
 BASE_URL="http://127.0.0.1:${COLLECTOR_PORT}"
 for _ in $(seq 1 50); do
@@ -66,8 +88,17 @@ for _ in $(seq 1 50); do
   fi
   sleep 0.1
 done
+for _ in $(seq 1 50); do
+  if curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/health" >/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
 
 curl --silent --fail "${BASE_URL}/health" | python -m json.tool >/dev/null
+curl --silent --fail "${BASE_URL}/" | grep -q 'Production'
+curl --silent --fail "${BASE_URL}/static/css/main.css" >/dev/null
+curl --silent --fail "${BASE_URL}/static/js/main.js" >/dev/null
 curl --silent --fail "${BASE_URL}/api/collector/status" | python -m json.tool >/dev/null
 curl --silent --fail "${BASE_URL}/api/runtime/status" | python -m json.tool >/dev/null
 curl --silent --fail -X POST -H 'Content-Type: application/json' -d '{}' \
@@ -75,9 +106,15 @@ curl --silent --fail -X POST -H 'Content-Type: application/json' -d '{}' \
 curl --silent --fail -X POST -H 'Content-Type: application/json' -d '{}' \
   "${BASE_URL}/api/runtime/infer_once" | python -m json.tool >/dev/null
 curl --silent --fail "${BASE_URL}/api/runtime/latest_result" | python -m json.tool >/dev/null
+curl --silent --fail "${BASE_URL}/api/gateway/status" | python -m json.tool >/dev/null
+curl --silent --fail "${BASE_URL}/api/gateway/registers" | python -m json.tool >/dev/null
+curl --silent --fail "${BASE_URL}/api/app/status" | python -c 'import json,sys; data=json.load(sys.stdin); assert data["status"] == "unreachable"'
 curl --silent --fail "${BASE_URL}/api/runtime/snapshot.jpg" -o "${SNAPSHOT_FILE}"
 python -c 'import pathlib, sys; data=pathlib.Path(sys.argv[1]).read_bytes(); assert data[:2] == b"\xff\xd8" and data[-2:] == b"\xff\xd9"' "${SNAPSHOT_FILE}"
 
+kill -TERM "${GATEWAY_PID}"
+wait "${GATEWAY_PID}"
+GATEWAY_PID=""
 kill -TERM "${COLLECTOR_PID}"
 wait "${COLLECTOR_PID}"
 COLLECTOR_PID=""

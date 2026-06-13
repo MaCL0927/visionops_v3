@@ -67,6 +67,10 @@ M4 阶段进一步固定以下边界：
 
 `edge/runtime_cpp/` 中的 Runtime Mock 是后续真实 C++ RKNN Runtime 的接口替身。它只用于契约、Collector 和 Gateway 集成开发，不能作为生产推理能力或性能基准。
 
+M7 将 Collector Web 实际功能固定为三个工作区：Capture 通过 Collector 代理读取 Runtime snapshot；Validate 通过 Collector 触发 `infer_once` 并仅对标准结果做 bbox/OBB 可视化；Production 聚合 Runtime、Gateway 和 Business App 状态及寄存器。
+
+三个页面都只访问 Collector 同源 API。Web 不直接取相机、不加载模型、不执行业务判断；下游不可达时页面显示 `unreachable`，Collector 本身保持可诊断。
+
 ## 5. Gateway Adapter
 
 Gateway Adapter 将标准化 `InferenceResult` 转换为上层 Gateway 所需消息，负责：

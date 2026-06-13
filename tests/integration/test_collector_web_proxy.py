@@ -115,7 +115,12 @@ def runtime_mock_binary_for_collector(tmp_path_factory: pytest.TempPathFactory) 
     return build_dir / "edge/runtime_cpp/visionops_runtime_mock"
 
 
-def _collector_command(port: int, runtime_url: str) -> list[str]:
+def _collector_command(
+    port: int,
+    runtime_url: str,
+    gateway_url: str | None = None,
+    business_app_url: str | None = None,
+) -> list[str]:
     return [
         sys.executable,
         "-m",
@@ -126,6 +131,10 @@ def _collector_command(port: int, runtime_url: str) -> list[str]:
         str(port),
         "--runtime-url",
         runtime_url,
+        "--gateway-url",
+        gateway_url or f"http://127.0.0.1:{_free_port()}",
+        "--business-app-url",
+        business_app_url or f"http://127.0.0.1:{_free_port()}",
         "--device-id",
         "example-edge-collector-test",
         "--component",
@@ -156,6 +165,32 @@ def test_collector_status_survives_unreachable_runtime() -> None:
         assert combined["runtime"]["health"] == "unreachable"
         assert combined["runtime"]["reachable"] is False
         assert combined["runtime"]["error"]["code"] == "RUNTIME_UNREACHABLE"
+
+        status, content_type, html, _ = _request(f"{collector_url}/")
+        assert status == 200 and content_type == "text/html"
+        assert b"Capture" in html and b"Validate" in html and b"Production" in html
+
+        for path, expected_type in (
+            ("/static/css/main.css", "text/css"),
+            ("/static/js/main.js", "text/javascript"),
+            ("/static/js/pages/capture.js", "text/javascript"),
+            ("/static/js/pages/production.js", "text/javascript"),
+            ("/static/js/render/overlay.js", "text/javascript"),
+        ):
+            status, content_type, body, _ = _request(f"{collector_url}{path}")
+            assert status == 200 and content_type == expected_type and body
+            if path.endswith("production.js"):
+                assert b"unreachable" in body
+
+        status, gateway = _request_json(f"{collector_url}/api/gateway/status")
+        assert status == 200
+        assert gateway["status"] == "unreachable"
+        assert gateway["reachable"] is False
+
+        status, app = _request_json(f"{collector_url}/api/app/status")
+        assert status == 200
+        assert app["status"] == "unreachable"
+        assert app["reachable"] is False
 
 
 def test_collector_proxies_runtime_mock(
@@ -224,3 +259,48 @@ def test_collector_proxies_runtime_mock(
             assert status == 200
             assert combined["runtime"]["reachable"] is True
             assert combined["runtime"]["health"] == "ok"
+
+
+def test_collector_proxies_gateway_registers() -> None:
+    collector_port = _free_port()
+    gateway_port = _free_port()
+    gateway_modbus_port = _free_port()
+    unavailable_runtime_port = _free_port()
+    unavailable_app_port = _free_port()
+    gateway_command = [
+        sys.executable,
+        "-m",
+        "edge.gateway_adapter.gateway_mock_service",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(gateway_port),
+        "--upstream-url",
+        f"http://127.0.0.1:{unavailable_runtime_port}",
+        "--upstream-kind",
+        "runtime",
+        "--modbus-host",
+        "127.0.0.1",
+        "--modbus-port",
+        str(gateway_modbus_port),
+        "--poll-interval-ms",
+        "5000",
+    ]
+    collector_url = f"http://127.0.0.1:{collector_port}"
+    with _managed_process(gateway_command) as gateway:
+        _wait_for_health(gateway, f"http://127.0.0.1:{gateway_port}/health")
+        command = _collector_command(
+            collector_port,
+            f"http://127.0.0.1:{unavailable_runtime_port}",
+            f"http://127.0.0.1:{gateway_port}",
+            f"http://127.0.0.1:{unavailable_app_port}",
+        )
+        with _managed_process(command) as collector:
+            _wait_for_health(collector, f"{collector_url}/health")
+            status, gateway_status = _request_json(f"{collector_url}/api/gateway/status")
+            assert status == 200
+            assert gateway_status["message_type"] == "gateway_status"
+            status, registers = _request_json(f"{collector_url}/api/gateway/registers")
+            assert status == 200
+            assert registers["message_type"] == "holding_register_snapshot"
+            assert len(registers["registers"]) == 20
