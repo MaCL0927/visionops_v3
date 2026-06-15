@@ -4,6 +4,7 @@
 #include <cctype>
 #include <fstream>
 #include <sstream>
+#include <vector>
 
 namespace visionops::runtime {
 
@@ -45,17 +46,44 @@ std::vector<std::string> parse_list(const std::string& value) {
 }
 
 bool parse_input_size(const std::string& value, int& width, int& height) {
-  const auto items = parse_list(value);
-  if (items.size() < 2) {
-    return false;
+  std::string normalized = trim(value);
+  if (normalized.empty()) {
+    return true;
   }
+
+  // 兼容常见写法：input_size: [640, 640] / input_size: [640] / input_size: 640
+  auto items = parse_list(normalized);
+  if (items.empty()) {
+    std::replace(normalized.begin(), normalized.end(), ',', ' ');
+    std::istringstream stream(normalized);
+    std::string item;
+    while (stream >> item) {
+      items.push_back(unquote(item));
+    }
+  }
+
   try {
-    width = std::stoi(items[0]);
-    height = std::stoi(items[1]);
-    return width > 0 && height > 0;
+    if (items.size() == 1) {
+      const int size = std::stoi(items[0]);
+      if (size <= 0) return false;
+      width = size;
+      height = size;
+      return true;
+    }
+    if (items.size() >= 2) {
+      width = std::stoi(items[0]);
+      height = std::stoi(items[1]);
+      return width > 0 && height > 0;
+    }
   } catch (const std::exception&) {
     return false;
   }
+  return false;
+}
+
+bool is_input_size_key(const std::string& key) {
+  return key == "input_size" || key == "imgsz" || key == "image_size" ||
+         key == "input_shape" || key == "model_input_size";
 }
 
 }  // namespace
@@ -95,7 +123,7 @@ bool load_model_config_yaml(
         config.model_version = unquote(value);
       } else if (key == "task_type") {
         config.task_type = unquote(value);
-      } else if (key == "input_size") {
+      } else if (is_input_size_key(key)) {
         if (!parse_input_size(value, config.input_width, config.input_height)) {
           error_message = "模型配置 input_size 非法，行 " + std::to_string(line_number);
           return false;

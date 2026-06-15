@@ -28,8 +28,13 @@ void validate_app_config(const AppConfig& config) {
     throw std::invalid_argument("score-threshold 和 nms-threshold 必须位于 0 到 1");
   }
   if (config.frame_source != "mock" && config.frame_source != "test_image" &&
-      config.frame_source != "v4l2") {
-    throw std::invalid_argument("frame-source 仅支持 mock、test_image 或 v4l2");
+      config.frame_source != "v4l2" && config.frame_source != "hp60c_bridge" &&
+      config.frame_source != "hp60c") {
+    throw std::invalid_argument("frame-source 仅支持 mock、test_image、v4l2 或 hp60c_bridge");
+  }
+  if ((config.frame_source == "hp60c_bridge" || config.frame_source == "hp60c") &&
+      config.hp60c_url.empty()) {
+    throw std::invalid_argument("hp60c-url 不能为空");
   }
   if (config.camera_width <= 0 || config.camera_height <= 0 || config.camera_fps <= 0) {
     throw std::invalid_argument("camera-width、camera-height、camera-fps 必须为正数");

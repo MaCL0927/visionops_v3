@@ -58,15 +58,17 @@ RuntimeSnapshot RuntimeState::stop_preview() {
   return snapshot();
 }
 
-InferenceIdentity RuntimeState::begin_inference() {
+InferenceIdentity RuntimeState::begin_inference(
+    const std::string& frame_prefix,
+    const std::string& result_prefix) {
   std::lock_guard<std::mutex> lock(mutex_);
   ++sequence_;
   ++counters_.frames_in;
   running_ = true;
   mode_ = "detect";
   return {
-      sequence_id("frame-mock", sequence_),
-      sequence_id("result-mock", sequence_),
+      sequence_id(frame_prefix.c_str(), sequence_),
+      sequence_id(result_prefix.c_str(), sequence_),
       sequence_,
   };
 }

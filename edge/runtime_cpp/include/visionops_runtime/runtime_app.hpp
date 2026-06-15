@@ -24,7 +24,7 @@ class RuntimeApp {
   std::string stop_preview();
   std::string infer_once();
   std::optional<std::string> latest_result_json() const;
-  const std::vector<std::uint8_t>& snapshot_jpeg() const;
+  std::vector<std::uint8_t> snapshot_jpeg();
 
   const AppConfig& config() const;
   std::string snapshot_frame_id() const;

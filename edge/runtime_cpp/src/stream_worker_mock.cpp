@@ -7,13 +7,20 @@
 #include <cmath>
 #include <cstring>
 #include <sstream>
+#include <string>
 #include <utility>
 
 #include "visionops_runtime/json_utils.hpp"
 
+#ifdef VISIONOPS_HAS_OPENCV
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+#endif
+
 #ifdef __linux__
 #include <fcntl.h>
 #include <linux/videodev2.h>
+#include <netdb.h>
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -65,6 +72,195 @@ void yuyv_to_rgb888(const std::uint8_t* yuyv, std::size_t size, ImageBuffer& ima
   }
 }
 
+bool is_hp60c_source(const std::string& type) {
+  return type == "hp60c_bridge" || type == "hp60c";
+}
+
+struct HttpUrlParts {
+  std::string host{"127.0.0.1"};
+  int port{80};
+  std::string path{"/"};
+};
+
+std::string join_url_path(std::string base, const std::string& path) {
+  if (base.empty()) base = "http://127.0.0.1:18181";
+  if (base.rfind("http://", 0) != 0) base = "http://" + base;
+  if (path.empty()) return base;
+  const auto scheme = base.find("://");
+  const auto path_pos = base.find('/', scheme == std::string::npos ? 0 : scheme + 3);
+  if (path_pos != std::string::npos) {
+    base = base.substr(0, path_pos);
+  }
+  if (path.front() == '/') return base + path;
+  return base + "/" + path;
+}
+
+bool parse_http_url(const std::string& url, HttpUrlParts& out, std::string& error) {
+  const std::string prefix = "http://";
+  if (url.rfind(prefix, 0) != 0) {
+    error = "仅支持 http:// URL: " + url;
+    return false;
+  }
+  std::string rest = url.substr(prefix.size());
+  const auto slash = rest.find('/');
+  std::string host_port = slash == std::string::npos ? rest : rest.substr(0, slash);
+  out.path = slash == std::string::npos ? "/" : rest.substr(slash);
+  if (host_port.empty()) {
+    error = "HTTP URL 缺少主机名: " + url;
+    return false;
+  }
+  const auto colon = host_port.rfind(':');
+  if (colon != std::string::npos) {
+    out.host = host_port.substr(0, colon);
+    try {
+      out.port = std::stoi(host_port.substr(colon + 1));
+    } catch (const std::exception&) {
+      error = "HTTP URL 端口非法: " + url;
+      return false;
+    }
+  } else {
+    out.host = host_port;
+    out.port = 80;
+  }
+  if (out.host.empty() || out.port <= 0 || out.port > 65535) {
+    error = "HTTP URL 主机或端口非法: " + url;
+    return false;
+  }
+  return true;
+}
+
+bool http_get_bytes(
+    const std::string& url,
+    int timeout_ms,
+    std::vector<std::uint8_t>& body,
+    int& status_code,
+    std::string& content_type,
+    std::string& error) {
+#ifndef __linux__
+  (void)url; (void)timeout_ms; (void)body; (void)status_code; (void)content_type;
+  error = "当前平台未实现 HTTP 帧源";
+  return false;
+#else
+  HttpUrlParts parts;
+  if (!parse_http_url(url, parts, error)) return false;
+
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  addrinfo* addresses = nullptr;
+  const std::string port_text = std::to_string(parts.port);
+  const int lookup = getaddrinfo(parts.host.c_str(), port_text.c_str(), &hints, &addresses);
+  if (lookup != 0) {
+    error = "HTTP 主机解析失败: " + std::string(gai_strerror(lookup));
+    return false;
+  }
+
+  int fd = -1;
+  for (addrinfo* addr = addresses; addr != nullptr; addr = addr->ai_next) {
+    fd = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
+    if (fd < 0) continue;
+    timeval tv{};
+    tv.tv_sec = std::max(1, timeout_ms) / 1000;
+    tv.tv_usec = (std::max(1, timeout_ms) % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    if (connect(fd, addr->ai_addr, addr->ai_addrlen) == 0) break;
+    ::close(fd);
+    fd = -1;
+  }
+  freeaddrinfo(addresses);
+  if (fd < 0) {
+    error = "无法连接 HTTP Bridge: " + url + ": " + std::strerror(errno);
+    return false;
+  }
+
+  std::ostringstream req;
+  req << "GET " << parts.path << " HTTP/1.1\r\n"
+      << "Host: " << parts.host << ':' << parts.port << "\r\n"
+      << "Connection: close\r\n"
+      << "Cache-Control: no-cache\r\n\r\n";
+  const std::string text = req.str();
+  if (send(fd, text.data(), text.size(), 0) < 0) {
+    error = "HTTP 请求发送失败: " + std::string(std::strerror(errno));
+    ::close(fd);
+    return false;
+  }
+
+  std::string raw;
+  char buffer[8192];
+  while (true) {
+    const ssize_t count = recv(fd, buffer, sizeof(buffer), 0);
+    if (count == 0) break;
+    if (count < 0) {
+      error = "HTTP 响应读取失败: " + std::string(std::strerror(errno));
+      ::close(fd);
+      return false;
+    }
+    raw.append(buffer, static_cast<std::size_t>(count));
+    if (raw.size() > 32 * 1024 * 1024) {
+      error = "HTTP 响应过大";
+      ::close(fd);
+      return false;
+    }
+  }
+  ::close(fd);
+
+  const auto header_end = raw.find("\r\n\r\n");
+  if (header_end == std::string::npos) {
+    error = "HTTP 响应缺少 header/body 分隔符";
+    return false;
+  }
+  const std::string header = raw.substr(0, header_end);
+  std::istringstream hs(header);
+  std::string http_version;
+  hs >> http_version >> status_code;
+  std::string line;
+  while (std::getline(hs, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    auto colon = line.find(':');
+    if (colon == std::string::npos) continue;
+    std::string name = line.substr(0, colon);
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char ch) {
+      return static_cast<char>(std::tolower(ch));
+    });
+    std::string value = line.substr(colon + 1);
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), [](unsigned char ch) {
+      return std::isspace(ch) == 0;
+    }));
+    if (name == "content-type") content_type = value;
+  }
+  body.assign(raw.begin() + static_cast<std::ptrdiff_t>(header_end + 4), raw.end());
+  if (status_code < 200 || status_code >= 300) {
+    error = "HTTP Bridge 返回状态码 " + std::to_string(status_code) + ": " + url;
+    return false;
+  }
+  return true;
+#endif
+}
+
+#ifdef VISIONOPS_HAS_OPENCV
+bool decode_jpeg_to_rgb888(const std::vector<std::uint8_t>& jpeg, ImageBuffer& image, std::string& error) {
+  if (jpeg.empty()) {
+    error = "JPEG 数据为空";
+    return false;
+  }
+  cv::Mat encoded(1, static_cast<int>(jpeg.size()), CV_8UC1, const_cast<std::uint8_t*>(jpeg.data()));
+  cv::Mat bgr = cv::imdecode(encoded, cv::IMREAD_COLOR);
+  if (bgr.empty()) {
+    error = "OpenCV 无法解码 HP60C JPEG";
+    return false;
+  }
+  cv::Mat rgb;
+  cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
+  image.width = rgb.cols;
+  image.height = rgb.rows;
+  image.channels = 3;
+  image.pixel_format = "RGB888";
+  image.data.assign(rgb.data, rgb.data + rgb.total() * rgb.elemSize());
+  return image_buffer_valid_rgb(image);
+}
+#endif
+
 }  // namespace
 
 StreamWorkerMock::StreamWorkerMock() = default;
@@ -114,7 +310,20 @@ void StreamWorkerMock::start_preview() {
     return;
   }
   clear_error();
-  if (config_.type == "v4l2" && config_.enable_camera_thread) {
+  // 启动预览后先同步抓取一帧，避免 status/snapshot 在首次访问时仍显示 mock_jpeg。
+  if (config_.type == "v4l2" || is_hp60c_source(config_.type)) {
+    ImageBuffer initial_image;
+    std::string initial_error;
+    if (read_frame_once(initial_image, initial_error)) {
+      update_latest(std::move(initial_image));
+      clear_error();
+    } else if (!is_hp60c_source(config_.type)) {
+      // V4L2 首帧失败通常意味着设备不可读；HP60C 在未启用 OpenCV 时可能已经缓存 JPEG，
+      // 但不能解码成 RGB，此时不应影响 snapshot.jpg 输出。
+      set_error(initial_error);
+    }
+  }
+  if ((config_.type == "v4l2" || is_hp60c_source(config_.type)) && config_.enable_camera_thread) {
     stop_thread_.store(false);
     camera_thread_ = std::thread(&StreamWorkerMock::camera_loop, this);
   }
@@ -143,6 +352,20 @@ bool StreamWorkerMock::preview_running() const {
   return preview_running_;
 }
 
+bool StreamWorkerMock::latest_frame(ImageBuffer& image) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!image_buffer_valid_rgb(latest_image_)) return false;
+  image = latest_image_;
+  return true;
+}
+
+bool StreamWorkerMock::latest_snapshot_jpeg(std::vector<std::uint8_t>& jpeg) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (latest_jpeg_.empty()) return false;
+  jpeg = latest_jpeg_;
+  return true;
+}
+
 FrameSourceStatus StreamWorkerMock::status() const {
   std::lock_guard<std::mutex> lock(mutex_);
   FrameSourceStatus status;
@@ -153,13 +376,30 @@ FrameSourceStatus StreamWorkerMock::status() const {
   status.height = config_.type == "mock" ? 1080 : config_.camera_height;
   status.fps = measured_fps_ > 0.0 ? measured_fps_ : (config_.type == "mock" ? 15.0 : config_.camera_fps);
   status.pixel_format = config_.type == "v4l2" ? normalize_pixel_format(config_.camera_pixel_format) : "RGB888";
-  status.latest_timestamp_ms = latest_image_.timestamp_ms;
+  if (is_hp60c_source(config_.type)) status.pixel_format = "JPEG/RGB888";
+  status.latest_timestamp_ms = latest_image_.timestamp_ms > 0 ? latest_image_.timestamp_ms : latest_jpeg_timestamp_ms_;
   status.last_error = last_error_;
-  status.snapshot_encoder = "mock_jpeg";
+  if (is_hp60c_source(config_.type) && !latest_jpeg_.empty()) {
+    status.snapshot_encoder = "hp60c_bridge_jpeg";
+  } else {
+    status.snapshot_encoder = image_buffer_valid_rgb(latest_image_) ? "rgb888_jpeg" : "mock_jpeg";
+  }
   status.camera_id = config_.type == "v4l2" ? config_.camera_device : config_.type + "-camera";
+  if (is_hp60c_source(config_.type)) {
+    status.camera_id = config_.hp60c_url;
+    status.device = join_url_path(config_.hp60c_url, config_.hp60c_snapshot_path);
+  }
+  status.frames_captured = latest_sequence_;
   if (latest_sequence_ > 0) {
     std::ostringstream frame_id;
-    frame_id << "frame-camera-" << latest_sequence_;
+    if (is_hp60c_source(config_.type)) {
+      frame_id << "frame-hp60c-";
+    } else if (config_.type == "v4l2") {
+      frame_id << "frame-v4l2-";
+    } else {
+      frame_id << "frame-camera-";
+    }
+    frame_id << latest_sequence_;
     status.latest_frame_id = frame_id.str();
     if (latest_image_.width > 0) status.width = latest_image_.width;
     if (latest_image_.height > 0) status.height = latest_image_.height;
@@ -186,7 +426,7 @@ FrameReadResult StreamWorkerMock::next_frame(std::uint64_t sequence) {
     update_latest(result.image);
     return result;
   }
-  if (config_.type != "v4l2") {
+  if (config_.type != "v4l2" && !is_hp60c_source(config_.type)) {
     result.ok = false;
     result.error = "不支持的 frame-source: " + config_.type;
     set_error(result.error);
@@ -233,6 +473,9 @@ bool StreamWorkerMock::open_source(std::string& error) {
     opened_ = true;
     return true;
   }
+  if (is_hp60c_source(config_.type)) {
+    return open_hp60c_bridge(error);
+  }
   if (config_.type != "v4l2") {
     error = "不支持的 frame-source: " + config_.type;
     return false;
@@ -242,6 +485,10 @@ bool StreamWorkerMock::open_source(std::string& error) {
 
 void StreamWorkerMock::close_source() {
   if (config_.type == "v4l2") close_v4l2();
+  if (is_hp60c_source(config_.type)) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    opened_ = false;
+  }
 }
 
 void StreamWorkerMock::camera_loop() {
@@ -268,6 +515,9 @@ void StreamWorkerMock::camera_loop() {
 }
 
 bool StreamWorkerMock::read_frame_once(ImageBuffer& image, std::string& error) {
+  if (is_hp60c_source(config_.type)) {
+    return read_hp60c_bridge_frame(image, error);
+  }
   if (config_.type != "v4l2") {
     image = make_mock_image_for_sequence(++latest_sequence_);
     return true;
@@ -281,6 +531,63 @@ void StreamWorkerMock::update_latest(ImageBuffer image) {
   latest_sequence_ = std::max(latest_sequence_, image.sequence);
   latest_image_ = std::move(image);
   opened_ = true;
+}
+
+
+bool StreamWorkerMock::open_hp60c_bridge(std::string& error) {
+  const std::string health_url = join_url_path(config_.hp60c_url, config_.hp60c_health_path);
+  std::vector<std::uint8_t> body;
+  int status_code = 0;
+  std::string content_type;
+  if (!http_get_bytes(health_url, config_.camera_open_timeout_ms, body, status_code, content_type, error)) {
+    error = "HP60C SDK Bridge 健康检查失败: " + error;
+    std::lock_guard<std::mutex> lock(mutex_);
+    opened_ = false;
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  opened_ = true;
+  last_error_.clear();
+  return true;
+}
+
+bool StreamWorkerMock::read_hp60c_bridge_frame(ImageBuffer& image, std::string& error) {
+#ifndef VISIONOPS_HAS_OPENCV
+  (void)image;
+#endif
+  const std::string snapshot_url = join_url_path(config_.hp60c_url, config_.hp60c_snapshot_path);
+  std::vector<std::uint8_t> jpeg;
+  int status_code = 0;
+  std::string content_type;
+  if (!http_get_bytes(snapshot_url, config_.camera_read_timeout_ms, jpeg, status_code, content_type, error)) {
+    error = "HP60C SDK Bridge 快照读取失败: " + error;
+    return false;
+  }
+  if (jpeg.size() < 4 || jpeg[0] != 0xFF || jpeg[1] != 0xD8) {
+    error = "HP60C SDK Bridge 返回的不是 JPEG 图像";
+    return false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    latest_jpeg_ = jpeg;
+    latest_jpeg_timestamp_ms_ = now_timestamp_ms();
+    if (latest_sequence_ == 0) ++latest_sequence_;
+    opened_ = true;
+  }
+
+#ifdef VISIONOPS_HAS_OPENCV
+  if (!decode_jpeg_to_rgb888(jpeg, image, error)) {
+    return false;
+  }
+  image.timestamp_ms = now_timestamp_ms();
+  image.sequence = latest_sequence_ + 1;
+  image.camera_id = config_.hp60c_url;
+  image.source = "frame_source:hp60c_bridge";
+  return true;
+#else
+  error = "HP60C Bridge 已获取 JPEG，但当前 Runtime 未启用 OpenCV，无法解码为 RGB888 参与 RKNN 推理；请使用 -DVISIONOPS_ENABLE_OPENCV=ON 构建";
+  return false;
+#endif
 }
 
 bool StreamWorkerMock::open_v4l2(std::string& error) {

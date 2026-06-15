@@ -26,6 +26,9 @@ struct AppConfig {
   int camera_height{480};
   int camera_fps{30};
   std::string camera_pixel_format{"YUYV"};
+  std::string hp60c_url{"http://127.0.0.1:18181"};
+  std::string hp60c_snapshot_path{"/stream/snapshot.jpg"};
+  std::string hp60c_health_path{"/health"};
   std::string snapshot_source{"latest_frame"};
   bool enable_camera_thread{true};
   int camera_open_timeout_ms{3000};

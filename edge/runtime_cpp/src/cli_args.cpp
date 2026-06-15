@@ -65,6 +65,12 @@ CliArgs parse_cli_args(int argc, char* argv[]) {
       args.config.camera_fps = std::stoi(require_value(argc, argv, index));
     } else if (argument == "--camera-pixel-format") {
       args.config.camera_pixel_format = require_value(argc, argv, index);
+    } else if (argument == "--hp60c-url") {
+      args.config.hp60c_url = require_value(argc, argv, index);
+    } else if (argument == "--hp60c-snapshot-path") {
+      args.config.hp60c_snapshot_path = require_value(argc, argv, index);
+    } else if (argument == "--hp60c-health-path") {
+      args.config.hp60c_health_path = require_value(argc, argv, index);
     } else if (argument == "--snapshot-source") {
       args.config.snapshot_source = require_value(argc, argv, index);
     } else if (argument == "--enable-camera-thread") {
@@ -103,12 +109,15 @@ std::string cli_help_text(const std::string& program) {
          "  --dump-rknn-io           启动时打印 RKNN 输入输出属性\n"
          "  --score-threshold <值>   覆盖模型置信度阈值\n"
          "  --nms-threshold <值>     覆盖模型 NMS 阈值\n"
-         "  --frame-source <类型>     mock、test_image 或 v4l2，默认 mock\n"
+         "  --frame-source <类型>     mock、test_image、v4l2 或 hp60c_bridge，默认 mock\n"
          "  --camera-device <设备>    V4L2 设备，默认 /dev/video0\n"
          "  --camera-width <宽>       V4L2 宽度，默认 640\n"
          "  --camera-height <高>      V4L2 高度，默认 480\n"
          "  --camera-fps <帧率>       V4L2 帧率，默认 30\n"
          "  --camera-pixel-format <格式> V4L2 像素格式，M10 一期支持 YUYV\n"
+         "  --hp60c-url <URL>         HP60C SDK HTTP Bridge 地址，默认 http://127.0.0.1:18181\n"
+         "  --hp60c-snapshot-path <路径> HP60C 快照路径，默认 /stream/snapshot.jpg\n"
+         "  --hp60c-health-path <路径> HP60C 健康检查路径，默认 /health\n"
          "  --snapshot-source <来源>  latest_frame 或 mock，当前 JPEG 编码默认仍为 mock\n"
          "  --enable-camera-thread <true/false> 是否开启取流线程，默认 true\n"
          "  --camera-open-timeout-ms <毫秒> 摄像头打开超时占位参数\n"

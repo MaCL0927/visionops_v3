@@ -40,7 +40,9 @@ class RuntimeState {
   RuntimeSnapshot snapshot() const;
   RuntimeSnapshot start_preview();
   RuntimeSnapshot stop_preview();
-  InferenceIdentity begin_inference();
+  InferenceIdentity begin_inference(
+      const std::string& frame_prefix = "frame-mock",
+      const std::string& result_prefix = "result-mock");
   void complete_inference(const InferenceIdentity& identity, std::string result_json);
   void complete_inference_error(const InferenceIdentity& identity, std::string error_json);
   void record_error();

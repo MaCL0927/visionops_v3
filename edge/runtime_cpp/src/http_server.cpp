@@ -309,12 +309,14 @@ HttpResponse HttpServer::route(const HttpRequest& request) {
                         true);
   }
   if (request.path == "/api/runtime/snapshot.jpg") {
-    if (request.method != "GET") {
-      return method_not_allowed("GET");
+    if (request.method != "GET" && request.method != "HEAD") {
+      return method_not_allowed("GET, HEAD");
     }
     HttpResponse response;
     response.content_type = "image/jpeg";
-    response.body = app_.snapshot_jpeg();
+    if (request.method == "GET") {
+      response.body = app_.snapshot_jpeg();
+    }
     response.headers.emplace_back("X-Frame-Id", app_.snapshot_frame_id());
     response.headers.emplace_back("X-Timestamp-Ms", std::to_string(now_timestamp_ms()));
     response.headers.emplace_back("Cache-Control", "no-store");

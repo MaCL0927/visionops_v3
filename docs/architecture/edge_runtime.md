@@ -179,4 +179,4 @@ M10 将真实相机输入接入到 C++ Runtime 的 `stream_worker` 边界。Runt
 
 当前帧源类型包括 `mock`、`test_image` 和 `v4l2`。`v4l2` 一期在 Linux 上使用 `/dev/videoX`，优先支持 YUYV，并在帧源层转换为 RGB888。若设备不存在、被占用或格式不支持，Runtime 返回稳定 JSON 错误并在 `status.frame_source.last_error` 中暴露原因，不让服务崩溃。
 
-`start_preview/stop_preview` 控制取流线程，`infer_once` 优先使用最新缓存帧；若尚无缓存帧，会同步读取一次。该设计保证后续 HP60C SDK、RTSP 或硬件 JPEG 编码只需要扩展帧源和 snapshot provider，不应反向修改 RKNN Runner、后处理、Gateway 或 Web 页面。
+`start_preview/stop_preview` 控制取流线程，`infer_once` 优先使用最新缓存帧；若尚无缓存帧，会同步读取一次。M10.1 中 `snapshot.jpg` 会优先将最新 RGB888 帧编码为 JPEG，因此 Collector Web 可以通过 Runtime API 看到真实相机预览。后续 HP60C SDK、RTSP 或硬件 JPEG 编码只需要扩展帧源和 snapshot provider，不应反向修改 RKNN Runner、后处理、Gateway 或 Web 页面。

@@ -147,3 +147,28 @@ def test_snapshot_stays_available_without_real_camera(
             assert response.status == 200
             assert response.headers.get_content_type() == "image/jpeg"
         assert body.startswith(b"\xff\xd8")
+
+
+def test_snapshot_uses_latest_rgb_frame_after_infer_once(
+    runtime_frame_source_binary: Path,
+) -> None:
+    with _running_runtime(runtime_frame_source_binary) as base_url:
+        status_code, result = _request_json(
+            f"{base_url}/api/runtime/infer_once", method="POST"
+        )
+        assert status_code == 200
+        assert result["status"] == "ok"
+
+        with urllib.request.urlopen(f"{base_url}/api/runtime/snapshot.jpg", timeout=3) as response:
+            body = response.read()
+            assert response.status == 200
+            assert response.headers.get_content_type() == "image/jpeg"
+            assert response.headers.get("X-Frame-Id") == "frame-camera-1"
+        assert body.startswith(b"\xff\xd8")
+        assert body.endswith(b"\xff\xd9")
+        assert len(body) > 4096
+
+        status_code, status = _request_json(f"{base_url}/api/runtime/status")
+        assert status_code == 200
+        assert status["frame_source"]["snapshot_encoder"] == "rgb888_jpeg"
+        assert status["frame_source"]["latest_frame_id"] == "frame-camera-1"

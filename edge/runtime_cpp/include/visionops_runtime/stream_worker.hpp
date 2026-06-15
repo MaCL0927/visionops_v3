@@ -25,6 +25,9 @@ struct FrameSourceConfig {
   int camera_height{480};
   int camera_fps{30};
   std::string camera_pixel_format{"YUYV"};
+  std::string hp60c_url{"http://127.0.0.1:18181"};
+  std::string hp60c_snapshot_path{"/stream/snapshot.jpg"};
+  std::string hp60c_health_path{"/health"};
   std::string test_image;
   std::string snapshot_source{"latest_frame"};
   bool enable_camera_thread{true};
@@ -45,6 +48,7 @@ struct FrameSourceStatus {
   std::uint64_t latest_timestamp_ms{0};
   std::string last_error;
   std::string snapshot_encoder{"mock_jpeg"};
+  std::uint64_t frames_captured{0};
 };
 
 struct FrameReadResult {
@@ -67,6 +71,8 @@ class StreamWorkerMock {
   void start_preview();
   void stop_preview();
   FrameReadResult next_frame(std::uint64_t sequence);
+  bool latest_frame(ImageBuffer& image) const;
+  bool latest_snapshot_jpeg(std::vector<std::uint8_t>& jpeg) const;
   bool preview_running() const;
   FrameSourceStatus status() const;
 
@@ -79,6 +85,8 @@ class StreamWorkerMock {
   void camera_loop();
   bool read_frame_once(ImageBuffer& image, std::string& error);
   bool read_v4l2_frame(ImageBuffer& image, std::string& error);
+  bool read_hp60c_bridge_frame(ImageBuffer& image, std::string& error);
+  bool open_hp60c_bridge(std::string& error);
   bool open_v4l2(std::string& error);
   void close_v4l2();
   void update_latest(ImageBuffer image);
@@ -89,6 +97,8 @@ class StreamWorkerMock {
   bool opened_{true};
   std::string last_error_;
   ImageBuffer latest_image_;
+  std::vector<std::uint8_t> latest_jpeg_;
+  std::uint64_t latest_jpeg_timestamp_ms_{0};
   std::uint64_t latest_sequence_{0};
   double measured_fps_{0.0};
   std::atomic_bool stop_thread_{false};

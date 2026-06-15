@@ -27,6 +27,21 @@ void append_error(std::string& target, const std::string& error) {
   target += error;
 }
 
+std::string runtime_source(const AppConfig& config) {
+  return "runtime:" + config.backend;
+}
+
+std::string frame_prefix_for_source(const std::string& frame_source) {
+  if (frame_source == "hp60c_bridge" || frame_source == "hp60c") return "frame-hp60c";
+  if (frame_source == "v4l2") return "frame-v4l2";
+  if (frame_source == "test_image") return "frame-test-image";
+  return "frame-mock";
+}
+
+std::string result_prefix_for_backend(const std::string& backend) {
+  return backend == "rknn" ? "result-rknn" : "result-mock";
+}
+
 std::string fallback_postprocess(const std::string& task_type) {
   if (task_type == "obb") return make_obb_payload_json();
   if (task_type == "segmentation") return make_segmentation_payload_json();
@@ -43,6 +58,9 @@ FrameSourceConfig make_frame_source_config(const AppConfig& config) {
   frame_config.camera_height = config.camera_height;
   frame_config.camera_fps = config.camera_fps;
   frame_config.camera_pixel_format = config.camera_pixel_format;
+  frame_config.hp60c_url = config.hp60c_url;
+  frame_config.hp60c_snapshot_path = config.hp60c_snapshot_path;
+  frame_config.hp60c_health_path = config.hp60c_health_path;
   frame_config.test_image = config.test_image;
   frame_config.snapshot_source = config.snapshot_source;
   frame_config.enable_camera_thread = config.enable_camera_thread;
@@ -119,7 +137,7 @@ std::string RuntimeApp::health_json() const {
          << ",\"component\":\"" << json_escape(config_.component) << '"'
          << ",\"timestamp_ms\":" << now
          << ",\"trace_id\":\"" << make_trace_id(now) << '"'
-         << ",\"source\":\"runtime:mock\",\"status\":\"ok\""
+         << ",\"source\":\"" << json_escape(runtime_source(config_)) << "\",\"status\":\"ok\""
          << ",\"health\":\"" << (runtime_degraded() ? "degraded" : "ok") << '"'
          << ",\"ready\":true,\"version\":\"0.1.0\""
          << ",\"uptime_s\":" << snapshot.uptime_s << '}';
@@ -140,7 +158,7 @@ std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
          << ",\"component\":\"" << json_escape(config_.component) << '"'
          << ",\"timestamp_ms\":" << now
          << ",\"trace_id\":\"" << make_trace_id(now) << '"'
-         << ",\"source\":\"runtime:mock\",\"status\":\"ok\""
+         << ",\"source\":\"" << json_escape(runtime_source(config_)) << "\",\"status\":\"ok\""
          << ",\"running\":" << json_bool(snapshot.running)
          << ",\"mode\":\"" << json_escape(snapshot.mode) << '"'
          << ",\"health\":\""
@@ -206,7 +224,9 @@ std::string RuntimeApp::stop_preview() {
 }
 
 std::string RuntimeApp::infer_once() {
-  const auto identity = state_.begin_inference();
+  const auto identity = state_.begin_inference(
+      frame_prefix_for_source(config_.frame_source),
+      result_prefix_for_backend(config_.backend));
   auto frame_result = stream_worker_.next_frame(identity.sequence);
   auto frame = frame_result.frame;
   if (!frame_result.ok) {
@@ -412,14 +432,35 @@ std::optional<std::string> RuntimeApp::latest_result_json() const {
   return state_.snapshot().latest_result_json;
 }
 
-const std::vector<std::uint8_t>& RuntimeApp::snapshot_jpeg() const {
+std::vector<std::uint8_t> RuntimeApp::snapshot_jpeg() {
+  // 优先返回最新缓存帧。若页面首次请求 snapshot 时还没有缓存帧，
+  // 则主动同步读取一帧，避免 Web 端一直看到内置 mock JPEG。
+  std::vector<std::uint8_t> bridge_jpeg;
+  if (stream_worker_.latest_snapshot_jpeg(bridge_jpeg)) {
+    return bridge_jpeg;
+  }
+  ImageBuffer image;
+  if (stream_worker_.latest_frame(image)) {
+    return snapshot_provider_.snapshot_jpeg(&image);
+  }
+  if (config_.frame_source != "mock") {
+    auto frame_result = stream_worker_.next_frame(static_cast<std::uint64_t>(now_timestamp_ms()));
+    if (stream_worker_.latest_snapshot_jpeg(bridge_jpeg)) {
+      return bridge_jpeg;
+    }
+    if (frame_result.ok && image_buffer_valid_rgb(frame_result.image)) {
+      return snapshot_provider_.snapshot_jpeg(&frame_result.image);
+    }
+  }
   return snapshot_provider_.snapshot_jpeg();
 }
 
 const AppConfig& RuntimeApp::config() const { return config_; }
 
 std::string RuntimeApp::snapshot_frame_id() const {
-  return state_.snapshot().last_frame_id.value_or("frame-mock-placeholder");
+  const auto frame_source = stream_worker_.status();
+  if (!frame_source.latest_frame_id.empty()) return frame_source.latest_frame_id;
+  return state_.snapshot().last_frame_id.value_or(frame_prefix_for_source(config_.frame_source) + "-placeholder");
 }
 
 void RuntimeApp::record_error() { state_.record_error(); }
