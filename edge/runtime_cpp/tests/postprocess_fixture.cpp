@@ -54,6 +54,25 @@ int main(int argc, char* argv[]) {
         {make_tensor({1, 1, 6}, {320, 320, 180, 80, 0.92F, 0.25F})},
         config,
         meta);
+  } else if (task == "obb_rockchip") {
+    std::vector<float> head(65, -20.0F);
+    // 64 个 DFL 通道 + 1 个类别通道，单个 1x1 网格。
+    // DFL 每个 side 的第 5 个 bin 最高，得到较稳定的旋转框宽高。
+    for (int side = 0; side < 4; ++side) {
+      head[side * 16 + 5] = 20.0F;
+    }
+    head[64] = 20.0F;
+    std::vector<float> angle(1, 0.5F);
+    result = visionops::runtime::postprocess_obb(
+        {
+            make_tensor({1, 65, 1, 1}, head),
+            make_tensor({1, 65, 1, 1}, head),
+            make_tensor({1, 65, 1, 1}, head),
+            make_tensor({1, 1, 1}, angle),
+        },
+        config,
+        meta);
+    output_task = "obb";
   } else if (task == "segmentation") {
     result = visionops::runtime::postprocess_segmentation(
         {

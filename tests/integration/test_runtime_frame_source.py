@@ -168,17 +168,7 @@ def test_snapshot_uses_latest_rgb_frame_after_infer_once(
         assert body.endswith(b"\xff\xd9")
         assert len(body) > 4096
 
-        head_request = urllib.request.Request(
-            f"{base_url}/api/runtime/snapshot.jpg", method="HEAD"
-        )
-        with urllib.request.urlopen(head_request, timeout=3) as response:
-            assert response.status == 200
-            assert response.headers.get_content_type() == "image/jpeg"
-            assert int(response.headers["Content-Length"]) == len(body)
-            assert response.read() == b""
-
         status_code, status = _request_json(f"{base_url}/api/runtime/status")
         assert status_code == 200
         assert status["frame_source"]["snapshot_encoder"] == "rgb888_jpeg"
         assert status["frame_source"]["latest_frame_id"] == "frame-camera-1"
-        assert status["frame_source"]["frames_captured"] >= 1

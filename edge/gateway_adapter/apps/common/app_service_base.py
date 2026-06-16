@@ -1,4 +1,8 @@
-"""业务 App Mock 的通用 HTTP、轮询和可选 Modbus 服务基座。"""
+"""业务 App 的通用 HTTP、轮询和可选 Modbus 服务基座。
+
+M11 起该基座同时服务 mock case 与真实 Runtime/Collector 上游。业务 App
+只消费标准 inference_result，不直接访问相机、RKNN 或 Web 页面。
+"""
 
 from __future__ import annotations
 
@@ -9,7 +13,7 @@ import threading
 import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Dict, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from edge.gateway_adapter.gateway_message import make_error_document, timestamp_ms
@@ -23,7 +27,7 @@ from .mock_result_loader import MockResultLoader
 
 
 DecisionFunction = Callable[[dict, Mapping[str, Any], int, int, str], AppDecision]
-RegisterValueFunction = Callable[[AppDecision], dict[str, int]]
+RegisterValueFunction = Callable[[AppDecision], Dict[str, int]]
 DefinitionFactory = Callable[[int], tuple]
 
 
@@ -34,6 +38,7 @@ class AppCounters:
     no_result: int = 0
     upstream_errors: int = 0
     decision_errors: int = 0
+    unchanged_results: int = 0
 
 
 class BusinessAppState:
@@ -43,6 +48,7 @@ class BusinessAppState:
         app_id: str,
         component: str,
         device_id: str,
+        app_instance_id: str,
         config: dict[str, Any],
         loader: MockResultLoader,
         bank: AppRegisterBank,
@@ -52,6 +58,7 @@ class BusinessAppState:
         self.app_id = app_id
         self.component = component
         self.device_id = device_id
+        self.app_instance_id = app_instance_id
         self.config = config
         self.loader = loader
         self.bank = bank
@@ -62,8 +69,10 @@ class BusinessAppState:
         self._sequence = 0
         self._heartbeat = 0
         self._latest_result_id: str | None = None
+        self._latest_result_summary: dict[str, Any] | None = None
         self._latest_decision: dict[str, Any] | None = None
         self._latest_gateway_message: dict[str, Any] | None = None
+        self._last_error: dict[str, Any] | None = None
         self._upstream: dict[str, Any] = {
             "kind": loader.upstream_kind,
             "url": loader.upstream_url,
@@ -81,6 +90,12 @@ class BusinessAppState:
         except (UpstreamUnavailable, json.JSONDecodeError, ValueError) as error:
             with self._lock:
                 self._counters.upstream_errors += 1
+                self._last_error = {
+                    "code": "UPSTREAM_UNREACHABLE",
+                    "message": str(error),
+                    "recoverable": True,
+                    "timestamp_ms": timestamp_ms(),
+                }
                 self._upstream = {
                     "kind": self.loader.upstream_kind,
                     "url": self.loader.upstream_url,
@@ -93,6 +108,12 @@ class BusinessAppState:
         if loaded.status_code == 404:
             with self._lock:
                 self._counters.no_result += 1
+                self._last_error = {
+                    "code": "UPSTREAM_NO_RESULT",
+                    "message": "上游尚无 latest_result",
+                    "recoverable": True,
+                    "timestamp_ms": timestamp_ms(),
+                }
                 self._upstream = {
                     "kind": self.loader.upstream_kind,
                     "url": self.loader.upstream_url,
@@ -104,6 +125,12 @@ class BusinessAppState:
         if loaded.status_code != 200 or not isinstance(loaded.document, dict):
             with self._lock:
                 self._counters.upstream_errors += 1
+                self._last_error = {
+                    "code": "UPSTREAM_ERROR",
+                    "message": f"上游返回 HTTP {loaded.status_code}",
+                    "recoverable": True,
+                    "timestamp_ms": timestamp_ms(),
+                }
                 self._upstream = {
                     "kind": self.loader.upstream_kind,
                     "url": self.loader.upstream_url,
@@ -117,6 +144,7 @@ class BusinessAppState:
         result_id = str(result.get("result_id", ""))
         with self._lock:
             if not force and result_id and result_id == self._latest_result_id:
+                self._counters.unchanged_results += 1
                 return "unchanged", self._latest_decision
             sequence = self._sequence + 1
             heartbeat = self._heartbeat ^ 1
@@ -130,6 +158,12 @@ class BusinessAppState:
         except (KeyError, TypeError, ValueError) as error:
             with self._lock:
                 self._counters.decision_errors += 1
+                self._last_error = {
+                    "code": "DECISION_ERROR",
+                    "message": str(error),
+                    "recoverable": True,
+                    "timestamp_ms": timestamp_ms(),
+                }
                 self._upstream = {
                     "kind": self.loader.upstream_kind,
                     "url": self.loader.upstream_url,
@@ -144,35 +178,73 @@ class BusinessAppState:
             self._sequence = sequence
             self._heartbeat = heartbeat
             self._latest_result_id = decision.result_id
+            self._latest_result_summary = self._summarize_result(result)
             self._latest_decision = document
             self._latest_gateway_message = gateway_message
             self._counters.decisions += 1
+            self._last_error = None if decision.ok else self._last_error
             self._upstream = {
                 "kind": self.loader.upstream_kind,
                 "url": self.loader.upstream_url,
                 "health": "local_mock" if self.loader.upstream_kind == "file" else "ok",
                 "reachable": True,
                 "http_status": loaded.status_code,
+                "latest_result_id": decision.result_id,
+                "latest_frame_id": decision.frame_id,
+                "latest_task_type": result.get("task_type"),
+                "latest_model_name": (result.get("model") or {}).get("model_name") if isinstance(result.get("model"), dict) else None,
                 "mock_case": (
                     self.loader.mock_case if self.loader.upstream_kind == "file" else None
                 ),
             }
         return "updated", document
 
+    @staticmethod
+    def _summarize_result(result: Mapping[str, Any]) -> dict[str, Any]:
+        detections = result.get("detections") if isinstance(result.get("detections"), list) else []
+        model = result.get("model") if isinstance(result.get("model"), Mapping) else {}
+        image = result.get("image") if isinstance(result.get("image"), Mapping) else {}
+        return {
+            "message_type": result.get("message_type"),
+            "status": result.get("status"),
+            "result_id": result.get("result_id"),
+            "frame_id": result.get("frame_id"),
+            "task_type": result.get("task_type"),
+            "model_name": model.get("model_name"),
+            "backend": model.get("backend"),
+            "image": dict(image),
+            "detection_count": len(detections),
+        }
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
+            app_health = "ok"
+            if self._upstream.get("health") in {"unreachable", "error", "invalid_result"}:
+                app_health = "degraded"
             return {
+                "schema_version": "1.0",
+                "message_type": "app_status",
+                "status": "ok",
+                "health": app_health,
                 "app_id": self.app_id,
+                "app_instance_id": self.app_instance_id,
                 "component": self.component,
                 "device_id": self.device_id,
                 "uptime_s": round(time.monotonic() - self.started_at, 3),
                 "config": self.config,
                 "upstream": dict(self._upstream),
+                "latest_result_summary": self._latest_result_summary,
                 "latest_decision": self._latest_decision,
                 "latest_gateway_message": self._latest_gateway_message,
                 "register_snapshot": self.bank.snapshot(),
+                "register_map": self.bank.register_map(),
                 "counters": vars(self._counters).copy(),
+                "last_error": self._last_error,
             }
+
+    def latest_gateway_message(self) -> dict[str, Any] | None:
+        with self._lock:
+            return self._latest_gateway_message
 
 
 class AppHttpServer(ThreadingHTTPServer):
@@ -200,7 +272,9 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                 "schema_version": "1.0",
                 "message_type": "app_health",
                 "status": "ok",
+                "health": snapshot["health"],
                 "app_id": snapshot["app_id"],
+                "app_instance_id": snapshot["app_instance_id"],
                 "component": snapshot["component"],
                 "device_id": snapshot["device_id"],
                 "timestamp_ms": timestamp_ms(),
@@ -216,6 +290,12 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                 self._error(404, "LATEST_DECISION_NOT_FOUND", "尚未生成业务决策")
             else:
                 self._json(200, decision)
+        elif path == "/api/app/latest_gateway_message":
+            message = self.server.app_state.latest_gateway_message()
+            if message is None:
+                self._error(404, "LATEST_GATEWAY_MESSAGE_NOT_FOUND", "尚未生成 GatewayMessage")
+            else:
+                self._json(200, message)
         elif path == "/api/app/registers":
             self._json(200, {
                 "schema_version": "1.0",
@@ -249,7 +329,7 @@ class AppRequestHandler(BaseHTTPRequestHandler):
         if size:
             self.rfile.read(size)
         outcome, decision = self.server.app_state.evaluate_once(force=True)
-        if outcome == "updated" and decision is not None:
+        if outcome in {"updated", "unchanged"} and decision is not None:
             self._json(200, decision)
         elif outcome == "no_result":
             self._error(404, "UPSTREAM_NO_RESULT", "上游尚无推理结果")
@@ -292,6 +372,7 @@ def add_common_arguments(
     parser.add_argument("--config")
     parser.add_argument("--mock-case", choices=tuple(mock_cases), default="ok")
     parser.add_argument("--device-id", default="example-edge-001")
+    parser.add_argument("--app-instance-id", default="")
     parser.add_argument("--poll-interval-ms", type=int, default=500)
     parser.add_argument("--modbus-host", default="0.0.0.0")
     parser.add_argument("--modbus-port", type=int, default=default_modbus_port)
@@ -313,7 +394,8 @@ def run_business_app(
         raise ValueError("poll-interval-ms 必须大于 0")
     config = load_app_config(args.config, defaults)
     app_id = str(config["app"]["name"])
-    component = f"{app_id}_mock"
+    app_instance_id = args.app_instance_id or str(config.get("app", {}).get("instance_id") or app_id)
+    component = f"{app_id}_app"
     register_base = int(config["rules"]["register_base"])
     bank = AppRegisterBank(definition_factory(register_base))
     loader = MockResultLoader(
@@ -326,6 +408,7 @@ def run_business_app(
         app_id=app_id,
         component=component,
         device_id=args.device_id,
+        app_instance_id=app_instance_id,
         config=config,
         loader=loader,
         bank=bank,
@@ -364,7 +447,10 @@ def run_business_app(
 
         poll_thread = threading.Thread(target=poll_loop, name=f"{app_id}-poller", daemon=True)
         poll_thread.start()
-        print(f"{component} HTTP={args.host}:{args.port} upstream={args.upstream_kind}")
+        print(
+            f"{component} HTTP={args.host}:{args.port} upstream={args.upstream_kind} "
+            f"url={args.upstream_url} instance={app_instance_id}"
+        )
         http_server.serve_forever(poll_interval=0.2)
         stop_event.set()
         poll_thread.join(timeout=2)

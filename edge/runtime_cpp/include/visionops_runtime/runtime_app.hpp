@@ -45,6 +45,14 @@ class RuntimeApp {
       const std::string& code,
       const std::string& message,
       const std::string& debug_key = "") const;
+  std::string postprocess_error_json(
+      const InferenceIdentity& identity,
+      const MockFrame& frame,
+      const PreprocessOutput& preprocess,
+      const RknnOutput& inference,
+      const std::string& code,
+      const std::string& message,
+      const std::string& debug_key = "") const;
 
   AppConfig config_;
   LoadedModelInfo model_info_;

@@ -31,6 +31,7 @@ def postprocess_fixture_binary(tmp_path_factory: pytest.TempPathFactory) -> Path
         ("detection", "detection"),
         ("detection_split", "detection"),
         ("obb", "obb"),
+        ("obb_rockchip", "obb"),
         ("segmentation", "segmentation"),
     ],
 )
@@ -48,7 +49,7 @@ def test_postprocess_fixture_matches_inference_contract(
     assert result["task_type"] == expected_task
     assert result["timing"]["total_ms"] == 3
     assert result["detections"]
-    if fixture_task == "obb":
+    if fixture_task in {"obb", "obb_rockchip"}:
         assert len(result["detections"][0]["obb"]["points"]) == 4
     if fixture_task == "segmentation":
         assert result["detections"][0]["mask"]["encoding"] == "polygon"

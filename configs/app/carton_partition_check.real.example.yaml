@@ -1,0 +1,25 @@
+schema_version: "1.0"
+kind: app
+app:
+  name: carton_partition_check
+  version: "1.1"
+  instance_id: partition-line-1
+rules:
+  # 真实隔板模型请按训练标签调整 class_name / class_id。
+  target_class_names: [cell, partition_cell, slot]
+  target_class_ids: [0]
+  defect_class_names: [missing_cell, broken_partition, foreign_body, defect]
+  defect_class_ids: [1, 2, 3]
+  accepted_task_types: [detection, detect]
+  score_threshold: 0.50
+  defect_score_threshold: 0.50
+  expected_rows: 5
+  expected_cols: 8
+  expected_cell_count: 40
+  min_cell_count: 40
+  max_cell_count: 40
+  roi_xyxy: [0, 0, 640, 480]
+  # 轻量网格姿态约束，<=0 表示禁用；精细模板校准后续版本接入。
+  max_row_angle_abs_deg: 5.0
+  max_col_angle_abs_deg: 8.0
+  register_base: 200

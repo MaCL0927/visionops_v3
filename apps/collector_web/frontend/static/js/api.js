@@ -35,4 +35,6 @@ export const endpoints = {
   latestResult: "/api/runtime/latest_result", snapshot: "/api/runtime/snapshot.jpg",
   gatewayStatus: "/api/gateway/status", gatewayRegisters: "/api/gateway/registers",
   appStatus: "/api/app/status", appRegisters: "/api/app/registers",
+  appEvaluate: "/api/app/evaluate_once", appLatestDecision: "/api/app/latest_decision",
+  appLatestGatewayMessage: "/api/app/latest_gateway_message",
 };

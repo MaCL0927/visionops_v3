@@ -363,6 +363,15 @@ curl -X POST http://127.0.0.1:18081/api/runtime/infer_once | python3 -m json.too
 
 ### M10.2 HP60C Bridge 状态修复
 
-M10.2 修复了 HP60C Bridge 帧源的运行状态同步问题：`start_preview` 会立即抓取一帧用于刷新 `latest_frame_id` 与 `snapshot_encoder`；`snapshot.jpg` 支持 GET 与 HEAD，HEAD 的 `Content-Length` 与实际 JPEG 大小一致；`frame_source.frames_captured` 用于观察预览线程或同步抓帧是否持续工作；`status.source` 会随 backend 显示为 `runtime:mock` 或 `runtime:rknn`；模型 YAML 的 `input_size` 同时兼容 `[640, 640]` 与 `640` 写法。
+M10.2 修复了 HP60C Bridge 帧源的运行状态同步问题：`start_preview` 会立即抓取一帧用于刷新 `latest_frame_id` 与 `snapshot_encoder`；`snapshot.jpg` 支持 GET 与 HEAD；`status.source` 会随 backend 显示为 `runtime:mock` 或 `runtime:rknn`；模型 YAML 的 `input_size` 同时兼容 `[640, 640]` 与 `640` 写法。
 
-现场排查时建议先看 `frame_source.opened`、`frame_source.latest_frame_id`、`frame_source.frames_captured`、`frame_source.snapshot_encoder` 与顶层 `last_error`。如果 HP60C Bridge 不可达或 V4L2 设备不可读，Runtime 应保持 HTTP 服务可用，并通过 `health=degraded` 与 `last_error` 暴露原因。
+## M11.1：OBB RKNN 多输出适配
+
+M11.1 在 `postprocess_obb.cpp` 中补充了 Rockchip / RKNN 常见 YOLOv8-OBB split-DFL 多输出格式支持。该格式通常由 3 个尺度输出头和 1 个角度输出组成：
+
+- `output[0..2]`: `[1, 64 + nc, H, W]`，其中前 64 个通道为 DFL bbox 分布，后 `nc` 个通道为类别分数；
+- `output[3]`: `[1, 1, N]` 或类似形状的 angle 输出，`N` 一般为各尺度空间点数量之和。
+
+后处理会将多输出 OBB 结果统一转换为标准 `inference_result.detections[]`，每个目标包含 `bbox_xyxy`、`center_xy` 和 `obb` 字段。业务 App 仍然消费标准 `detections`，无需直接解析 RKNN 原始输出。
+
+如果遇到未支持的 OBB 输出格式，`infer_once` 的 error debug 中会返回 `raw_outputs`，包含每个输出 tensor 的 `dims`、`data_type`、`layout` 和 byte size，用于继续适配新的模型结构。

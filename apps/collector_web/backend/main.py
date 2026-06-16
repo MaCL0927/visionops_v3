@@ -34,6 +34,8 @@ DOWNSTREAM_PATHS = {
     "/api/gateway/registers": ("gateway", "/api/gateway/registers", False),
     "/api/app/status": ("business_app", "/api/app/status", True),
     "/api/app/registers": ("business_app", "/api/app/registers", False),
+    "/api/app/latest_decision": ("business_app", "/api/app/latest_decision", False),
+    "/api/app/latest_gateway_message": ("business_app", "/api/app/latest_gateway_message", False),
 }
 
 
@@ -92,6 +94,12 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
+        if path == "/api/app/evaluate_once":
+            body = self._read_request_body()
+            if body is None:
+                return
+            self._proxy_downstream_post("business_app", "/api/app/evaluate_once", body)
+            return
         if path in PROXY_PATHS:
             self._proxy_runtime(path, expected_method=PROXY_PATHS[path])
             return
@@ -233,6 +241,32 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             return
         if response.content_type != "application/json":
             self._send_collector_error(502, "INVALID_DOWNSTREAM_RESPONSE", "下游返回非 JSON 内容", True, detail={"service": name, "content_type": response.content_type})
+            return
+        send_bytes(self, response.status_code, response.body, "application/json; charset=utf-8", {
+            "X-VisionOps-Proxied-By": self.server.config.component,
+            "X-VisionOps-Downstream-Url": service_url,
+        })
+
+
+    def _proxy_downstream_post(self, name: str, target: str, body: bytes) -> None:
+        clients = {
+            "gateway": (self.server.gateway_client, self.server.config.gateway_url),
+            "business_app": (self.server.business_app_client, self.server.config.business_app_url),
+        }
+        client, service_url = clients[name]
+        try:
+            response = client.request("POST", target, body=body)
+        except RuntimeUnavailable as error:
+            self._send_collector_error(
+                502, f"{name.upper()}_UNREACHABLE", f"Collector 无法连接 {name}",
+                True, detail=str(error),
+            )
+            return
+        if response.content_type != "application/json":
+            self._send_collector_error(
+                502, "INVALID_DOWNSTREAM_RESPONSE", "下游返回非 JSON 内容",
+                True, detail={"service": name, "content_type": response.content_type},
+            )
             return
         send_bytes(self, response.status_code, response.body, "application/json; charset=utf-8", {
             "X-VisionOps-Proxied-By": self.server.config.component,

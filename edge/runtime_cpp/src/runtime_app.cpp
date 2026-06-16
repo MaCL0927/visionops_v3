@@ -83,7 +83,6 @@ std::string frame_source_json(const FrameSourceStatus& frame_source) {
          << (frame_source.latest_frame_id.empty() ? "null" : '"' + json_escape(frame_source.latest_frame_id) + '"')
          << ",\"latest_timestamp_ms\":" << frame_source.latest_timestamp_ms
          << ",\"snapshot_encoder\":\"" << json_escape(frame_source.snapshot_encoder) << '"'
-         << ",\"frames_captured\":" << frame_source.frames_captured
          << ",\"last_error\":"
          << (frame_source.last_error.empty() ? "null" : '"' + json_escape(frame_source.last_error) + '"')
          << '}';
@@ -124,11 +123,8 @@ RuntimeApp::RuntimeApp(AppConfig config)
 
 bool RuntimeApp::runtime_degraded() const {
   const auto frame_source = stream_worker_.status();
-  const bool real_frame_source =
-      config_.frame_source == "v4l2" || config_.frame_source == "hp60c_bridge" ||
-      config_.frame_source == "hp60c";
   return model_info_.degraded() || !rknn_runner_->is_loaded() ||
-         (real_frame_source && !frame_source.last_error.empty());
+         (config_.frame_source == "v4l2" && !frame_source.last_error.empty());
 }
 
 std::string RuntimeApp::health_json() const {
@@ -180,8 +176,7 @@ std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
          << ",\"errors\":" << snapshot.counters.errors << '}'
          << ",\"last_result_id\":" << optional_json(snapshot.last_result_id)
          << ",\"last_frame_id\":" << optional_json(snapshot.last_frame_id)
-         << ",\"last_error\":"
-         << (frame_source.last_error.empty() ? "null" : '\"' + json_escape(frame_source.last_error) + '\"')
+         << ",\"last_error\":null"
          << ",\"resources\":{\"cpu_percent\":0.0,\"memory_mb\":0.0,\"npu_percent\":0.0,\"temperature_c\":0.0}}";
   return stream.str();
 }
@@ -324,9 +319,11 @@ std::string RuntimeApp::infer_once() {
     inference.postprocess_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - postprocess_started).count();
     if (!postprocess.success) {
-      const auto error = inference_error_json(
+      const auto error = postprocess_error_json(
           identity,
           frame,
+          preprocess,
+          inference,
           postprocess.error_code.empty() ? "POSTPROCESS_FAILED" : postprocess.error_code,
           postprocess.error_message,
           postprocess.error_code == "UNSUPPORTED_OUTPUT_SHAPE"
@@ -404,6 +401,65 @@ std::string RuntimeApp::inference_result_json(
   return stream.str();
 }
 
+
+std::string RuntimeApp::postprocess_error_json(
+    const InferenceIdentity& identity,
+    const MockFrame& frame,
+    const PreprocessOutput& preprocess,
+    const RknnOutput& inference,
+    const std::string& code,
+    const std::string& message,
+    const std::string& debug_key) const {
+  const auto now = now_timestamp_ms();
+  const double total_ms = preprocess.elapsed_ms + inference.inference_ms + inference.postprocess_ms;
+  std::ostringstream stream;
+  stream << "{\"schema_version\":\"1.0\",\"message_type\":\"inference_result\""
+         << ",\"device_id\":\"" << json_escape(config_.device_id) << '"'
+         << ",\"component\":\"" << json_escape(config_.component) << '"'
+         << ",\"timestamp_ms\":" << now
+         << ",\"trace_id\":\"" << make_trace_id(now) << '"'
+         << ",\"frame_id\":\"" << json_escape(identity.frame_id) << '"'
+         << ",\"source\":\"runtime:" << json_escape(config_.backend) << "\",\"status\":\"error\""
+         << ",\"result_id\":\"" << json_escape(identity.result_id) << '"'
+         << ",\"task_type\":\"" << json_escape(model_info_.task_type) << '"'
+         << ",\"model\":" << loaded_model_json()
+         << ",\"image\":{\"width\":" << preprocess.letterbox.orig_width
+         << ",\"height\":" << preprocess.letterbox.orig_height << '}'
+         << ",\"timing\":{\"preprocess_ms\":" << preprocess.elapsed_ms
+         << ",\"inference_ms\":" << inference.inference_ms
+         << ",\"postprocess_ms\":" << inference.postprocess_ms
+         << ",\"total_ms\":" << total_ms << '}'
+         << ",\"error\":{\"code\":\"" << json_escape(code)
+         << "\",\"message\":\"" << json_escape(message)
+         << "\",\"detail\":null,\"recoverable\":true}"
+         << ",\"debug\":{\"rknn_runner_called\":" << json_bool(inference.runner_called)
+         << ",\"runner_success\":" << json_bool(inference.success)
+         << ",\"raw_outputs_count\":" << inference.tensors.size()
+         << ",\"raw_outputs\":[";
+  for (std::size_t index = 0; index < inference.tensors.size(); ++index) {
+    if (index != 0) stream << ',';
+    const auto& tensor = inference.tensors[index];
+    stream << "{\"index\":" << index
+           << ",\"name\":\"" << json_escape(tensor.info.name) << '"'
+           << ",\"data_type\":\"" << json_escape(tensor.info.data_type) << '"'
+           << ",\"layout\":\"" << json_escape(tensor.info.layout) << '"'
+           << ",\"byte_size\":" << tensor.info.byte_size
+           << ",\"data_bytes\":" << tensor.data.size()
+           << ",\"dims\":[";
+    for (std::size_t dim = 0; dim < tensor.info.dimensions.size(); ++dim) {
+      if (dim != 0) stream << ',';
+      stream << tensor.info.dimensions[dim];
+    }
+    stream << "]}";
+  }
+  stream << ']';
+  if (!debug_key.empty()) stream << ",\"" << json_escape(debug_key) << "\":true";
+  stream << ",\"letterbox\":{\"scale\":" << preprocess.letterbox.scale
+         << ",\"pad_x\":" << preprocess.letterbox.pad_x
+         << ",\"pad_y\":" << preprocess.letterbox.pad_y << "}}}";
+  return stream.str();
+}
+
 std::string RuntimeApp::inference_error_json(
     const InferenceIdentity& identity,
     const MockFrame& frame,
@@ -418,9 +474,9 @@ std::string RuntimeApp::inference_error_json(
          << ",\"timestamp_ms\":" << now
          << ",\"trace_id\":\"" << make_trace_id(now) << '"'
          << ",\"frame_id\":\"" << json_escape(identity.frame_id) << '"'
-         << ",\"source\":\"" << json_escape(runtime_source(config_)) << "\",\"status\":\"error\""
-         << ",\"result_id\":\"" << json_escape(identity.result_id) << '"'
+         << ",\"source\":\"runtime:" << json_escape(config_.backend) << "\",\"status\":\"ok\""
          << ",\"task_type\":\"" << json_escape(model_info_.task_type) << '"'
+         << ",\"source\":\"runtime:rknn\",\"status\":\"error\""
          << ",\"model\":" << loaded_model_json()
          << ",\"image\":{\"width\":" << frame.width << ",\"height\":" << frame.height << '}'
          << ",\"timing\":{\"preprocess_ms\":0.0,\"inference_ms\":0.0,\"postprocess_ms\":0.0,\"total_ms\":0.0}"

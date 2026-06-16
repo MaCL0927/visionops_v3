@@ -1,4 +1,4 @@
-import { endpoints, requestJson } from "../api.js";
+import { endpoints, requestJson, postJson } from "../api.js";
 
 function renderStatus(id, badgeId, value) {
   document.getElementById(id).textContent = JSON.stringify(value, null, 2);
@@ -29,4 +29,19 @@ export async function refreshProduction() {
   renderRegisters("gateway-registers", gatewayRegisters); renderRegisters("app-registers", appRegisters);
 }
 
-export function initProduction() { document.getElementById("production-refresh").addEventListener("click", refreshProduction); }
+export function initProduction() {
+  document.getElementById("production-refresh").addEventListener("click", refreshProduction);
+  const evaluateBtn = document.getElementById("production-app-evaluate");
+  if (evaluateBtn) {
+    evaluateBtn.addEventListener("click", async () => {
+      const summary = document.getElementById("production-app-summary");
+      try {
+        const decision = await postJson(endpoints.appEvaluate);
+        summary.textContent = JSON.stringify(decision, null, 2);
+      } catch (error) {
+        summary.textContent = JSON.stringify(error.body || { status: "error", error: { message: error.message } }, null, 2);
+      }
+      await refreshProduction();
+    });
+  }
+}

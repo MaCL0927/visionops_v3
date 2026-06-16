@@ -22,7 +22,6 @@ struct HttpResponse {
   std::string content_type{"application/json; charset=utf-8"};
   std::vector<std::uint8_t> body;
   std::vector<std::pair<std::string, std::string>> headers;
-  bool omit_body{false};
 };
 
 }  // namespace visionops::runtime

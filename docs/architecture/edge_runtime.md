@@ -179,4 +179,8 @@ M10 将真实相机输入接入到 C++ Runtime 的 `stream_worker` 边界。Runt
 
 当前帧源类型包括 `mock`、`test_image` 和 `v4l2`。`v4l2` 一期在 Linux 上使用 `/dev/videoX`，优先支持 YUYV，并在帧源层转换为 RGB888。若设备不存在、被占用或格式不支持，Runtime 返回稳定 JSON 错误并在 `status.frame_source.last_error` 中暴露原因，不让服务崩溃。
 
-`start_preview/stop_preview` 控制取流线程，`infer_once` 优先使用最新缓存帧；若尚无缓存帧，会同步读取一次。M10.1 中 `snapshot.jpg` 会优先将最新 RGB888 帧编码为 JPEG，因此 Collector Web 可以通过 Runtime API 看到真实相机预览。M10.2 进一步要求 `frame_source.latest_frame_id`、`latest_timestamp_ms`、`snapshot_encoder`、`frames_captured` 和顶层 `last_error` 能真实反映现场状态，`HEAD /api/runtime/snapshot.jpg` 也应返回准确的 JPEG 长度，便于 3576 现场快速诊断。后续 HP60C SDK、RTSP 或硬件 JPEG 编码只需要扩展帧源和 snapshot provider，不应反向修改 RKNN Runner、后处理、Gateway 或 Web 页面。
+`start_preview/stop_preview` 控制取流线程，`infer_once` 优先使用最新缓存帧；若尚无缓存帧，会同步读取一次。M10.1 中 `snapshot.jpg` 会优先将最新 RGB888 帧编码为 JPEG，因此 Collector Web 可以通过 Runtime API 看到真实相机预览。后续 HP60C SDK、RTSP 或硬件 JPEG 编码只需要扩展帧源和 snapshot provider，不应反向修改 RKNN Runner、后处理、Gateway 或 Web 页面。
+
+## M11 Business App 闭环
+
+Runtime 继续只负责相机、预处理、RKNN 推理和标准 `inference_result` 输出。业务 App 通过 Collector 或 Runtime 的 `/api/runtime/latest_result` 获取结果，执行纸筒或隔板业务判断，并输出 AppDecision、GatewayMessage 和业务寄存器。Collector Web 只代理业务 App 状态和手动触发接口，不在前端实现业务判断。
