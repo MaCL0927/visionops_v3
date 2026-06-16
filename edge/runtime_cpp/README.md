@@ -363,4 +363,6 @@ curl -X POST http://127.0.0.1:18081/api/runtime/infer_once | python3 -m json.too
 
 ### M10.2 HP60C Bridge 状态修复
 
-M10.2 修复了 HP60C Bridge 帧源的运行状态同步问题：`start_preview` 会立即抓取一帧用于刷新 `latest_frame_id` 与 `snapshot_encoder`；`snapshot.jpg` 支持 GET 与 HEAD；`status.source` 会随 backend 显示为 `runtime:mock` 或 `runtime:rknn`；模型 YAML 的 `input_size` 同时兼容 `[640, 640]` 与 `640` 写法。
+M10.2 修复了 HP60C Bridge 帧源的运行状态同步问题：`start_preview` 会立即抓取一帧用于刷新 `latest_frame_id` 与 `snapshot_encoder`；`snapshot.jpg` 支持 GET 与 HEAD，HEAD 的 `Content-Length` 与实际 JPEG 大小一致；`frame_source.frames_captured` 用于观察预览线程或同步抓帧是否持续工作；`status.source` 会随 backend 显示为 `runtime:mock` 或 `runtime:rknn`；模型 YAML 的 `input_size` 同时兼容 `[640, 640]` 与 `640` 写法。
+
+现场排查时建议先看 `frame_source.opened`、`frame_source.latest_frame_id`、`frame_source.frames_captured`、`frame_source.snapshot_encoder` 与顶层 `last_error`。如果 HP60C Bridge 不可达或 V4L2 设备不可读，Runtime 应保持 HTTP 服务可用，并通过 `health=degraded` 与 `last_error` 暴露原因。

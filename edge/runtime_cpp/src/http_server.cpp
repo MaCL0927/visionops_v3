@@ -314,9 +314,10 @@ HttpResponse HttpServer::route(const HttpRequest& request) {
     }
     HttpResponse response;
     response.content_type = "image/jpeg";
-    if (request.method == "GET") {
-      response.body = app_.snapshot_jpeg();
-    }
+    // HEAD 请求不返回 body，但仍然生成一次快照来提供准确的 Content-Length
+    // 和 X-Frame-Id，便于现场用 curl -I 快速判断相机链路是否正常。
+    response.body = app_.snapshot_jpeg();
+    response.omit_body = request.method == "HEAD";
     response.headers.emplace_back("X-Frame-Id", app_.snapshot_frame_id());
     response.headers.emplace_back("X-Timestamp-Ms", std::to_string(now_timestamp_ms()));
     response.headers.emplace_back("Cache-Control", "no-store");
@@ -391,6 +392,9 @@ bool HttpServer::write_response(int client_fd, const HttpResponse& response) con
 
   if (!send_all(reinterpret_cast<const std::uint8_t*>(header_text.data()), header_text.size())) {
     return false;
+  }
+  if (response.omit_body) {
+    return true;
   }
   return response.body.empty() || send_all(response.body.data(), response.body.size());
 }
