@@ -18,6 +18,7 @@ venv/
 
 # C/C++ 构建产物
 build/
+build-rknn/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt

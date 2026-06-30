@@ -75,21 +75,22 @@
         <section id="page-validate" class="page">
           <div class="validate-layout">
             <aside class="model-select">
-              <div class="section-title"><div class="kicker">模型状态</div><h1>当前 Runtime 模型</h1><p>模型由 C++ Runtime 管理，Web 不加载模型文件。</p></div>
-              <div id="model-status-card" class="model-card"><span>模型名称</span><b id="model-name">--</b><span>模型版本</span><b id="model-version">--</b><span>任务类型</span><b id="model-task">--</b></div>
-              <div class="model-actions"><button id="validate-runtime-refresh">刷新 Runtime 状态</button><button id="validate-model-scan" class="primary">扫描模型</button></div>
+              <div class="section-title"><h1>模型列表</h1></div>
               <div id="model-catalog-status" class="inline-note">等待扫描模型目录</div>
               <div id="model-list" class="model-list"><div class="empty-copy">尚未扫描模型包</div></div>
-              <pre id="validate-runtime-status">尚未加载 Runtime 状态</pre>
+              <button id="validate-model-scan" class="primary model-refresh-btn">刷新模型</button>
             </aside>
             <section class="content-card validate-card">
               <div class="screen-head"><div><div class="kicker">模型验证</div><h1>单次 / 拍照 / 实时检测</h1><p>通过 Collector 调用 Runtime，并在快照上绘制 bbox 与 OBB points。</p></div><div class="head-actions"><button id="validate-infer">单次检测</button><button id="validate-photo" class="primary">拍照检测</button><button id="validate-realtime" aria-pressed="false">实时检测</button><button id="validate-refresh">读取结果</button></div></div>
               <div class="validation-workspace">
                 <div class="camera-stage overlay-stage"><img id="validate-image" class="stage-image" alt="模型验证快照"><canvas id="validate-overlay"></canvas><div id="validate-empty" class="stage-empty">执行检测后显示结果</div></div>
-                <aside class="result-panel">
-                  <div class="timing-grid"><div><span>预处理</span><b id="timing-preprocess">--</b></div><div><span>推理</span><b id="timing-inference">--</b></div><div><span>后处理</span><b id="timing-postprocess">--</b></div><div><span>总耗时</span><b id="timing-total">--</b></div></div>
-                  <h3>Latest Result</h3><pre id="validate-result">尚无结果</pre>
-                </aside>
+                <section class="validate-bottom-panels">
+                  <div class="timing-grid validate-timing-grid"><div><span>预处理</span><b id="timing-preprocess">--</b></div><div><span>推理</span><b id="timing-inference">--</b></div><div><span>后处理</span><b id="timing-postprocess">--</b></div><div><span>总耗时</span><b id="timing-total">--</b></div></div>
+                  <div class="target-summary-card">
+                    <div class="target-summary-head"><h3>检测目标信息</h3><span id="validate-result-brief" class="status-pill soft">尚无结果</span></div>
+                    <div id="validate-target-summary" class="target-summary-list"><div class="empty-copy">执行检测后显示目标摘要</div></div>
+                  </div>
+                </section>
               </div>
             </section>
           </div>

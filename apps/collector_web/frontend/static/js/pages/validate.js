@@ -5,9 +5,10 @@ import { clearOverlay, drawInferenceOverlay } from "../render/overlay.js";
 const image = document.getElementById("validate-image");
 const canvas = document.getElementById("validate-overlay");
 const empty = document.getElementById("validate-empty");
-const output = document.getElementById("validate-result");
 const modelList = document.getElementById("model-list");
 const modelCatalogStatus = document.getElementById("model-catalog-status");
+const targetSummary = document.getElementById("validate-target-summary");
+const resultBrief = document.getElementById("validate-result-brief");
 
 let snapshotUrl = null;
 let currentResult = null;
@@ -16,25 +17,6 @@ let realtimeBusy = false;
 let currentCatalog = null;
 let switchingModelId = null;
 
-function showResult(result) {
-  currentResult = result;
-  updateState({ latestResult: result });
-  output.textContent = JSON.stringify(result, null, 2);
-  const timing = result.timing || {};
-  for (const key of ["preprocess", "inference", "postprocess", "total"]) {
-    document.getElementById(`timing-${key}`).textContent = timing[`${key}_ms`] == null ? "--" : `${timing[`${key}_ms`]} ms`;
-  }
-  document.getElementById("model-name").textContent = result.model?.model_name || "--";
-  document.getElementById("model-version").textContent = result.model?.model_version || "--";
-  document.getElementById("model-task").textContent = result.task_type || "--";
-}
-
-function showModelStatus(model) {
-  document.getElementById("model-name").textContent = model?.model_name || model?.name || "--";
-  document.getElementById("model-version").textContent = model?.model_version || model?.version || "--";
-  document.getElementById("model-task").textContent = model?.task_type || "--";
-}
-
 function formatBytes(value) {
   if (value == null || Number.isNaN(Number(value))) return "--";
   if (value < 1024) return `${value} B`;
@@ -42,10 +24,88 @@ function formatBytes(value) {
   return `${(value / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+function formatNumber(value, digits = 1) {
+  if (value == null || Number.isNaN(Number(value))) return "--";
+  return Number(value).toFixed(digits);
+}
+
 function catalogMessage(text, kind = "") {
   modelCatalogStatus.textContent = text;
   modelCatalogStatus.className = "inline-note";
   if (kind) modelCatalogStatus.classList.add(kind);
+}
+
+function renderEmptySummary(text) {
+  targetSummary.innerHTML = `<div class="empty-copy">${text}</div>`;
+  resultBrief.textContent = "尚无结果";
+}
+
+function renderResultSummary(result) {
+  const detections = Array.isArray(result?.detections) ? result.detections : [];
+  const classifications = Array.isArray(result?.classifications) ? result.classifications : [];
+  const taskType = result?.task_type || "--";
+
+  if (!detections.length && !classifications.length) {
+    resultBrief.textContent = `${taskType} / 0 个目标`;
+    renderEmptySummary("当前结果未检测到目标");
+    return;
+  }
+
+  resultBrief.textContent = `${taskType} / ${detections.length || classifications.length} 项结果`;
+  targetSummary.innerHTML = "";
+
+  if (detections.length) {
+    detections.forEach((item, index) => {
+      const bbox = Array.isArray(item.bbox_xyxy) ? item.bbox_xyxy.map((value) => formatNumber(value, 1)).join(", ") : "--";
+      const center = Array.isArray(item.center_xy) ? item.center_xy.map((value) => formatNumber(value, 1)).join(", ") : "--";
+      const obbPoints = Array.isArray(item.obb?.points) ? item.obb.points.length : 0;
+      const mask = item.mask?.encoding || "--";
+      const card = document.createElement("article");
+      card.className = "target-item";
+      card.innerHTML = `
+        <div class="target-item-head">
+          <b>${item.class_name || `目标 ${index + 1}`}</b>
+          <span>${formatNumber((item.score || 0) * 100, 1)}%</span>
+        </div>
+        <div class="target-item-meta">
+          <div><span>类别 ID</span><b>${item.class_id ?? "--"}</b></div>
+          <div><span>中心点</span><b>${center}</b></div>
+          <div><span>BBox</span><b>${bbox}</b></div>
+          <div><span>结果类型</span><b>${item.obb ? `OBB ${obbPoints} 点` : (item.mask ? `Mask ${mask}` : "Detection")}</b></div>
+        </div>
+      `;
+      targetSummary.appendChild(card);
+    });
+    return;
+  }
+
+  classifications.forEach((item, index) => {
+    const card = document.createElement("article");
+    card.className = "target-item";
+    card.innerHTML = `
+      <div class="target-item-head">
+        <b>${item.class_name || `分类 ${index + 1}`}</b>
+        <span>${formatNumber((item.score || 0) * 100, 1)}%</span>
+      </div>
+      <div class="target-item-meta">
+        <div><span>类别 ID</span><b>${item.class_id ?? "--"}</b></div>
+        <div><span>标签</span><b>${item.label || item.class_name || "--"}</b></div>
+        <div><span>任务类型</span><b>${taskType}</b></div>
+        <div><span>状态</span><b>${result?.status || "ok"}</b></div>
+      </div>
+    `;
+    targetSummary.appendChild(card);
+  });
+}
+
+function showResult(result) {
+  currentResult = result;
+  updateState({ latestResult: result });
+  const timing = result.timing || {};
+  for (const key of ["preprocess", "inference", "postprocess", "total"]) {
+    document.getElementById(`timing-${key}`).textContent = timing[`${key}_ms`] == null ? "--" : `${timing[`${key}_ms`]} ms`;
+  }
+  renderResultSummary(result);
 }
 
 function renderModelList() {
@@ -70,12 +130,12 @@ function renderModelList() {
         <span class="status-pill ${statusClass}">${statusText}</span>
       </div>
       <div class="model-meta">
-        <div><span>任务类型</span><b>${model.task_type || "--"}</b></div>
-        <div><span>目标平台</span><b>${model.target_platform || "--"}</b></div>
-        <div><span>输入尺寸</span><b>${Array.isArray(model.input_size) ? model.input_size.join(" x ") : "--"}</b></div>
-        <div><span>类别数量</span><b>${model.labels_count ?? "--"}</b></div>
-        <div><span>模型大小</span><b>${formatBytes(model.rknn_size_bytes)}</b></div>
-        <div><span>模型标识</span><b>${model.model_id || "--"}</b></div>
+        <div><span>任务</span><b>${model.task_type || "--"}</b></div>
+        <div><span>平台</span><b>${model.target_platform || "--"}</b></div>
+        <div><span>输入</span><b>${Array.isArray(model.input_size) ? model.input_size.join("x") : "--"}</b></div>
+        <div><span>类别</span><b>${model.labels_count ?? "--"}</b></div>
+        <div><span>大小</span><b>${formatBytes(model.rknn_size_bytes)}</b></div>
+        <div><span>ID</span><b>${model.model_id || "--"}</b></div>
       </div>
       <div class="model-card-status"></div>
     `;
@@ -117,10 +177,11 @@ export async function inferOnce() {
     await refreshImage();
     return result;
   } catch (error) {
-    output.textContent = JSON.stringify(error.body || { error: error.message }, null, 2);
     empty.classList.remove("hidden");
     empty.textContent = "Runtime infer_once unavailable";
     clearOverlay(canvas);
+    resultBrief.textContent = "检测失败";
+    renderEmptySummary(error.body?.error?.message || error.message || "Runtime infer_once unavailable");
     return null;
   }
 }
@@ -131,17 +192,19 @@ export async function refreshLatestResult() {
     showResult(result);
     await refreshImage();
   } catch (error) {
-    output.textContent = JSON.stringify(error.body || { error: error.message }, null, 2);
+    resultBrief.textContent = "读取失败";
+    renderEmptySummary(error.body?.error?.message || error.message || "读取最新结果失败");
   }
 }
 
 export async function refreshRuntimeStatus() {
   try {
     const status = await requestJson(endpoints.runtimeStatus);
-    document.getElementById("validate-runtime-status").textContent = JSON.stringify(status, null, 2);
-    showModelStatus(status.loaded_model || {});
-  } catch (error) {
-    document.getElementById("validate-runtime-status").textContent = JSON.stringify(error.body || { status: "unreachable" }, null, 2);
+    const model = status.loaded_model || {};
+    const displayName = [model.model_name || "--", model.model_version || "--", model.task_type || "--"].join(" / ");
+    resultBrief.textContent = currentResult ? resultBrief.textContent : displayName;
+  } catch (_error) {
+    // 验证页不再单独展示 Runtime JSON，失败时不阻塞页面。
   }
 }
 
@@ -149,11 +212,11 @@ export async function refreshModelCatalog() {
   try {
     const catalog = await requestJson(endpoints.models);
     currentCatalog = catalog;
-    showModelStatus(catalog.current_model || {});
     renderModelList();
     const modelsRoot = catalog.models_root || "--";
     const count = Array.isArray(catalog.models) ? catalog.models.length : 0;
-    catalogMessage(`已扫描 ${count} 个模型包，models_root=${modelsRoot}`, "ok");
+    const active = catalog.models?.find((item) => item.active);
+    catalogMessage(`已扫描 ${count} 个模型，当前 ${active?.model_name || "未识别"}，models_root=${modelsRoot}`, "ok");
   } catch (error) {
     currentCatalog = null;
     renderModelList();
@@ -166,10 +229,9 @@ export async function switchModel(modelId) {
   renderModelList();
   catalogMessage(`正在切换模型: ${modelId}`, "");
   try {
-    const status = await postJson(endpoints.switchModel, { model_id: modelId });
-    showModelStatus(status.loaded_model || {});
-    document.getElementById("validate-runtime-status").textContent = JSON.stringify(status, null, 2);
-    catalogMessage(`模型切换成功: ${status.loaded_model?.model_name || modelId}`, "ok");
+    await postJson(endpoints.switchModel, { model_id: modelId });
+    catalogMessage(`模型切换成功: ${modelId}`, "ok");
+    await refreshRuntimeStatus();
     await refreshModelCatalog();
   } catch (error) {
     const detail = error instanceof ApiError ? (error.body?.error?.message || error.message) : String(error);
@@ -194,7 +256,11 @@ function toggleRealtime() {
   realtimeTimer = setInterval(async () => {
     if (realtimeBusy) return;
     realtimeBusy = true;
-    try { await inferOnce(); } finally { realtimeBusy = false; }
+    try {
+      await inferOnce();
+    } finally {
+      realtimeBusy = false;
+    }
   }, 1500);
   inferOnce();
 }
@@ -204,9 +270,9 @@ export function initValidate() {
   document.getElementById("validate-photo").addEventListener("click", inferOnce);
   document.getElementById("validate-realtime").addEventListener("click", toggleRealtime);
   document.getElementById("validate-refresh").addEventListener("click", refreshLatestResult);
-  document.getElementById("validate-runtime-refresh").addEventListener("click", refreshRuntimeStatus);
   document.getElementById("validate-model-scan").addEventListener("click", refreshModelCatalog);
   window.addEventListener("resize", () => currentResult && drawInferenceOverlay(canvas, image, currentResult));
+  renderEmptySummary("执行检测后显示目标摘要");
   refreshRuntimeStatus();
   refreshModelCatalog();
 }
