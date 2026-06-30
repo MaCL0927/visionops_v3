@@ -13,6 +13,7 @@ REQUIRED_ENDPOINTS = {
     "POST /api/runtime/start_preview",
     "POST /api/runtime/stop_preview",
     "POST /api/runtime/infer_once",
+    "POST /api/runtime/switch_model",
     "GET /api/runtime/latest_result",
     "GET /api/runtime/snapshot.jpg",
 }

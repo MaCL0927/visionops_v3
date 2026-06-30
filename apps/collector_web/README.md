@@ -1,43 +1,56 @@
 # VisionOps Collector Web
 
-Collector Web 是边缘设备上的轻量管理入口。M7 按 v3 进程边界重建了采集上传、模型验证和生产运行三个核心页面，开始承载实际 Web 功能，但仍不越过 Collector 后端直接操作相机、模型或业务规则。
+Collector Web 是边缘端的管理、展示和代理入口，当前已经用于 `3576` 真机联调，但它不是生产推理进程。
 
-M7.1 将界面结构调整回 VisionOps v2 现场用户熟悉的使用习惯：顶部主导航为“校验、采集上传、模型验证、设置、切换生产模式”，页面使用左侧步骤、大图像工作区、状态卡片和设置面板。这是界面组织的回归，不是旧代码或旧接口的回归。
+在当前主链路中：
 
-## 职责边界
+```text
+Camera Bridge / HP60C Bridge
+  -> C++ RKNN Runtime
+  -> Collector Web
+  -> Business App / Gateway / Modbus
+```
 
-Collector Web 负责：
+Collector Web 的职责是：
 
-- 展示 Collector 自身与 Runtime 状态。
-- 低频调用 Runtime 预览、单次推理和最新结果接口。
-- 代理 Runtime JPEG 快照。
-- 聚合 Gateway 和 Business App 状态与寄存器快照。
-- 后续承载配置、诊断与受控服务操作。
+- 聚合 Collector / Runtime / Gateway / Business App 状态。
+- 代理 Runtime 的 `status`、`infer_once`、`latest_result`、`snapshot.jpg`。
+- 扫描 `models_root` 下的标准模型包目录，并通过 Runtime 触发模型切换。
+- 提供边缘端 Web 页面：校验、采集上传、模型验证、设置、生产模式。
+- 承载低频操作、状态展示和调试入口。
 
 Collector Web 明确不负责：
 
-- 加载模型或解析模型输出张量。
-- 调用 RKNN、NPU 或实现任何推理逻辑。
-- 直接连接相机、HP60C SDK、V4L2 或 RTSP。
-- 成为 Gateway/Modbus 的生产实时数据通道。
-- 让浏览器直接访问 Runtime 端口。
-- 在 Collector Web 中实现纸筒、隔板或其他业务决策。
+- 直接连接相机、读取 `/dev/videoX`、调用 HP60C SDK。
+- 加载模型、调用 RKNN / NPU。
+- 解析 RKNN 原始 tensor。
+- 实现纸筒、隔板等业务判断。
 
-生产推理始终属于 C++ Runtime。当前 Runtime Mock 是后续真实 RKNN Runtime 的接口替身，只用于开发与契约验证。
+## 与 Runtime / Gateway / Business App 的关系
+
+- 浏览器只访问 Collector 同源接口。
+- Collector 后端再去访问 Runtime / Gateway / Business App。
+- 前端不直接访问 `18080 / 19090 / 19110` 这类下游端口。
+- 生产推理仍然由 C++ Runtime 负责，业务判断由 Business App 负责。
 
 ## 启动
 
-先启动 Runtime Mock：
+3576 现场常见启动方式：
 
 ```bash
-cmake -S . -B build
-cmake --build build -j4
-./build/edge/runtime_cpp/visionops_runtime_mock \
-  --host 127.0.0.1 \
-  --port 18080
+source /opt/visionops/venv/bin/activate
+
+python3 -m apps.collector_web.backend.main \
+  --host 0.0.0.0 \
+  --port 18091 \
+  --runtime-url http://127.0.0.1:28081 \
+  --gateway-url http://127.0.0.1:19090 \
+  --business-app-url http://127.0.0.1:19110 \
+  --models-root /opt/visionops_v3/models \
+  --device-id lb3576-dev
 ```
 
-再从仓库根目录启动 Collector：
+本地开发示例：
 
 ```bash
 python -m apps.collector_web.backend.main \
@@ -47,9 +60,12 @@ python -m apps.collector_web.backend.main \
   --runtime-url http://127.0.0.1:18080 \
   --gateway-url http://127.0.0.1:19090 \
   --business-app-url http://127.0.0.1:19110 \
+  --models-root ./models \
   --device-id example-edge-001 \
   --component collector_web
 ```
+
+`--models-root` 未显式传入时，Collector 会优先使用仓库根目录下的 `./models`，若不存在则回退为 `/opt/visionops_v3/models`。
 
 浏览器访问：
 
@@ -57,21 +73,50 @@ python -m apps.collector_web.backend.main \
 http://127.0.0.1:8090/
 ```
 
-命令行参数：
+## 页面与预览行为
+
+页面顶部保持旧版 VisionOps 使用习惯：
+
+- 校验
+- 采集上传
+- 模型验证
+- 设置
+- 切换生产模式
+
+其中快照与预览都来自 Runtime 代理，不直接访问相机。
+
+当前前端在页面初始化后会自动调用：
 
 ```text
---host
---port
---runtime-url
---gateway-url
---business-app-url
---snapshot-refresh-interval-ms
---status-refresh-interval-ms
---config
---device-id
---component
---help
+POST /api/runtime/start_preview
 ```
+
+这样可以让 Runtime 进入 preview 状态，持续刷新 `snapshot.jpg`。如果该调用失败，页面不会阻塞，但实时预览会退化，需要检查 Runtime 与帧源状态。
+
+## 模型扫描与切换
+
+“模型验证”页面当前支持：
+
+- 扫描 `models_root` 下的一级模型包目录
+- 展示模型名称、版本、任务类型、平台、输入尺寸、类别数量和模型大小
+- 标识当前 Runtime 正在使用的模型
+- 点击切换到目标模型
+
+Collector 本身不加载 `.rknn`。它只负责：
+
+1. 扫描 `models_root`
+2. 校验模型包是否为标准目录
+3. 将选中的 `model_dir` 发送给 Runtime
+
+真正的模型加载和替换由 C++ Runtime 完成。
+
+当前标准模型包规则：
+
+- 一个目录只表示一个模型包
+- 必须包含 `manifest.json`
+- `manifest.json` 中 `files.rknn / files.yaml / files.labels` 必须都存在
+- 文件路径不能通过 `../` 跳出模型包目录
+- 当前不自动识别同目录中的额外 `model2.rknn`
 
 ## Collector API
 
@@ -79,52 +124,41 @@ http://127.0.0.1:8090/
 GET  /health
 GET  /api/collector/status
 GET  /api/collector/config
+POST /api/collector/config
 GET  /api/runtime/status
 POST /api/runtime/start_preview
 POST /api/runtime/stop_preview
 POST /api/runtime/infer_once
 GET  /api/runtime/latest_result
 GET  /api/runtime/snapshot.jpg
+GET  /api/models
+POST /api/models/switch
 GET  /api/gateway/status
 GET  /api/gateway/registers
 GET  /api/app/status
 GET  /api/app/registers
 ```
 
-`/health` 只表示 Collector 自身健康，不等同于 Runtime 健康。
+说明：
 
-`/api/collector/status` 聚合 Collector 和 Runtime 状态。Runtime 不可达时该接口仍返回 HTTP 200，并使用 `runtime.health: "unreachable"` 表达依赖故障。
+- `/health` 只表示 Collector 自身健康。
+- `/api/collector/status` 会聚合下游状态；下游不可达时仍返回稳定 JSON。
+- `snapshot.jpg` 只是 Runtime 快照代理，不是 Web 自己取图。
+- `/api/models` 返回模型扫描结果和当前 Runtime `loaded_model`。
+- `/api/models/switch` 只允许切换到 Collector 已扫描并验证通过的模型包，不能传任意绝对路径。
 
-Runtime 代理接口保留上游 HTTP 状态码。例如尚无最新结果时，Runtime 的 404 会原样通过 Collector 返回。JSON 响应保持 `application/json`，快照保持 `image/jpeg`。
+## 当前限制
 
-Gateway 和 Business App 的 status 接口在下游不可达时返回稳定 `unreachable` JSON，使生产页仍可诊断 Collector 自身。
+- Collector 不做生产推理。
+- Collector 不直接保存真实模型或现场私密配置。
+- 设置页当前以代理配置与前端临时配置为主，不写 `.env`。
+- 真实采集保存、采集包导出和上传仍是后续工作。
 
-前端只访问上述 Collector 同源接口，不包含 Runtime、Gateway 或 Business App 的直连地址。
-
-## 核心页面
-
-- **校验**：包含摄像头位置校验和光照校验两步。快照来自 Runtime 代理，标准图与亮度指标目前使用 CSS/状态占位。
-- **采集上传**：显示和刷新 Runtime JPEG 快照，支持本地下载和浏览器临时采集记录；采集包导出与上传为待接入入口。
-- **模型验证**：调用 `infer_once`，支持单次、拍照和低频实时检测，显示 Runtime/模型状态、标准结果、四段耗时、bbox 和 OBB points。
-- **设置**：分组显示 Runtime、Gateway、Business App、刷新间隔和设备信息。M7.1 只保存前端临时刷新间隔，不写 `.env` 或源 YAML。
-- **生产模式**：聚合 Collector、Runtime、Gateway、Business App 状态、寄存器快照和最新结果/消息/决策摘要。
-
-前端使用原生 ES modules，按 `api`、`state`、`pages`、`render` 拆分。v2 的顶部页签、左侧步骤、工作区和设置面板作为界面参考，未复制其巨型 `app.js`。后续真实相机、RKNN 和业务接入只替换 Collector 后端代理的数据来源，不需重做 Web 总体结构。
-
-## 实现说明
-
-- 服务端使用 `ThreadingHTTPServer`。
-- Runtime 客户端使用 `urllib.request`。
-- 不新增第三方 Python 依赖。
-- Runtime 请求超时默认为 2 秒。
-- 请求体限制为 1 MiB，Runtime 响应限制为 4 MiB。
-- 静态文件只从仓库内固定路径提供，不接受用户指定文件路径。
-
-## 测试
+## 验证
 
 ```bash
 python -m pytest tests/integration/test_collector_web_proxy.py
 bash apps/collector_web/tests/smoke_test.sh
 ```
 
-冒烟测试使用本机 `127.0.0.1:18080` 和 `127.0.0.1:8090`，自动构建、启动、调用并停止 Runtime Mock 与 Collector。
+`Runtime / Gateway / Business App` 的真实联调仍需在 3576 真机上验证。

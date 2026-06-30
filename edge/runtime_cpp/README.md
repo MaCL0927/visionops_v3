@@ -1,12 +1,27 @@
-# VisionOps C++ Runtime Mock
+# VisionOps C++ Runtime
 
-本目录实现 M3 阶段的 HTTP Mock，并在 M8 完成第一期结构拆分，用于在没有相机、RKNN、NPU、模型文件和现场通信设备的环境中验证 Runtime 接口契约与模块边界。
+本目录已经不只是早期 M3 的 HTTP Mock。当前 Runtime 已进入 `RK3576 / LB3576` 真机联调阶段，支持：
 
-Mock 不包含生产推理能力，也不是 Python RKNN 链路的替代实现。后续真实 Runtime 仍应保持 `Camera Bridge -> C++ RKNN Runtime -> Collector Web -> Gateway/Modbus` 主链路，并复用 M2 定义的标准接口。
+- `mock` backend：用于 x86 开发、接口契约验证和无硬件环境调试。
+- `rknn` backend：用于 RK3576 / RK3588 上的真实模型加载、RKNN 推理与标准 `inference_result` 输出。
+- `v4l2` 与 `hp60c_bridge` 帧源。
+- `snapshot.jpg` 真实帧输出。
+- 运行期 `switch_model` 模型切换接口。
+
+Runtime 在系统中的职责边界保持为：
+
+```text
+Camera Bridge / HP60C Bridge
+  -> C++ RKNN Runtime
+  -> Collector Web
+  -> Business App / Gateway / Modbus
+```
+
+Runtime 负责生产推理、预处理、后处理、状态输出和快照；Collector Web 只做代理、展示和管理，不直接连接相机，也不解析 RKNN 原始 tensor。
 
 ## 构建
 
-从仓库根目录执行：
+x86 / 默认 mock 构建：
 
 ```bash
 cmake -S . -B build
@@ -19,7 +34,27 @@ cmake --build build -j4
 build/edge/runtime_cpp/visionops_runtime_mock
 ```
 
-## 启动
+RKNN 真机构建示例：
+
+```bash
+cmake -S . -B build-rknn \
+  -DVISIONOPS_ENABLE_RKNN=ON \
+  -DVISIONOPS_ENABLE_OPENCV=ON \
+  -DVISIONOPS_RKNN_INCLUDE_DIR=/path/to/rknn/include \
+  -DVISIONOPS_RKNN_LIBRARY=/path/to/librknnrt.so
+
+cmake --build build-rknn -j4
+```
+
+说明：
+
+- 默认构建不依赖 RKNN SDK。
+- `VISIONOPS_ENABLE_RKNN=ON` 时才编译真实 RKNN Runner。
+- `VISIONOPS_ENABLE_OPENCV=ON` 后，HP60C JPEG 可解码为 `RGB888` 进入 RKNN 推理。
+
+## 常用启动方式
+
+### 1. 默认 Mock
 
 ```bash
 ./build/edge/runtime_cpp/visionops_runtime_mock \
@@ -30,7 +65,7 @@ build/edge/runtime_cpp/visionops_runtime_mock
   --mock-task-type detection
 ```
 
-支持的 Mock 任务类型：
+支持的 `mock-task-type`：
 
 ```text
 detection
@@ -46,284 +81,7 @@ classification
 ./build/edge/runtime_cpp/visionops_runtime_mock --help
 ```
 
-## M9.1 模型包配置
-
-M9.1 只读取模型包 manifest、YAML 配置和标签文本，不加载 `.rknn`，不调用 RKNN SDK，也不执行真实推理。示例启动方式：
-
-```bash
-./build/edge/runtime_cpp/visionops_runtime_mock \
-  --model-dir edge/runtime_cpp/examples/mock_model_package \
-  --model-manifest manifest.json \
-  --model-config model.yaml
-```
-
-支持的参数：
-
-- `--model-manifest <path>`：轻量 JSON manifest。
-- `--model-config <path>`：简单 key-value 与行内 list YAML。
-- `--model-dir <path>`：相对文件路径基准；未显式指定 manifest 时可发现目录中的 `manifest.json`。
-
-读取优先级为内置 Mock 默认值、manifest、YAML。YAML 可覆盖模型名称、版本、任务类型、输入尺寸和阈值；标签数量优先读取 manifest 指向的标签文本，否则使用 YAML `class_names` 数量。
-
-`loaded_model` 和 `inference_result.model` 会包含模型标识、任务类型、占位 `.rknn` 路径、配置路径、标签数量、输入尺寸、score/NMS 阈值。显式配置文件不存在或无法解析时，服务仍会启动，`health` 变为 `degraded`，详细原因写入 `model_load_error`。
-
-仓库中的 `examples/mock_model_package/` 只有解析测试所需的 manifest、YAML 和 labels，不包含真实模型。真实模型文件、完整模型包及 `.rknn/.pt/.onnx` 制品不得提交到 Git。
-
-## M9.2 RKNN Runner 外壳
-
-M9.2 引入统一 `RknnRunner` 接口和可选 `RknnRunnerReal` 构建路径。默认仍使用 `mock` backend，不依赖 RKNN SDK：
-
-```bash
-cmake -S . -B build
-cmake --build build -j4
-./build/edge/runtime_cpp/visionops_runtime_mock --backend mock
-```
-
-在 RK3576/RK3588 的部署环境中，可显式提供 RKNN Runtime SDK：
-
-```bash
-cmake -S . -B build-rknn \
-  -DVISIONOPS_ENABLE_RKNN=ON \
-  -DVISIONOPS_RKNN_INCLUDE_DIR=/opt/rknn/include \
-  -DVISIONOPS_RKNN_LIBRARY=/opt/rknn/lib/librknnrt.so
-cmake --build build-rknn -j4
-
-./build-rknn/edge/runtime_cpp/visionops_runtime_mock \
-  --backend rknn \
-  --model-dir /opt/visionops/models/example \
-  --model-manifest manifest.json
-```
-
-当 `VISIONOPS_ENABLE_RKNN=ON` 时，CMake 会验证 `rknn_api.h` 和 RKNN Runtime 库路径，并编译 `rknn_runner_real.cpp`。
-
-默认构建中使用 `--backend rknn` 不会导致进程退出。Runtime 会保持 HTTP 可诊断，状态显示 `degraded`、`runner_loaded=false`、`rknn_compiled=false`，`infer_once` 返回标准 JSON 错误。
-
-## M9.3 真实推理与后处理
-
-M9.3 将 RKNN Runner、CPU letterbox 和 YOLO 后处理接入 `RuntimeApp`。启用 RKNN 的构建会执行模型加载、输入设置、`rknn_run`、float 输出获取和资源释放，再按模型 `task_type` 路由：
-
-- detection：支持常见单输出 YOLOv8 `[1,C,N]` / `[1,N,C]`，以及 v2 使用的 Rockchip split-DFL `[1,64,H,W] + [1,nc,H,W]`。
-- OBB：支持单输出 `xywh + class scores + angle`，输出四点、角度和外接框；当前使用外接矩形 NMS。
-- segmentation：支持单输出候选 tensor 加 proto tensor，默认无 OpenCV 路径输出受 bbox 约束的简化 polygon，不返回原始 tensor。
-
-所有后处理应用 `score_threshold`、`nms_threshold`、labels 和 letterbox 坐标回映。暂不支持的多头 OBB/seg shape 会返回 `UNSUPPORTED_OUTPUT_SHAPE`，不会崩溃或伪造检测结果。`roi_classification` 的真实 RKNN 后处理仍明确返回 `UNSUPPORTED_TASK_TYPE`。
-
-新增运行参数：
-
-- `--test-image <path>`：默认支持 P6 PPM；开启 OpenCV 后支持 JPEG/PNG。
-- `--dump-rknn-io`：打印输入输出 tensor 属性。
-- `--score-threshold` / `--nms-threshold`：覆盖模型配置阈值。
-- `--save-debug-output <dir>`：仅保存 result id、shape 数量和 warning 等轻量摘要，不保存原始 tensor 或图片。
-
-没有 `--test-image` 时，M9.3 使用内存 Mock RGB frame 测试真实 Runner；真实相机取流留到 M10。
-
-### RKNN 后端手动测试
-
-在 RK3576/RK3588 部署环境构建：
-
-```bash
-cmake -S . -B build-rknn \
-  -DVISIONOPS_ENABLE_RKNN=ON \
-  -DVISIONOPS_RKNN_INCLUDE_DIR=/path/to/rknn/include \
-  -DVISIONOPS_RKNN_LIBRARY=/path/to/librknnrt.so \
-  -DVISIONOPS_ENABLE_OPENCV=ON
-
-cmake --build build-rknn -j4
-```
-
-手动运行：
-
-```bash
-./build-rknn/edge/runtime_cpp/visionops_runtime_mock \
-  --backend rknn \
-  --model-manifest /path/to/model_package/manifest.json \
-  --model-config /path/to/model_package/model.yaml \
-  --model-dir /path/to/model_package \
-  --test-image /path/to/test.jpg \
-  --dump-rknn-io \
-  --host 0.0.0.0 \
-  --port 18080
-```
-
-若部署环境不提供 OpenCV，请关闭 `VISIONOPS_ENABLE_OPENCV` 并使用 P6 PPM 测试图。真实测试图片、模型包和 `.rknn/.pt/.onnx` 文件不得进入 Git。
-
-## HTTP API
-
-服务实现以下接口：
-
-```text
-GET  /health
-GET  /api/runtime/status
-POST /api/runtime/start_preview
-POST /api/runtime/stop_preview
-POST /api/runtime/infer_once
-GET  /api/runtime/latest_result
-GET  /api/runtime/snapshot.jpg
-```
-
-完整契约见 `interfaces/protocols/runtime_http_api.md`。当前控制接口读取有界请求体，但不解析业务参数；这是 M3 Mock 的明确限制，后续实现请求 schema 时再增加严格 JSON 解析。
-
-`infer_once` 每次生成新的 `frame_id` 和 `result_id`，并更新状态计数器。`snapshot.jpg` 会优先将 Runtime 最新 RGB888 帧编码为 JPEG；如果尚无最新帧或编码失败，则回退到编译进程序的 1x1 JPEG 占位数据，不读取或提交图片文件。
-
-## M8 模块边界
-
-M8 是结构重构，不是接入真实 RKNN、RGA 或相机。M3 的接口路径、错误语义和 Mock 结果保持兼容。
-
-| 模块 | 当前职责 | 后续演进 |
-| --- | --- | --- |
-| `main.cpp` | 解析 CLI、注册信号、组装并启动服务 | 保持薄入口，不承载业务 JSON 或运行状态 |
-| `AppConfig / CliArgs` | 默认值、参数解析与合法性检查 | 后续可接入统一配置渲染结果 |
-| `RuntimeApp` | 编排状态、取帧、预处理、推理、后处理和快照 | 保持 HTTP 之外的 Runtime 对外能力入口 |
-| `RuntimeState` | 线程安全维护模式、计数器、序号和最近结果 | 为多线程取流与推理队列保留互斥边界 |
-| `HttpServer` | POSIX socket、请求解析、路由和 JSON/JPEG 响应 | 不生成推理结果，不维护业务状态 |
-| `JsonUtils` | 时间戳、JSON 转义和统一错误响应 | 继续保持无第三方 JSON 依赖 |
-| `RknnRunner` | 统一模型加载、backend 状态、推理和错误接口 | M9.2 已接入 Mock/Real/Unavailable 三种实现 |
-| `RknnRunnerReal` | 可选 RKNN Context、输入输出查询、执行和资源释放 | 只返回结构化原始 tensor，不包含 YOLO decode |
-| `StreamWorkerMock` | 生成 Mock Frame、维护预览开关 | M10 在 `stream_worker` 边界迁入真实相机取流 |
-| `Postprocess` | 独立完成 detect/OBB/seg tensor 解析、NMS 和坐标回映 | 输出继续遵守 M2 契约 |
-| `SnapshotProvider` | 将最新 RGB888 帧编码为 JPEG，失败时回退内置极小 JPEG | 后续可替换为硬件 JPEG、libjpeg 或 OpenCV 编码 |
-
-`RuntimeState` 当前仍运行在单线程 HTTP 请求模型下，但所有状态读写均通过互斥锁保护。后续加入取流线程和推理线程时，不应绕过该边界直接修改计数器。
-
-## 冒烟测试
-
-```bash
-bash edge/runtime_cpp/tests/smoke_test.sh
-```
-
-脚本会构建程序、选择本机临时端口、启动服务、调用全部接口并停止进程。日志和临时 JPEG 只写入 `/tmp`，退出时自动清理。
-
-## 实现边界
-
-- C++17 与 Linux/POSIX socket。
-- 不依赖第三方 HTTP 或 JSON 库。
-- 每个连接处理一个请求后关闭，适合契约验证，不用于性能结论。
-- 单线程顺序处理请求；状态仍通过互斥锁封装，便于后续演进。
-- 请求头限制为 64 KiB，请求体限制为 1 MiB。
-- SIGINT 与 SIGTERM 设置停止标记，监听循环在短超时后退出。
-
-## M10：真实相机取流接入一期
-
-M10 在 `stream_worker` 边界加入统一帧源抽象，Runtime 现在支持：
-
-- `--frame-source mock`：默认模式，继续生成灰色 Mock Frame；
-- `--frame-source test_image`：使用 `--test-image` 指定的本地测试图片，默认无 OpenCV 时仅支持 P6 PPM；
-- `--frame-source v4l2`：在 Linux 上通过 V4L2 读取 `/dev/videoX`，M10 一期优先支持 YUYV 输入并转换为 RGB888。
-
-新增常用参数：
-
-```text
---frame-source mock/test_image/v4l2
---camera-device /dev/video0
---camera-width 640
---camera-height 480
---camera-fps 30
---camera-pixel-format YUYV
---enable-camera-thread true/false
---camera-read-timeout-ms 1000
-```
-
-`GET /api/runtime/status` 会返回 `frame_source` 字段，包含帧源类型、设备、打开状态、尺寸、帧率、像素格式、最近帧时间戳和最近错误。Collector Web 仍然只访问 Runtime HTTP API，不直接访问相机。
-
-M10.1 已支持真实 `snapshot.jpg` 输出：当 Runtime 已经通过 `start_preview` 或 `infer_once` 获得最新 RGB888 帧时，`SnapshotProvider` 会用内置轻量 JPEG 编码器返回该帧，`frame_source.snapshot_encoder=rgb888_jpeg`。如果尚无最新帧或编码失败，则稳定回退到内置 1x1 Mock JPEG，并显示 `snapshot_encoder=mock_jpeg`。当前实现不强制依赖 libjpeg/OpenCV。
-
-### 3576 V4L2 手动测试
-
-查看设备能力：
-
-```bash
-v4l2-ctl --list-devices
-v4l2-ctl -d /dev/video0 --list-formats-ext
-```
-
-构建 RKNN 版本：
-
-```bash
-cmake -S . -B build-rknn \
-  -DVISIONOPS_ENABLE_RKNN=ON \
-  -DVISIONOPS_RKNN_INCLUDE_DIR=/usr/include \
-  -DVISIONOPS_RKNN_LIBRARY=/usr/lib/librknnrt.so
-cmake --build build-rknn -j4
-```
-
-启动真实相机帧源与 RKNN 后端：
-
-```bash
-MODEL_DIR=/opt/visionops_v3/models/test_rknn_model
-
-./build-rknn/edge/runtime_cpp/visionops_runtime_mock \
-  --backend rknn \
-  --frame-source v4l2 \
-  --camera-device /dev/video0 \
-  --camera-width 640 \
-  --camera-height 480 \
-  --camera-pixel-format YUYV \
-  --model-manifest "$MODEL_DIR/manifest.json" \
-  --model-config "$MODEL_DIR/model.yaml" \
-  --model-dir "$MODEL_DIR" \
-  --host 0.0.0.0 \
-  --port 18081 \
-  --device-id lb3576-dev
-```
-
-测试接口：
-
-```bash
-curl http://127.0.0.1:18081/api/runtime/status | python3 -m json.tool
-curl -X POST http://127.0.0.1:18081/api/runtime/start_preview | python3 -m json.tool
-curl -X POST http://127.0.0.1:18081/api/runtime/infer_once | python3 -m json.tool
-curl http://127.0.0.1:18081/api/runtime/latest_result | python3 -m json.tool
-curl -I http://127.0.0.1:18081/api/runtime/snapshot.jpg
-```
-
-M10 的核心验收标准是：`frame_source.type=v4l2`、`camera_connected=true`、`infer_once` 的 `image.width/height` 来自真实相机帧，并且 `backend=rknn` 仍然能完成推理闭环。是否检测到目标取决于现场画面、模型和阈值，不作为 M10 一期唯一通过条件。
-
-## M10.2：HP60C SDK HTTP Bridge 帧源
-
-在 LB3576 上如果已经安装并启动 `visionops-hp60c-sdk-bridge.service`，Runtime 可以不直接链接 Angstrong SDK，而是通过本机 HTTP Bridge 读取 HP60C 图像。
-
-Bridge 默认接口来自 v2 做法：
-
-- `GET http://127.0.0.1:18181/health`
-- `GET http://127.0.0.1:18181/stream/snapshot.jpg`
-
-Runtime 新增帧源：
-
-```bash
---frame-source hp60c_bridge
---hp60c-url http://127.0.0.1:18181
---hp60c-snapshot-path /stream/snapshot.jpg
---hp60c-health-path /health
-```
-
-说明：
-
-- `snapshot.jpg` 预览会优先直接返回 HP60C Bridge 提供的 JPEG，因此 Web 端可以看到真实 HP60C 画面。
-- 若需要把 HP60C JPEG 解码为 RGB888 并进入 RKNN 推理，需要在构建 Runtime 时启用 OpenCV：`-DVISIONOPS_ENABLE_OPENCV=ON`。
-- 默认构建不强制依赖 OpenCV；未启用 OpenCV 时，HP60C 快照仍可用于 Web 预览，但 `infer_once` 会返回需要启用 OpenCV 的稳定 JSON 错误。
-
-3576 上检查 Bridge：
-
-```bash
-sudo systemctl status visionops-hp60c-sdk-bridge.service --no-pager -l
-curl -s http://127.0.0.1:18181/health | python3 -m json.tool
-curl -o /tmp/hp60c_bridge.jpg http://127.0.0.1:18181/stream/snapshot.jpg
-file /tmp/hp60c_bridge.jpg
-```
-
-3576 上构建 Runtime：
-
-```bash
-cmake -S . -B build-rknn \
-  -DVISIONOPS_ENABLE_RKNN=ON \
-  -DVISIONOPS_RKNN_INCLUDE_DIR=/usr/include \
-  -DVISIONOPS_RKNN_LIBRARY=/usr/lib/librknnrt.so \
-  -DVISIONOPS_ENABLE_OPENCV=ON
-
-cmake --build build-rknn -j4
-```
-
-启动 Runtime 使用 HP60C Bridge：
+### 2. HP60C / 336lsdk 18182 Bridge
 
 ```bash
 MODEL_DIR=/opt/visionops_v3/models/test_rknn_model
@@ -331,47 +89,167 @@ MODEL_DIR=/opt/visionops_v3/models/test_rknn_model
 ./build-rknn/edge/runtime_cpp/visionops_runtime_mock \
   --backend rknn \
   --frame-source hp60c_bridge \
-  --hp60c-url http://127.0.0.1:18181 \
+  --hp60c-url http://127.0.0.1:18182 \
   --hp60c-snapshot-path /stream/snapshot.jpg \
   --hp60c-health-path /health \
   --model-manifest "$MODEL_DIR/manifest.json" \
   --model-config "$MODEL_DIR/model.yaml" \
   --model-dir "$MODEL_DIR" \
   --host 0.0.0.0 \
-  --port 18081 \
+  --port 28081 \
   --device-id lb3576-dev
 ```
 
-测试接口：
+说明：
 
-```bash
-curl -X POST http://127.0.0.1:18081/api/runtime/start_preview | python3 -m json.tool
-curl -I http://127.0.0.1:18081/api/runtime/snapshot.jpg
-curl http://127.0.0.1:18081/api/runtime/snapshot.jpg -o /tmp/v3_hp60c_snapshot.jpg
-file /tmp/v3_hp60c_snapshot.jpg
-curl -X POST http://127.0.0.1:18081/api/runtime/infer_once | python3 -m json.tool
+- `snapshot.jpg` 可以直接返回 HP60C Bridge 的 JPEG。
+- 开启 OpenCV 构建后，`infer_once` 可以把 JPEG 解码为 `RGB888` 再送入 RKNN。
+- 这条链路只负责推理和标准结果输出，不承载业务判断。
+
+## 模型包与配置
+
+支持读取：
+
+- `--model-manifest <path>`
+- `--model-config <path>`
+- `--model-dir <path>`
+
+`loaded_model` 与 `inference_result.model` 会优先使用模型包中的：
+
+- `model_id`
+- `model_name`
+- `model_version`
+- `task_type`
+- `backend`
+- `input_size`
+- `score_threshold`
+- `nms_threshold`
+- `labels_count`
+
+仓库中的 `examples/mock_model_package/` 只用于解析测试，不包含真实 `.rknn`。
+
+### 标准模型包目录
+
+当前切换模型时，Runtime 期望接收到一个标准模型包目录：
+
+```text
+models/
+└── carton_tube_check/
+    ├── manifest.json
+    ├── model.yaml
+    ├── labels.txt
+    └── model.rknn
 ```
 
-验收时重点查看：
+要求：
 
-- `frame_source.type = hp60c_bridge`
-- `frame_source.opened = true`
-- `frame_source.snapshot_encoder = hp60c_bridge_jpeg`
-- `model.backend = rknn`
-- `debug.rknn_runner_called = true`
+- 一个目录只表示一个模型包
+- `manifest.json` 必须存在
+- `manifest.json` 指向的 `rknn / yaml / labels` 必须都存在
+- 当前不自动识别同目录中的额外 `model2.rknn`
 
+## HTTP API
 
-### M10.2 HP60C Bridge 状态修复
+```text
+GET  /health
+GET  /api/runtime/status
+POST /api/runtime/start_preview
+POST /api/runtime/stop_preview
+POST /api/runtime/infer_once
+POST /api/runtime/switch_model
+GET  /api/runtime/latest_result
+GET  /api/runtime/snapshot.jpg
+```
 
-M10.2 修复了 HP60C Bridge 帧源的运行状态同步问题：`start_preview` 会立即抓取一帧用于刷新 `latest_frame_id` 与 `snapshot_encoder`；`snapshot.jpg` 支持 GET 与 HEAD；`status.source` 会随 backend 显示为 `runtime:mock` 或 `runtime:rknn`；模型 YAML 的 `input_size` 同时兼容 `[640, 640]` 与 `640` 写法。
+完整协议见 `interfaces/protocols/runtime_http_api.md`。
 
-## M11.1：OBB RKNN 多输出适配
+### Preview 与 snapshot 行为
 
-M11.1 在 `postprocess_obb.cpp` 中补充了 Rockchip / RKNN 常见 YOLOv8-OBB split-DFL 多输出格式支持。该格式通常由 3 个尺度输出头和 1 个角度输出组成：
+- Web 侧实时预览依赖 Collector 在页面初始化后调用 `POST /api/runtime/start_preview`。
+- Runtime 进入 preview 状态后，后台取帧线程会持续刷新最新帧。
+- `GET /api/runtime/snapshot.jpg` 会优先返回最新真实帧。
+- 如果当前没有可用真实帧，Runtime 会稳定回退到内置占位 JPEG，而不是读取仓库图片文件。
 
-- `output[0..2]`: `[1, 64 + nc, H, W]`，其中前 64 个通道为 DFL bbox 分布，后 `nc` 个通道为类别分数；
-- `output[3]`: `[1, 1, N]` 或类似形状的 angle 输出，`N` 一般为各尺度空间点数量之和。
+对 `hp60c_bridge` 帧源来说：
 
-后处理会将多输出 OBB 结果统一转换为标准 `inference_result.detections[]`，每个目标包含 `bbox_xyxy`、`center_xy` 和 `obb` 字段。业务 App 仍然消费标准 `detections`，无需直接解析 RKNN 原始输出。
+- Runtime 可以直接缓存并转发 HP60C 的 JPEG。
+- 当 OpenCV 可用时，同一帧也可解码用于 `infer_once`。
 
-如果遇到未支持的 OBB 输出格式，`infer_once` 的 error debug 中会返回 `raw_outputs`，包含每个输出 tensor 的 `dims`、`data_type`、`layout` 和 byte size，用于继续适配新的模型结构。
+### 模型切换行为
+
+`POST /api/runtime/switch_model` 请求体示例：
+
+```json
+{
+  "model_dir": "/opt/visionops_v3/models/carton_tube_check"
+}
+```
+
+切换规则：
+
+1. Runtime 先解析新模型包。
+2. 创建新的 Runner。
+3. 加载新模型。
+4. 只有新模型加载成功后，才替换旧 `rknn_runner_` 和 `loaded_model`。
+5. 如果新模型加载失败，旧模型会被保留，不会进入无模型状态。
+
+## 如何验证 snapshot 是否实时更新
+
+在 3576 真机上可以比较两次快照摘要：
+
+```bash
+curl -s http://127.0.0.1:18182/stream/snapshot.jpg | sha256sum
+sleep 1
+curl -s http://127.0.0.1:18182/stream/snapshot.jpg | sha256sum
+
+curl -s http://127.0.0.1:28081/api/runtime/snapshot.jpg | sha256sum
+sleep 1
+curl -s http://127.0.0.1:28081/api/runtime/snapshot.jpg | sha256sum
+```
+
+如果 preview 已启动且现场画面有变化，两次摘要通常不应长期完全一致。还建议同时检查：
+
+```bash
+curl -s http://127.0.0.1:28081/api/runtime/status
+```
+
+重点关注：
+
+- `frame_source.frames_captured`
+- `frame_source.latest_timestamp_ms`
+- `frame_source.last_error`
+
+### 3576 上验证模型切换
+
+```bash
+curl -s http://127.0.0.1:18091/api/models | python3 -m json.tool
+
+curl -X POST http://127.0.0.1:18091/api/models/switch \
+  -H "Content-Type: application/json" \
+  -d '{"package_dir":"carton_tube_check"}' | python3 -m json.tool
+
+curl -s http://127.0.0.1:28081/api/runtime/status | python3 -m json.tool
+
+curl -X POST http://127.0.0.1:28081/api/runtime/infer_once | python3 -m json.tool
+```
+
+真实 RKNN 模型热切换仍需要在 3576 真机验证；x86 环境当前只验证 mock backend 的接口逻辑和失败语义。
+
+## 模块边界
+
+- `main.cpp`：薄入口，负责 CLI、信号和服务启动。
+- `HttpServer`：只负责 HTTP 路由、JSON/JPEG 响应，不拼业务结果。
+- `RuntimeApp`：编排取帧、推理、后处理、快照与状态。
+- `StreamWorker`：负责 `mock / test_image / v4l2 / hp60c_bridge` 帧源。
+- `RknnRunner`：负责模型加载、RKNN 调用与底层错误。
+- `Postprocess`：负责 detection / OBB / segmentation 标准化输出。
+
+不要把业务判断、Gateway 映射或 Web 逻辑写进 Runtime。
+
+## 冒烟测试
+
+```bash
+bash edge/runtime_cpp/tests/smoke_test.sh
+```
+
+该脚本适合 x86 / mock 环境接口验证。`hp60c_bridge`、OpenCV 解码、真实 RKNN、3576 设备驱动仍需要在真机上手动验证。

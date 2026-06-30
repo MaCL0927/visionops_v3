@@ -77,7 +77,9 @@
             <aside class="model-select">
               <div class="section-title"><div class="kicker">模型状态</div><h1>当前 Runtime 模型</h1><p>模型由 C++ Runtime 管理，Web 不加载模型文件。</p></div>
               <div id="model-status-card" class="model-card"><span>模型名称</span><b id="model-name">--</b><span>模型版本</span><b id="model-version">--</b><span>任务类型</span><b id="model-task">--</b></div>
-              <button id="validate-runtime-refresh">刷新 Runtime 状态</button>
+              <div class="model-actions"><button id="validate-runtime-refresh">刷新 Runtime 状态</button><button id="validate-model-scan" class="primary">扫描模型</button></div>
+              <div id="model-catalog-status" class="inline-note">等待扫描模型目录</div>
+              <div id="model-list" class="model-list"><div class="empty-copy">尚未扫描模型包</div></div>
               <pre id="validate-runtime-status">尚未加载 Runtime 状态</pre>
             </aside>
             <section class="content-card validate-card">

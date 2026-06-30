@@ -435,7 +435,10 @@ FrameReadResult StreamWorkerMock::next_frame(std::uint64_t sequence) {
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (latest_image_.data.size() > 0 && latest_image_.width > 0) {
+
+    // 只有 preview 线程运行时，latest_image_ 才可以认为是持续更新的实时缓存。
+    // 未启动 preview 时，next_frame 应主动从帧源读取新图，避免 infer_once/snapshot 永远使用首帧。
+    if (preview_running_ && latest_image_.data.size() > 0 && latest_image_.width > 0) {
       result.image = latest_image_;
       result.from_cache = true;
       result.frame.width = result.image.width;

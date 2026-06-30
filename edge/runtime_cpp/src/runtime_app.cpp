@@ -1,6 +1,7 @@
 #include "visionops_runtime/runtime_app.hpp"
 
 #include <iomanip>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -16,6 +17,11 @@
 namespace visionops::runtime {
 
 namespace {
+
+struct PreparedModelRuntime {
+  LoadedModelInfo model_info;
+  std::unique_ptr<RknnRunner> runner;
+};
 
 std::string optional_json(const std::optional<std::string>& value) {
   return value ? '"' + json_escape(*value) + '"' : "null";
@@ -48,6 +54,74 @@ std::string fallback_postprocess(const std::string& task_type) {
   if (task_type == "classification") return make_classification_payload_json();
   if (task_type == "roi_classification") return make_roi_classification_payload_json();
   return make_detection_payload_json();
+}
+
+std::optional<std::string> json_string_field(const std::string& text, const std::string& key) {
+  const std::string marker = '"' + key + '"';
+  const auto key_position = text.find(marker);
+  if (key_position == std::string::npos) {
+    return std::nullopt;
+  }
+  const auto colon = text.find(':', key_position + marker.size());
+  if (colon == std::string::npos) {
+    return std::nullopt;
+  }
+  auto position = colon + 1;
+  while (position < text.size() && std::isspace(static_cast<unsigned char>(text[position]))) {
+    ++position;
+  }
+  if (position >= text.size() || text[position] != '"') {
+    return std::nullopt;
+  }
+  ++position;
+  std::string value;
+  bool escaped = false;
+  for (; position < text.size(); ++position) {
+    const char ch = text[position];
+    if (escaped) {
+      value.push_back(ch);
+      escaped = false;
+    } else if (ch == '\\') {
+      escaped = true;
+    } else if (ch == '"') {
+      return value;
+    } else {
+      value.push_back(ch);
+    }
+  }
+  return std::nullopt;
+}
+
+PreparedModelRuntime prepare_model_runtime(const AppConfig& config) {
+  PreparedModelRuntime prepared;
+  prepared.model_info = load_model_package(config);
+  prepared.runner = create_rknn_runner(config.backend, prepared.model_info.task_type);
+  if (config.score_threshold_override >= 0.0) {
+    prepared.model_info.score_threshold = config.score_threshold_override;
+  }
+  if (config.nms_threshold_override >= 0.0) {
+    prepared.model_info.nms_threshold = config.nms_threshold_override;
+  }
+  prepared.model_info.backend = prepared.runner->backend_name();
+  if (config.backend == "rknn" &&
+      (prepared.model_info.rknn_path.empty() ||
+       !std::filesystem::exists(prepared.model_info.rknn_path))) {
+    append_error(
+        prepared.model_info.model_load_error,
+        "RKNN 模型文件不存在: " +
+            (prepared.model_info.rknn_path.empty()
+                 ? std::string("<未配置>")
+                 : prepared.model_info.rknn_path));
+  }
+  const RunnerModelConfig runner_config{
+      prepared.model_info.task_type,
+      prepared.model_info.input_width,
+      prepared.model_info.input_height,
+      config.dump_rknn_io};
+  if (!prepared.runner->load_model(prepared.model_info.rknn_path, runner_config)) {
+    append_error(prepared.model_info.model_load_error, prepared.runner->last_error());
+  }
+  return prepared;
 }
 
 FrameSourceConfig make_frame_source_config(const AppConfig& config) {
@@ -93,35 +167,15 @@ std::string frame_source_json(const FrameSourceStatus& frame_source) {
 
 RuntimeApp::RuntimeApp(AppConfig config)
     : config_(std::move(config)),
-      model_info_(load_model_package(config_)),
-      rknn_runner_(create_rknn_runner(config_.backend, model_info_.task_type)),
       stream_worker_(make_frame_source_config(config_)) {
   validate_app_config(config_);
-  if (config_.score_threshold_override >= 0.0) {
-    model_info_.score_threshold = config_.score_threshold_override;
-  }
-  if (config_.nms_threshold_override >= 0.0) {
-    model_info_.nms_threshold = config_.nms_threshold_override;
-  }
-  model_info_.backend = rknn_runner_->backend_name();
-  if (config_.backend == "rknn" &&
-      (model_info_.rknn_path.empty() || !std::filesystem::exists(model_info_.rknn_path))) {
-    append_error(
-        model_info_.model_load_error,
-        "RKNN 模型文件不存在: " +
-            (model_info_.rknn_path.empty() ? std::string("<未配置>") : model_info_.rknn_path));
-  }
-  const RunnerModelConfig runner_config{
-      model_info_.task_type,
-      model_info_.input_width,
-      model_info_.input_height,
-      config_.dump_rknn_io};
-  if (!rknn_runner_->load_model(model_info_.rknn_path, runner_config)) {
-    append_error(model_info_.model_load_error, rknn_runner_->last_error());
-  }
+  auto prepared = prepare_model_runtime(config_);
+  model_info_ = std::move(prepared.model_info);
+  rknn_runner_ = std::move(prepared.runner);
 }
 
 bool RuntimeApp::runtime_degraded() const {
+  std::lock_guard<std::recursive_mutex> lock(model_mutex_);
   const auto frame_source = stream_worker_.status();
   return model_info_.degraded() || !rknn_runner_->is_loaded() ||
          (config_.frame_source == "v4l2" && !frame_source.last_error.empty());
@@ -182,6 +236,7 @@ std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
 }
 
 std::string RuntimeApp::loaded_model_json() const {
+  std::lock_guard<std::recursive_mutex> lock(model_mutex_);
   std::ostringstream stream;
   stream << std::fixed << std::setprecision(3)
          << "{\"model_id\":\"" << json_escape(model_info_.model_id) << '"'
@@ -268,6 +323,7 @@ std::string RuntimeApp::infer_once() {
     frame.height = source_image.height;
   }
 
+  std::lock_guard<std::recursive_mutex> model_lock(model_mutex_);
   const auto preprocess = preprocess_image(
       frame, source_image, model_info_.input_width, model_info_.input_height);
   if (!preprocess.error.empty()) {
@@ -357,6 +413,102 @@ std::string RuntimeApp::infer_once() {
   const auto result = inference_result_json(identity, frame, preprocess, inference);
   state_.complete_inference(identity, result);
   return result;
+}
+
+RuntimeApiResult RuntimeApp::switch_model(const std::string& request_body) {
+  const auto model_dir_value = json_string_field(request_body, "model_dir");
+  if (!model_dir_value || model_dir_value->empty()) {
+    return {
+        400,
+        make_error_json(
+            config_.device_id,
+            config_.component,
+            "MODEL_DIR_REQUIRED",
+            "请求体必须包含 model_dir 字段",
+            true),
+    };
+  }
+
+  std::lock_guard<std::recursive_mutex> lock(model_mutex_);
+  AppConfig next_config = config_;
+  next_config.model_dir = *model_dir_value;
+  next_config.model_manifest.clear();
+  next_config.model_config.clear();
+  const std::filesystem::path package_dir = std::filesystem::path(next_config.model_dir).lexically_normal();
+  if (!std::filesystem::exists(package_dir) || !std::filesystem::is_directory(package_dir)) {
+    return {
+        500,
+        make_error_json(
+            config_.device_id,
+            config_.component,
+            "MODEL_SWITCH_FAILED",
+            "模型目录不存在: " + package_dir.string(),
+            true),
+    };
+  }
+  if (!std::filesystem::exists(package_dir / "manifest.json")) {
+    return {
+        500,
+        make_error_json(
+            config_.device_id,
+            config_.component,
+            "MODEL_SWITCH_FAILED",
+            "模型目录缺少 manifest.json: " + package_dir.string(),
+            true),
+    };
+  }
+
+  PreparedModelRuntime prepared;
+  try {
+    prepared = prepare_model_runtime(next_config);
+  } catch (const std::exception& error) {
+    return {
+        500,
+        make_error_json(
+            config_.device_id,
+            config_.component,
+            "MODEL_SWITCH_FAILED",
+            std::string("模型切换失败: ") + error.what(),
+            true),
+    };
+  }
+
+  if (prepared.model_info.degraded() || !prepared.runner || !prepared.runner->is_loaded()) {
+    const std::string error = prepared.model_info.model_load_error.empty()
+        ? std::string("新模型加载失败")
+        : prepared.model_info.model_load_error;
+    return {
+        500,
+        make_error_json(
+            config_.device_id,
+            config_.component,
+            "MODEL_SWITCH_FAILED",
+            error,
+            true),
+    };
+  }
+  if (prepared.model_info.rknn_path.empty() || prepared.model_info.config_path.empty() ||
+      prepared.model_info.labels_path.empty() ||
+      !std::filesystem::exists(prepared.model_info.rknn_path) ||
+      !std::filesystem::exists(prepared.model_info.config_path) ||
+      !std::filesystem::exists(prepared.model_info.labels_path)) {
+    return {
+        500,
+        make_error_json(
+            config_.device_id,
+            config_.component,
+            "MODEL_SWITCH_FAILED",
+            "新模型包不是标准模型目录，缺少 manifest 指向的 rknn/yaml/labels 文件",
+            true),
+    };
+  }
+
+  config_.model_dir = next_config.model_dir;
+  config_.model_manifest.clear();
+  config_.model_config.clear();
+  model_info_ = std::move(prepared.model_info);
+  rknn_runner_ = std::move(prepared.runner);
+  return {200, status_json()};
 }
 
 std::string RuntimeApp::inference_result_json(
@@ -494,25 +646,31 @@ std::optional<std::string> RuntimeApp::latest_result_json() const {
 }
 
 std::vector<std::uint8_t> RuntimeApp::snapshot_jpeg() {
-  // 优先返回最新缓存帧。若页面首次请求 snapshot 时还没有缓存帧，
-  // 则主动同步读取一帧，避免 Web 端一直看到内置 mock JPEG。
   std::vector<std::uint8_t> bridge_jpeg;
-  if (stream_worker_.latest_snapshot_jpeg(bridge_jpeg)) {
-    return bridge_jpeg;
-  }
-  ImageBuffer image;
-  if (stream_worker_.latest_frame(image)) {
-    return snapshot_provider_.snapshot_jpeg(&image);
-  }
-  if (config_.frame_source != "mock") {
+
+  // 如果没有启动 preview 线程，则每次 snapshot 主动取一帧，避免一直返回首帧缓存。
+  if (config_.frame_source != "mock" && !stream_worker_.preview_running()) {
     auto frame_result = stream_worker_.next_frame(static_cast<std::uint64_t>(now_timestamp_ms()));
+
     if (stream_worker_.latest_snapshot_jpeg(bridge_jpeg)) {
       return bridge_jpeg;
     }
+
     if (frame_result.ok && image_buffer_valid_rgb(frame_result.image)) {
       return snapshot_provider_.snapshot_jpeg(&frame_result.image);
     }
   }
+
+  // preview 线程已启动时，返回后台线程持续更新的最新帧。
+  if (stream_worker_.latest_snapshot_jpeg(bridge_jpeg)) {
+    return bridge_jpeg;
+  }
+
+  ImageBuffer image;
+  if (stream_worker_.latest_frame(image)) {
+    return snapshot_provider_.snapshot_jpeg(&image);
+  }
+
   return snapshot_provider_.snapshot_jpeg();
 }
 

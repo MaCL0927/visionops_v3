@@ -25,8 +25,34 @@ def _free_port() -> int:
         return int(server.getsockname()[1])
 
 
-def _request_json(url: str, method: str = "GET") -> tuple[int, dict]:
-    data = b"{}" if method == "POST" else None
+def _write_model_package(root: Path, name: str, *, task_type: str = "obb") -> Path:
+    package = root / name
+    package.mkdir(parents=True)
+    manifest = {
+        "package_id": f"{name}-id",
+        "model_name": name,
+        "model_version": "0.1.0",
+        "task_type": task_type,
+        "target_platform": "rk3576",
+        "files": {
+            "rknn": "model.rknn",
+            "yaml": "model.yaml",
+            "labels": "labels.txt",
+        },
+        "input": {"size": [640, 640]},
+    }
+    (package / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    (package / "model.yaml").write_text(
+        f"model_name: {name}\nmodel_version: 0.1.0\ntask_type: {task_type}\ninput_size: [640, 640]\nclass_names: [tube, defect]\n",
+        encoding="utf-8",
+    )
+    (package / "labels.txt").write_text("tube\ndefect\n", encoding="utf-8")
+    (package / "model.rknn").write_bytes(b"mock-rknn")
+    return package
+
+
+def _request_json(url: str, method: str = "GET", body: dict | None = None) -> tuple[int, dict]:
+    data = json.dumps(body or {}).encode("utf-8") if method == "POST" else None
     request = urllib.request.Request(
         url,
         data=data,
@@ -41,7 +67,7 @@ def _request_json(url: str, method: str = "GET") -> tuple[int, dict]:
 
 
 @contextmanager
-def _running_runtime(binary: Path, task_type: str):
+def _running_runtime(binary: Path, task_type: str, extra_args: list[str] | None = None):
     port = _free_port()
     process = subprocess.Popen(
         [
@@ -56,6 +82,7 @@ def _running_runtime(binary: Path, task_type: str):
             "rknn_runtime",
             "--mock-task-type",
             task_type,
+            *(extra_args or []),
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -215,3 +242,46 @@ def test_runtime_mock_returns_method_not_allowed(runtime_server: str) -> None:
     )
     assert status_code == 405
     assert error["error"]["code"] == "METHOD_NOT_ALLOWED"
+
+
+def test_runtime_mock_can_switch_model_in_mock_backend(
+    runtime_mock_binary: Path,
+    tmp_path: Path,
+) -> None:
+    first = _write_model_package(tmp_path, "model_a", task_type="detection")
+    second = _write_model_package(tmp_path, "model_b", task_type="obb")
+    with _running_runtime(
+        runtime_mock_binary,
+        "detection",
+        ["--backend", "mock", "--model-dir", str(first)],
+    ) as base_url:
+        status_code, initial = _request_json(f"{base_url}/api/runtime/status")
+        assert status_code == 200
+        assert initial["loaded_model"]["model_name"] == "model_a"
+        assert initial["loaded_model"]["task_type"] == "detection"
+
+        status_code, switched = _request_json(
+            f"{base_url}/api/runtime/switch_model",
+            method="POST",
+            body={"model_dir": str(second)},
+        )
+        assert status_code == 200
+        assert switched["loaded_model"]["model_name"] == "model_b"
+        assert switched["loaded_model"]["task_type"] == "obb"
+
+        status_code, result = _request_json(f"{base_url}/api/runtime/infer_once", method="POST")
+        assert status_code == 200
+        assert result["model"]["model_name"] == "model_b"
+        assert result["task_type"] == "obb"
+
+        status_code, failed = _request_json(
+            f"{base_url}/api/runtime/switch_model",
+            method="POST",
+            body={"model_dir": str(tmp_path / 'missing_model')},
+        )
+        assert status_code == 500
+        assert failed["error"]["code"] == "MODEL_SWITCH_FAILED"
+
+        status_code, after_failed = _request_json(f"{base_url}/api/runtime/status")
+        assert status_code == 200
+        assert after_failed["loaded_model"]["model_name"] == "model_b"

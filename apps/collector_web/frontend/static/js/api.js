@@ -13,8 +13,12 @@ export async function requestJson(path, options = {}) {
   return body;
 }
 
-export function postJson(path) {
-  return requestJson(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+export function postJson(path, body = {}) {
+  return requestJson(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 export async function requestBlob(path) {
@@ -30,11 +34,21 @@ export async function requestBlob(path) {
 }
 
 export const endpoints = {
-  frontendConfig: "/api/collector/config", collectorStatus: "/api/collector/status",
-  runtimeStatus: "/api/runtime/status", inferOnce: "/api/runtime/infer_once",
-  latestResult: "/api/runtime/latest_result", snapshot: "/api/runtime/snapshot.jpg",
-  gatewayStatus: "/api/gateway/status", gatewayRegisters: "/api/gateway/registers",
-  appStatus: "/api/app/status", appRegisters: "/api/app/registers",
-  appEvaluate: "/api/app/evaluate_once", appLatestDecision: "/api/app/latest_decision",
+  frontendConfig: "/api/collector/config",
+  collectorStatus: "/api/collector/status",
+  runtimeStatus: "/api/runtime/status",
+  startPreview: "/api/runtime/start_preview",
+  stopPreview: "/api/runtime/stop_preview",
+  inferOnce: "/api/runtime/infer_once",
+  latestResult: "/api/runtime/latest_result",
+  snapshot: "/api/runtime/snapshot.jpg",
+  models: "/api/models",
+  switchModel: "/api/models/switch",
+  gatewayStatus: "/api/gateway/status",
+  gatewayRegisters: "/api/gateway/registers",
+  appStatus: "/api/app/status",
+  appRegisters: "/api/app/registers",
+  appEvaluate: "/api/app/evaluate_once",
+  appLatestDecision: "/api/app/latest_decision",
   appLatestGatewayMessage: "/api/app/latest_gateway_message",
 };

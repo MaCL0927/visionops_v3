@@ -295,6 +295,13 @@ HttpResponse HttpServer::route(const HttpRequest& request) {
     return request.method == "POST" ? json_response(200, "OK", app_.infer_once())
                                     : method_not_allowed("POST");
   }
+  if (request.path == "/api/runtime/switch_model") {
+    if (request.method != "POST") {
+      return method_not_allowed("POST");
+    }
+    const auto result = app_.switch_model(request.body);
+    return json_response(result.status_code, status_reason(result.status_code), result.body);
+  }
   if (request.path == "/api/runtime/latest_result") {
     if (request.method != "GET") {
       return method_not_allowed("GET");

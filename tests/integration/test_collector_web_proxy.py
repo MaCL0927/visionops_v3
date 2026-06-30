@@ -24,8 +24,10 @@ def _free_port() -> int:
         return int(server.getsockname()[1])
 
 
-def _request(url: str, method: str = "GET") -> tuple[int, str, bytes, dict[str, str]]:
-    data = b"{}" if method == "POST" else None
+def _request(url: str, method: str = "GET", body: dict | None = None) -> tuple[int, str, bytes, dict[str, str]]:
+    data = None
+    if method == "POST":
+        data = json.dumps(body or {}).encode("utf-8")
     request = urllib.request.Request(
         url,
         data=data,
@@ -49,8 +51,8 @@ def _request(url: str, method: str = "GET") -> tuple[int, str, bytes, dict[str, 
         )
 
 
-def _request_json(url: str, method: str = "GET") -> tuple[int, dict]:
-    status, content_type, body, _ = _request(url, method)
+def _request_json(url: str, method: str = "GET", body: dict | None = None) -> tuple[int, dict]:
+    status, content_type, body, _ = _request(url, method, body)
     assert content_type == "application/json"
     return status, json.loads(body.decode("utf-8"))
 
@@ -68,6 +70,34 @@ def _wait_for_health(process: subprocess.Popen, url: str) -> None:
         except (OSError, ValueError, json.JSONDecodeError):
             time.sleep(0.05)
     pytest.fail(f"服务未在超时时间内启动: {url}")
+
+
+def _write_model_package(root: Path, name: str) -> Path:
+    package = root / name
+    package.mkdir(parents=True)
+    manifest = {
+        "package_id": f"{name}-id",
+        "model_name": name,
+        "model_version": "0.1.0",
+        "task_type": "obb",
+        "target_platform": "rk3576",
+        "files": {
+            "rknn": "model.rknn",
+            "yaml": "model.yaml",
+            "labels": "labels.txt",
+        },
+        "input": {"size": [640, 640]},
+        "postprocess": {"score_threshold": 0.5, "nms_threshold": 0.45},
+    }
+    (package / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    (package / "model.yaml").write_text(
+        "model_name: %s\nmodel_version: 0.1.0\ntask_type: obb\ninput_size: [640, 640]\nclass_names: [tube, defect]\n"
+        % name,
+        encoding="utf-8",
+    )
+    (package / "labels.txt").write_text("tube\ndefect\n", encoding="utf-8")
+    (package / "model.rknn").write_bytes(b"mock-rknn")
+    return package
 
 
 @contextmanager
@@ -120,8 +150,9 @@ def _collector_command(
     runtime_url: str,
     gateway_url: str | None = None,
     business_app_url: str | None = None,
+    models_root: str | None = None,
 ) -> list[str]:
-    return [
+    command = [
         sys.executable,
         "-m",
         "apps.collector_web.backend.main",
@@ -140,6 +171,9 @@ def _collector_command(
         "--component",
         "collector_web",
     ]
+    if models_root:
+        command.extend(["--models-root", models_root])
+    return command
 
 
 def test_collector_status_survives_unreachable_runtime() -> None:
@@ -317,3 +351,78 @@ def test_collector_proxies_gateway_registers() -> None:
             assert status == 200
             assert registers["message_type"] == "holding_register_snapshot"
             assert len(registers["registers"]) == 20
+
+
+def test_collector_lists_models_and_rejects_arbitrary_switch_path(
+    runtime_mock_binary_for_collector: Path,
+    tmp_path: Path,
+) -> None:
+    models_root = tmp_path / "models"
+    _write_model_package(models_root, "carton_tube_check")
+    (models_root / "broken_model").mkdir(parents=True)
+    (models_root / "broken_model" / "manifest.json").write_text(
+        json.dumps(
+            {
+                "package_id": "broken-id",
+                "model_name": "broken",
+                "model_version": "0.0.1",
+                "task_type": "detection",
+                "files": {"rknn": "missing.rknn", "yaml": "model.yaml", "labels": "labels.txt"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (models_root / "broken_model" / "model.yaml").write_text("model_name: broken\n", encoding="utf-8")
+    (models_root / "broken_model" / "labels.txt").write_text("object\n", encoding="utf-8")
+
+    runtime_port = _free_port()
+    collector_port = _free_port()
+    runtime_url = f"http://127.0.0.1:{runtime_port}"
+    collector_url = f"http://127.0.0.1:{collector_port}"
+    runtime_command = [
+        str(runtime_mock_binary_for_collector),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(runtime_port),
+        "--device-id",
+        "example-edge-collector-test",
+        "--component",
+        "rknn_runtime",
+        "--backend",
+        "mock",
+    ]
+
+    with _managed_process(runtime_command) as runtime:
+        _wait_for_health(runtime, f"{runtime_url}/health")
+        with _managed_process(
+            _collector_command(collector_port, runtime_url, models_root=str(models_root))
+        ) as collector:
+            _wait_for_health(collector, f"{collector_url}/health")
+
+            status, catalog = _request_json(f"{collector_url}/api/models")
+            assert status == 200
+            assert catalog["models_root"] == str(models_root)
+            assert len(catalog["models"]) == 2
+            valid = next(model for model in catalog["models"] if model["package_dir"] == "carton_tube_check")
+            broken = next(model for model in catalog["models"] if model["package_dir"] == "broken_model")
+            assert valid["valid"] is True
+            assert broken["valid"] is False
+
+            status, error = _request_json(
+                f"{collector_url}/api/models/switch",
+                method="POST",
+                body={"package_dir": "../../etc"},
+            )
+            assert status == 404
+            assert error["error"]["code"] == "MODEL_NOT_FOUND"
+
+            status, switched = _request_json(
+                f"{collector_url}/api/models/switch",
+                method="POST",
+                body={"package_dir": "carton_tube_check"},
+            )
+            assert status == 200
+            assert switched["loaded_model"]["model_name"] == "carton_tube_check"
+            assert switched["loaded_model"]["task_type"] == "obb"

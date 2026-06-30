@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .config_loader import CollectorConfig, load_config
+from .model_catalog import find_scanned_model, scan_model_catalog
 from .response_utils import error_document, send_bytes, send_json, timestamp_ms
 from .runtime_client import RuntimeClient, RuntimeResponse, RuntimeUnavailable
 
@@ -83,6 +84,9 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/collector/config":
             self._send_frontend_config()
             return
+        if path == "/api/models":
+            self._send_model_catalog()
+            return
         if path in DOWNSTREAM_PATHS:
             name, target, status_endpoint = DOWNSTREAM_PATHS[path]
             self._proxy_downstream(name, target, status_endpoint)
@@ -99,6 +103,9 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             if body is None:
                 return
             self._proxy_downstream_post("business_app", "/api/app/evaluate_once", body)
+            return
+        if path == "/api/models/switch":
+            self._switch_model()
             return
         if path in PROXY_PATHS:
             self._proxy_runtime(path, expected_method=PROXY_PATHS[path])
@@ -140,6 +147,7 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
                 "runtime_url": config.runtime_url,
                 "gateway_url": config.gateway_url,
                 "business_app_url": config.business_app_url,
+                "models_root": config.models_root,
             },
         )
 
@@ -151,9 +159,41 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             "runtime_url": config.runtime_url,
             "gateway_url": config.gateway_url,
             "business_app_url": config.business_app_url,
+            "models_root": config.models_root,
             "device_id": config.device_id,
             "snapshot_refresh_interval_ms": config.snapshot_refresh_interval_ms,
             "status_refresh_interval_ms": config.status_refresh_interval_ms,
+        })
+
+    def _send_model_catalog(self) -> None:
+        current_model: dict[str, Any] | None = None
+        runtime: dict[str, Any]
+        try:
+            response = self.server.runtime_client.request("GET", "/api/runtime/status")
+            payload = self._decode_runtime_json(response)
+            current_model = payload.get("loaded_model") if isinstance(payload.get("loaded_model"), dict) else None
+            runtime = {
+                "reachable": response.status_code == 200,
+                "status_code": response.status_code,
+            }
+        except (RuntimeUnavailable, ValueError, json.JSONDecodeError) as error:
+            runtime = {
+                "reachable": False,
+                "error": {
+                    "code": "RUNTIME_UNREACHABLE",
+                    "message": "Collector 无法读取 Runtime 当前模型状态",
+                    "detail": str(error),
+                    "recoverable": True,
+                },
+            }
+
+        send_json(self, 200, {
+            "schema_version": "1.0",
+            "message_type": "model_catalog",
+            "models_root": self.server.config.models_root,
+            "current_model": current_model,
+            "runtime": runtime,
+            "models": scan_model_catalog(Path(self.server.config.models_root), current_model=current_model),
         })
 
     def _collector_snapshot(self) -> dict[str, Any]:
@@ -290,6 +330,96 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             return None
         return self.rfile.read(length) if length else b"{}"
 
+    def _read_json_body(self) -> dict[str, Any] | None:
+        body = self._read_request_body()
+        if body is None:
+            return None
+        try:
+            document = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._send_collector_error(400, "INVALID_JSON_BODY", "请求体必须是合法 JSON", True)
+            return None
+        if not isinstance(document, dict):
+            self._send_collector_error(400, "INVALID_JSON_BODY", "请求体顶层必须是对象", True)
+            return None
+        return document
+
+    def _switch_model(self) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        model_id = str(payload.get("model_id") or "").strip()
+        package_dir = str(payload.get("package_dir") or "").strip()
+        if not model_id and not package_dir:
+            self._send_collector_error(
+                400,
+                "MODEL_SELECTOR_REQUIRED",
+                "请求体必须包含 model_id 或 package_dir",
+                True,
+            )
+            return
+
+        scanned_models = scan_model_catalog(Path(self.server.config.models_root))
+        selected = find_scanned_model(scanned_models, model_id=model_id, package_dir=package_dir)
+        if selected is None:
+            self._send_collector_error(
+                404,
+                "MODEL_NOT_FOUND",
+                "Collector 未在 models_root 中找到指定模型包",
+                True,
+            )
+            return
+        if not selected.get("valid", False):
+            self._send_collector_error(
+                400,
+                "MODEL_PACKAGE_INVALID",
+                "指定模型包未通过 Collector 校验",
+                True,
+                detail=selected.get("error"),
+            )
+            return
+
+        body = json.dumps(
+            {"model_dir": selected["package_path"]},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        try:
+            response = self.server.runtime_client.request(
+                "POST",
+                "/api/runtime/switch_model",
+                body=body,
+            )
+        except RuntimeUnavailable as error:
+            self._send_collector_error(
+                502,
+                "RUNTIME_UNREACHABLE",
+                "Collector 无法连接 Runtime",
+                True,
+                detail=str(error),
+            )
+            return
+        if response.content_type != "application/json":
+            self._send_collector_error(
+                502,
+                "INVALID_RUNTIME_RESPONSE",
+                "Runtime 返回了非预期内容类型",
+                True,
+                detail={"content_type": response.content_type},
+            )
+            return
+        send_bytes(
+            self,
+            response.status_code,
+            response.body,
+            "application/json; charset=utf-8",
+            {
+                "X-VisionOps-Proxied-By": self.server.config.component,
+                "X-VisionOps-Runtime-Url": self.server.config.runtime_url,
+                "X-VisionOps-Proxy-Timestamp-Ms": str(timestamp_ms()),
+            },
+        )
+
     def _proxy_runtime(self, path: str, expected_method: str) -> None:
         if self.command != expected_method:
             self._send_collector_error(
@@ -387,7 +517,8 @@ def run(config: CollectorConfig) -> int:
     signal.signal(signal.SIGTERM, request_shutdown)
     print(
         f"VisionOps Collector Web 正在监听 {config.host}:{config.port}，"
-        f"Runtime={config.runtime_url}，Gateway={config.gateway_url}，App={config.business_app_url}"
+        f"Runtime={config.runtime_url}，Gateway={config.gateway_url}，"
+        f"App={config.business_app_url}，ModelsRoot={config.models_root}"
     )
     try:
         server.serve_forever(poll_interval=0.2)

@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 
 import yaml
 
+from .model_catalog import default_models_root
+
 
 @dataclass(frozen=True)
 class CollectorConfig:
@@ -24,6 +26,7 @@ class CollectorConfig:
     status_refresh_interval_ms: int = 2000
     device_id: str = "example-edge-001"
     component: str = "collector_web"
+    models_root: str = ""
 
 
 def _port(value: str) -> int:
@@ -48,6 +51,10 @@ def _positive_ms(value: str) -> int:
     if number < 100:
         raise argparse.ArgumentTypeError("刷新间隔不得小于 100 ms")
     return number
+
+
+def _path_text(value: str) -> str:
+    return str(Path(value).expanduser())
 
 
 def _load_yaml(path: str | None) -> dict:
@@ -82,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--status-refresh-interval-ms", type=_positive_ms)
     parser.add_argument("--device-id", help="设备标识")
     parser.add_argument("--component", help="组件名称")
+    parser.add_argument("--models-root", type=_path_text, help="模型包根目录")
     return parser
 
 
@@ -95,6 +103,8 @@ def load_config(argv: Sequence[str] | None = None) -> CollectorConfig:
     service = yaml_config.get("service", {}) if isinstance(yaml_config.get("service"), dict) else {}
     downstream = yaml_config.get("downstream", {}) if isinstance(yaml_config.get("downstream"), dict) else {}
     refresh = yaml_config.get("refresh", {}) if isinstance(yaml_config.get("refresh"), dict) else {}
+    models = yaml_config.get("models", {}) if isinstance(yaml_config.get("models"), dict) else {}
+    project_root = Path(__file__).resolve().parents[3]
     values = {
         "host": args.host or service.get("listen_host") or "0.0.0.0",
         "port": args.port or service.get("listen_port") or 8090,
@@ -105,6 +115,7 @@ def load_config(argv: Sequence[str] | None = None) -> CollectorConfig:
         "status_refresh_interval_ms": args.status_refresh_interval_ms or refresh.get("status_refresh_interval_ms") or 2000,
         "device_id": args.device_id or yaml_config.get("device_id") or "example-edge-001",
         "component": args.component or yaml_config.get("component") or "collector_web",
+        "models_root": args.models_root or models.get("models_root") or str(default_models_root(project_root)),
     }
     if not values["host"] or not values["device_id"] or not values["component"]:
         build_parser().error("host、device-id 和 component 不能为空")

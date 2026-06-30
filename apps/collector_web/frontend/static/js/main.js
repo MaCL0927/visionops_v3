@@ -1,4 +1,4 @@
-import { endpoints, requestJson } from "./api.js";
+import { endpoints, requestJson, postJson } from "./api.js";
 import { getState, updateState } from "./state.js";
 import { initCalibration, refreshCalibration } from "./pages/calibration.js";
 import { initCapture, refreshCapture } from "./pages/capture.js";
@@ -57,6 +57,13 @@ function scheduleStatusRefresh() {
 async function main() {
   await loadConfig();
   initCalibration(); initCapture(); initValidate(); initSettings(); initProduction();
+
+  try {
+    await postJson(endpoints.startPreview);
+  } catch (error) {
+    console.warn("start_preview failed", error);
+  }
+
   document.querySelectorAll(".top-tab").forEach((tab) => tab.addEventListener("click", () => activateFactoryPage(tab.dataset.page)));
   document.getElementById("mode-toggle").addEventListener("click", toggleProduction);
   await checkCollector(); await refreshCalibration("position");

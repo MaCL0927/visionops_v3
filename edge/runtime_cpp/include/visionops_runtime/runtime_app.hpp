@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -14,6 +15,11 @@
 
 namespace visionops::runtime {
 
+struct RuntimeApiResult {
+  int status_code{200};
+  std::string body;
+};
+
 class RuntimeApp {
  public:
   explicit RuntimeApp(AppConfig config);
@@ -23,6 +29,7 @@ class RuntimeApp {
   std::string start_preview();
   std::string stop_preview();
   std::string infer_once();
+  RuntimeApiResult switch_model(const std::string& request_body);
   std::optional<std::string> latest_result_json() const;
   std::vector<std::uint8_t> snapshot_jpeg();
 
@@ -60,6 +67,7 @@ class RuntimeApp {
   std::unique_ptr<RknnRunner> rknn_runner_;
   StreamWorkerMock stream_worker_;
   SnapshotProvider snapshot_provider_;
+  mutable std::recursive_mutex model_mutex_;
 };
 
 }  // namespace visionops::runtime
