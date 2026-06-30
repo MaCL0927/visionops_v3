@@ -109,7 +109,11 @@ function showResult(result) {
 }
 
 function renderModelList() {
-  const models = currentCatalog?.models || [];
+  const models = [...(currentCatalog?.models || [])].sort((left, right) => {
+    const leftTime = Number(left.mtime_ms || 0);
+    const rightTime = Number(right.mtime_ms || 0);
+    return rightTime - leftTime;
+  });
   if (!models.length) {
     modelList.innerHTML = '<div class="empty-copy">models_root 下暂无可识别的模型包</div>';
     return;
@@ -117,8 +121,8 @@ function renderModelList() {
   modelList.innerHTML = "";
   for (const model of models) {
     const card = document.createElement("article");
-    card.className = `model-list-card${model.active ? " active" : ""}${model.valid ? "" : " invalid"}`;
-    const statusText = model.active ? "当前使用中" : (model.valid ? "可切换" : "模型包无效");
+    card.className = `model-list-card${model.active ? " active" : ""}${model.valid ? "" : " invalid"}${switchingModelId === model.model_id ? " switching" : ""}`;
+    const statusText = model.active ? "当前使用中" : (model.valid ? "点击切换" : "模型包无效");
     const statusClass = model.active ? "active" : (model.valid ? "" : "error");
     const switchDisabled = !model.valid || model.active || switchingModelId === model.model_id;
     card.innerHTML = `
@@ -146,12 +150,23 @@ function renderModelList() {
       error.textContent = model.error;
       footer.appendChild(error);
     }
-    if (!model.active) {
-      const button = document.createElement("button");
-      button.textContent = switchingModelId === model.model_id ? "切换中..." : "切换到该模型";
-      button.disabled = switchDisabled;
-      button.addEventListener("click", () => switchModel(model.model_id));
-      footer.appendChild(button);
+    if (!model.active && model.valid) {
+      const hint = document.createElement("span");
+      hint.className = "status-pill soft";
+      hint.textContent = switchingModelId === model.model_id ? "切换中..." : "点击卡片切换";
+      footer.appendChild(hint);
+    }
+    if (!switchDisabled) {
+      card.tabIndex = 0;
+      card.setAttribute("role", "button");
+      card.setAttribute("aria-label", `切换到模型 ${model.model_name || model.package_dir}`);
+      card.addEventListener("click", () => switchModel(model.model_id));
+      card.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          switchModel(model.model_id);
+        }
+      });
     }
     modelList.appendChild(card);
   }
