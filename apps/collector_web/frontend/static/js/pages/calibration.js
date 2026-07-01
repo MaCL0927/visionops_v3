@@ -1,16 +1,10 @@
-import { endpoints, requestBlob } from "../api.js";
-
-const urls = { position: null, light: null };
-
-async function loadSnapshot(kind) {
+function loadSnapshot(kind) {
   const image = document.getElementById(`calibration-${kind}-image`);
   const empty = document.getElementById(`calibration-${kind}-empty`);
-  try {
-    const blob = await requestBlob(`${endpoints.snapshot}?t=${Date.now()}`);
-    if (urls[kind]) URL.revokeObjectURL(urls[kind]);
-    urls[kind] = URL.createObjectURL(blob); image.src = urls[kind]; empty.classList.add("hidden");
-    return true;
-  } catch (_error) { empty.classList.remove("hidden"); empty.textContent = "Runtime snapshot unreachable"; return false; }
+  image.removeAttribute("src");
+  empty.classList.remove("hidden");
+  empty.textContent = kind === "position" ? "位置校验占位图：后续再接实时预览" : "光照校验占位图：后续再接实时预览";
+  return Promise.resolve(true);
 }
 
 function activateStep(kind) {

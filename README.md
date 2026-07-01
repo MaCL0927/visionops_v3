@@ -121,6 +121,47 @@ Collector Web 只扫描 `models_root` 下的一级子目录。只有满足以下
 - `carton_partition_check` 接真实 OBB 结果。
 - 双 Runtime / 双 Collector / 双 Business App 并行验证。
 
+## 边缘端代码同步
+
+本地修改代码后，如果不想走 “先 push GitHub，再在 3576 上 git pull” 的流程，当前仓库提供了一个直接同步到板端固定目录的脚本：
+
+```bash
+bash edge/deploy/push.sh --host <3576-ip> --user <ssh-user>
+```
+
+默认同步到：
+
+```text
+/opt/visionops_v3
+```
+
+当前默认同步的是边缘端运行所需代码与配置：
+
+- `apps/collector_web`
+- `edge/`
+- `interfaces/`
+- `configs/`
+- `deploy/`
+- `tools/`
+- `README.md`
+- `AGENTS.md`
+- `CMakeLists.txt`
+- `.gitignore`
+
+当前默认不同步：
+
+- `build/`
+- `training/`
+- `tests/`
+- `apps/server_api/`
+- `models/`
+- `.git/`
+- `__pycache__/`
+- `*.pyc`
+- `*.pt / *.onnx / *.rknn`
+
+模型同步后续会单独扩展，当前脚本只先解决代码与配置同步。
+
 ## 仓库约束
 
 不要提交真实模型、图片、视频、日志、`.env`、密钥、压缩包或现场私密信息，包括但不限于 `.pt`、`.onnx`、`.rknn`、采集数据和部署制品。

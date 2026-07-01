@@ -192,6 +192,41 @@ curl -X POST http://127.0.0.1:28081/api/runtime/infer_once | python3 -m json.too
 - `carton_partition_check` 接真实 OBB 结果。
 - 双 Runtime / 双 Collector / 双 Business App 并行验证。
 
+## 7.1 当前代码同步方式
+
+为避免“本地改代码 -> push GitHub -> 3576 git pull”的重复链路，当前仓库已提供：
+
+```bash
+bash edge/deploy/push.sh --host <3576-ip> --user <ssh-user>
+```
+
+用途：
+
+- 通过 `ssh + rsync` 直接把 v3 边缘端所需代码同步到 `3576:/opt/visionops_v3`
+- 先解决代码与配置同步问题
+- 模型目录 `models/` 的同步参数先预留，后续再独立扩展
+
+当前脚本默认同步：
+
+- `apps/collector_web`
+- `edge/`
+- `interfaces/`
+- `configs/`
+- `deploy/`
+- `tools/`
+- 根目录下的 `README.md / AGENTS.md / CMakeLists.txt / .gitignore`
+
+当前默认不通过该脚本同步：
+
+- `build/`
+- `training/`
+- `tests/`
+- `apps/server_api/`
+- `models/`
+- `.git/`
+- `__pycache__/`
+- `.pt / .onnx / .rknn`
+
 ## 8. 给后续 Codex / 开发者的注意事项
 
 - 这个仓库已经不是“只剩 Mock”的阶段，修改 Runtime 时要尊重真实主链路。

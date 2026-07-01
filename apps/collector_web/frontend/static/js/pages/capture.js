@@ -1,4 +1,5 @@
 import { endpoints, requestBlob } from "../api.js";
+import { updateState } from "../state.js";
 
 let currentBlob = null, currentUrl = null;
 const records = [];
@@ -12,6 +13,7 @@ function activateStep(kind) {
 }
 
 function renderRecords() {
+  updateState({ captureRecords: [...records] });
   document.getElementById("capture-count").textContent = String(records.length);
   const target = document.getElementById("capture-records"); target.replaceChildren();
   if (!records.length) { const emptyCopy = document.createElement("div"); emptyCopy.className = "empty-copy"; emptyCopy.textContent = "暂无采集记录"; target.append(emptyCopy); return; }
@@ -37,7 +39,7 @@ async function downloadCapture() {
 async function shoot() {
   try {
     const blob = await requestBlob(`${endpoints.snapshot}?capture=${Date.now()}`);
-    records.unshift({ url: URL.createObjectURL(blob), time: new Date().toLocaleString() });
+    records.unshift({ id: `capture-${Date.now()}`, url: URL.createObjectURL(blob), time: new Date().toLocaleString() });
     message.textContent = `已加入临时采集记录，共 ${records.length} 张`; renderRecords();
   } catch (error) { message.textContent = error.body?.error?.message || error.message; }
 }

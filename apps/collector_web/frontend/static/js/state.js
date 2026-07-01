@@ -11,6 +11,7 @@ const state = {
   },
   savedConfig: null,
   latestResult: null,
+  captureRecords: [],
 };
 const listeners = new Set();
 

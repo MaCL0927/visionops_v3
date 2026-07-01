@@ -32,18 +32,18 @@
             <section class="content-card">
               <section id="calibration-position" class="subscreen active">
                 <div class="screen-head"><div><div class="kicker">校验 / 第 1 步</div><h1>摄像头位置校验</h1><p>调整摄像头，直到画面与标准图重合。</p></div><div class="head-actions"><span class="status-pill">位置校验中</span><button id="calibration-position-refresh">刷新画面</button></div></div>
-                <div class="camera-stage position-stage">
+                <div class="camera-stage position-stage calibration-placeholder-stage">
                   <img id="calibration-position-image" class="stage-image" alt="摄像头位置校验快照">
                   <div class="standard-overlay"><div class="outline outline-a"></div><div class="outline outline-b"></div><div class="guide horizontal"></div><div class="guide vertical"></div><span>半透明标准图 / 占位框</span></div>
-                  <div id="calibration-position-empty" class="stage-empty">等待 Runtime snapshot</div>
-                  <div class="camera-label"><b>实时摄像头画面</b><span>通过 Collector 读取 Runtime 快照</span></div>
+                  <div id="calibration-position-empty" class="stage-empty">位置校验占位图：后续再接实时预览</div>
+                  <div class="camera-label"><b>位置校验占位模式</b><span>当前先不展示实时图像</span></div>
                 </div>
               </section>
               <section id="calibration-light" class="subscreen">
                 <div class="screen-head"><div><div class="kicker">校验 / 第 2 步</div><h1>光照校验</h1><p>观察亮度、阴影和反光，当前阶段不执行真实图像算法。</p></div><div class="head-actions"><span id="light-status" class="status-pill soft">等待校验</span><button id="start-light-check" class="primary">开始光照校验</button></div></div>
                 <div class="compare-layout">
                   <article class="compare-card"><h3>标准光照参考</h3><div class="light-reference"><div class="reference-object"></div><span>亮度参考占位</span></div></article>
-                  <article class="compare-card"><h3>当前实时画面</h3><div class="light-live"><img id="calibration-light-image" alt="光照校验快照"><div id="calibration-light-empty" class="stage-empty">等待快照</div></div></article>
+                  <article class="compare-card"><h3>当前画面占位</h3><div class="light-live calibration-placeholder-stage"><img id="calibration-light-image" alt="光照校验快照"><div id="calibration-light-empty" class="stage-empty">光照校验占位图：后续再接实时预览</div></div></article>
                 </div>
                 <div class="light-metrics"><div><span>亮度</span><b id="light-brightness">--</b></div><div><span>状态</span><b id="light-result">未开始</b></div><div><span>数据来源</span><b>占位状态</b></div></div>
               </section>
@@ -83,7 +83,14 @@
               <button id="validate-model-scan" class="primary model-refresh-btn">刷新模型</button>
             </aside>
             <section class="content-card validate-card">
-              <div class="screen-head"><div><div class="kicker">模型验证</div><h1>单次 / 拍照 / 实时检测</h1><p>通过 Collector 调用 Runtime，并在快照上绘制 bbox 与 OBB points。</p></div><div class="head-actions"><button id="validate-infer">单次检测</button><button id="validate-photo" class="primary">拍照检测</button><button id="validate-realtime" aria-pressed="false">实时检测</button><button id="validate-refresh">读取结果</button></div></div>
+              <div class="screen-head"><div><div class="kicker">模型验证</div><h1>选图 / 拍照 / 实时检测</h1><p>通过 Collector 调用 Runtime，并在快照上绘制 bbox 与 OBB points。</p></div><div class="head-actions validate-actions"><button id="validate-infer" class="validate-action-btn">选图检测</button><button id="validate-photo" class="validate-action-btn primary">拍照检测</button><button id="validate-realtime" class="validate-action-btn" aria-pressed="false">实时检测</button></div></div>
+              <div id="validate-picker-panel" class="validate-picker-panel hidden">
+                <div class="validate-picker-head">
+                  <b>选择采集图片</b>
+                  <span>从“采集上传”页面已拍照的临时记录中选择</span>
+                </div>
+                <div id="validate-capture-list" class="validate-capture-list"><div class="empty-copy">暂无可选采集图片</div></div>
+              </div>
               <div class="validation-workspace">
                 <div class="camera-stage overlay-stage"><img id="validate-image" class="stage-image" alt="模型验证快照"><canvas id="validate-overlay"></canvas><div id="validate-empty" class="stage-empty">执行检测后显示结果</div></div>
                 <section class="validate-bottom-panels">

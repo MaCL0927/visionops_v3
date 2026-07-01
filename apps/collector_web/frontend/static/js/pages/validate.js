@@ -1,5 +1,5 @@
 import { ApiError, endpoints, postJson, requestBlob, requestJson } from "../api.js";
-import { updateState } from "../state.js";
+import { getState, updateState } from "../state.js";
 import { clearOverlay, drawInferenceOverlay } from "../render/overlay.js";
 
 const image = document.getElementById("validate-image");
@@ -9,6 +9,8 @@ const modelList = document.getElementById("model-list");
 const modelCatalogStatus = document.getElementById("model-catalog-status");
 const targetSummary = document.getElementById("validate-target-summary");
 const resultBrief = document.getElementById("validate-result-brief");
+const capturePickerPanel = document.getElementById("validate-picker-panel");
+const captureList = document.getElementById("validate-capture-list");
 
 let snapshotUrl = null;
 let currentResult = null;
@@ -16,6 +18,7 @@ let realtimeTimer = null;
 let realtimeBusy = false;
 let currentCatalog = null;
 let switchingModelId = null;
+let selectedCaptureRecord = null;
 
 function formatBytes(value) {
   if (value == null || Number.isNaN(Number(value))) return "--";
@@ -40,6 +43,34 @@ function renderEmptySummary(text) {
   resultBrief.textContent = "尚无结果";
 }
 
+function setRealtimeButtonState(running) {
+  const button = document.getElementById("validate-realtime");
+  button.textContent = running ? "停止实时" : "实时检测";
+  button.setAttribute("aria-pressed", running ? "true" : "false");
+  button.classList.toggle("active", running);
+}
+
+function hidePicker() {
+  capturePickerPanel.classList.add("hidden");
+}
+
+function renderCapturePicker() {
+  const records = getState().captureRecords || [];
+  captureList.replaceChildren();
+  if (!records.length) {
+    captureList.innerHTML = '<div class="empty-copy">请先到“采集上传”页面拍照采集</div>';
+    return;
+  }
+  for (const record of records) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = `capture-choice-item${selectedCaptureRecord?.id === record.id ? " active" : ""}`;
+    item.innerHTML = `<img src="${record.url}" alt="采集记录缩略图"><span>${record.time}</span>`;
+    item.addEventListener("click", () => selectCaptureAndInfer(record));
+    captureList.appendChild(item);
+  }
+}
+
 function renderResultSummary(result) {
   const detections = Array.isArray(result?.detections) ? result.detections : [];
   const classifications = Array.isArray(result?.classifications) ? result.classifications : [];
@@ -61,7 +92,7 @@ function renderResultSummary(result) {
       const obbPoints = Array.isArray(item.obb?.points) ? item.obb.points.length : 0;
       const mask = item.mask?.encoding || "--";
       const card = document.createElement("article");
-      card.className = "target-item";
+      card.className = `target-item${index > 0 ? " secondary" : ""}`;
       card.innerHTML = `
         <div class="target-item-head">
           <b>${item.class_name || `目标 ${index + 1}`}</b>
@@ -81,7 +112,7 @@ function renderResultSummary(result) {
 
   classifications.forEach((item, index) => {
     const card = document.createElement("article");
-    card.className = "target-item";
+    card.className = `target-item${index > 0 ? " secondary" : ""}`;
     card.innerHTML = `
       <div class="target-item-head">
         <b>${item.class_name || `分类 ${index + 1}`}</b>
@@ -109,11 +140,7 @@ function showResult(result) {
 }
 
 function renderModelList() {
-  const models = [...(currentCatalog?.models || [])].sort((left, right) => {
-    const leftTime = Number(left.mtime_ms || 0);
-    const rightTime = Number(right.mtime_ms || 0);
-    return rightTime - leftTime;
-  });
+  const models = [...(currentCatalog?.models || [])].sort((left, right) => Number(right.mtime_ms || 0) - Number(left.mtime_ms || 0));
   if (!models.length) {
     modelList.innerHTML = '<div class="empty-copy">models_root 下暂无可识别的模型包</div>';
     return;
@@ -172,17 +199,25 @@ function renderModelList() {
   }
 }
 
-async function refreshImage() {
-  const blob = await requestBlob(`${endpoints.snapshot}?t=${Date.now()}`);
-  if (snapshotUrl) URL.revokeObjectURL(snapshotUrl);
-  snapshotUrl = URL.createObjectURL(blob);
+async function displayImageSource(sourceUrl) {
   await new Promise((resolve, reject) => {
     image.onload = resolve;
     image.onerror = reject;
-    image.src = snapshotUrl;
+    image.src = sourceUrl;
   });
   empty.classList.add("hidden");
   drawInferenceOverlay(canvas, image, currentResult);
+}
+
+async function refreshImage() {
+  if (selectedCaptureRecord?.url) {
+    await displayImageSource(selectedCaptureRecord.url);
+    return;
+  }
+  const blob = await requestBlob(`${endpoints.snapshot}?t=${Date.now()}`);
+  if (snapshotUrl) URL.revokeObjectURL(snapshotUrl);
+  snapshotUrl = URL.createObjectURL(blob);
+  await displayImageSource(snapshotUrl);
 }
 
 export async function inferOnce() {
@@ -199,6 +234,18 @@ export async function inferOnce() {
     renderEmptySummary(error.body?.error?.message || error.message || "Runtime infer_once unavailable");
     return null;
   }
+}
+
+async function selectCaptureAndInfer(record) {
+  if (realtimeTimer) {
+    clearInterval(realtimeTimer);
+    realtimeTimer = null;
+    setRealtimeButtonState(false);
+  }
+  selectedCaptureRecord = record;
+  hidePicker();
+  await inferOnce();
+  renderCapturePicker();
 }
 
 export async function refreshLatestResult() {
@@ -258,16 +305,15 @@ export async function switchModel(modelId) {
 }
 
 function toggleRealtime() {
-  const button = document.getElementById("validate-realtime");
   if (realtimeTimer) {
     clearInterval(realtimeTimer);
     realtimeTimer = null;
-    button.textContent = "实时检测";
-    button.setAttribute("aria-pressed", "false");
+    setRealtimeButtonState(false);
     return;
   }
-  button.textContent = "停止实时检测";
-  button.setAttribute("aria-pressed", "true");
+  selectedCaptureRecord = null;
+  hidePicker();
+  setRealtimeButtonState(true);
   realtimeTimer = setInterval(async () => {
     if (realtimeBusy) return;
     realtimeBusy = true;
@@ -281,13 +327,26 @@ function toggleRealtime() {
 }
 
 export function initValidate() {
-  document.getElementById("validate-infer").addEventListener("click", inferOnce);
-  document.getElementById("validate-photo").addEventListener("click", inferOnce);
+  document.getElementById("validate-infer").addEventListener("click", () => {
+    if (realtimeTimer) {
+      clearInterval(realtimeTimer);
+      realtimeTimer = null;
+      setRealtimeButtonState(false);
+    }
+    renderCapturePicker();
+    capturePickerPanel.classList.toggle("hidden");
+  });
+  document.getElementById("validate-photo").addEventListener("click", async () => {
+    selectedCaptureRecord = null;
+    hidePicker();
+    await inferOnce();
+  });
   document.getElementById("validate-realtime").addEventListener("click", toggleRealtime);
-  document.getElementById("validate-refresh").addEventListener("click", refreshLatestResult);
   document.getElementById("validate-model-scan").addEventListener("click", refreshModelCatalog);
   window.addEventListener("resize", () => currentResult && drawInferenceOverlay(canvas, image, currentResult));
   renderEmptySummary("执行检测后显示目标摘要");
+  setRealtimeButtonState(false);
+  renderCapturePicker();
   refreshRuntimeStatus();
   refreshModelCatalog();
 }
