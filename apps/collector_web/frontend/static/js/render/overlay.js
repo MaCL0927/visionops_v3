@@ -12,7 +12,8 @@ export function drawInferenceOverlay(canvas, image, result) {
   const sourceHeight = Number(result?.image?.height) || image.naturalHeight;
   const sx = canvas.width / sourceWidth; const sy = canvas.height / sourceHeight;
   const ctx = canvas.getContext("2d"); ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.lineWidth = 2; ctx.font = "12px system-ui";
+  ctx.lineWidth = Math.max(2, Math.round(canvas.width / 480));
+  ctx.font = `${Math.max(16, Math.round(canvas.width / 60))}px system-ui`;
   for (const detection of result?.detections || []) {
     const box = detection.bbox_xyxy;
     if (Array.isArray(box) && box.length === 4) {
@@ -20,7 +21,12 @@ export function drawInferenceOverlay(canvas, image, result) {
       const width = (Number(box[2]) - Number(box[0])) * sx, height = (Number(box[3]) - Number(box[1])) * sy;
       ctx.strokeStyle = "#49e3b1"; ctx.strokeRect(x, y, width, height);
       const label = `${detection.class_name ?? detection.class_id ?? "object"} ${Number(detection.score || 0).toFixed(2)}`;
-      const textWidth = ctx.measureText(label).width + 10; ctx.fillStyle = "rgba(9,121,105,.9)"; ctx.fillRect(x, Math.max(0, y - 20), textWidth, 20); ctx.fillStyle = "#fff"; ctx.fillText(label, x + 5, Math.max(14, y - 6));
+      const labelHeight = Math.max(24, Math.round(canvas.width / 42));
+      const textWidth = ctx.measureText(label).width + 16;
+      ctx.fillStyle = "rgba(9,121,105,.9)";
+      ctx.fillRect(x, Math.max(0, y - labelHeight), textWidth, labelHeight);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(label, x + 8, Math.max(labelHeight - 7, y - 8));
     }
     const points = detection?.obb?.points;
     if (Array.isArray(points) && points.length >= 3) {

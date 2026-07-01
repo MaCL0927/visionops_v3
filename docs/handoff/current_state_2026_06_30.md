@@ -40,6 +40,7 @@ Camera Bridge / HP60C Bridge
 - Gateway / Modbus Mock。
 - `carton_tube_check` 和 `carton_partition_check` 业务 App。
 - Collector Web 前端基本页面。
+- Collector Web 前端已调整为参考 v2 的现场大屏 / 触屏友好风格，但接口和架构保持 v3。
 - Runtime 模块化拆分。
 - 模型包读取 `manifest.json / model.yaml / labels.txt`。
 - `RknnRunnerReal / RknnRunnerMock / RknnRunnerUnavailable`。
