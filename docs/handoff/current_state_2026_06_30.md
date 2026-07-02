@@ -58,6 +58,7 @@ Camera Bridge / HP60C Bridge
 - Collector Web “模型验证”页支持扫描 `models_root` 并点击切换模型。
 - Runtime 新增 `POST /api/runtime/switch_model`，新模型加载失败时保留旧模型。
 - M13：Runtime 新增更细的耗时统计，Collector 设置页支持 `preview_refresh_interval_ms / inference_interval_ms`。
+- M13 RGA-only：在还原后的 Runtime 基础上只加入 RGA 预处理入口；未加入 RKNN input/output buffer 深度复用，未加入 HP60C raw 原始帧入口。
 
 ## 4.1 当前模型包目录规范
 

@@ -212,3 +212,6 @@ bash edge/deploy/push.sh --host <3576-ip> --user <ssh-user>
 ## 仓库约束
 
 不要提交真实模型、图片、视频、日志、`.env`、密钥、压缩包或现场私密信息，包括但不限于 `.pt`、`.onnx`、`.rknn`、采集数据和部署制品。
+
+> M13 RGA-only 说明：当前代码只加入可选 RGA 预处理加速，使用 `-DVISIONOPS_ENABLE_RGA=ON` 构建，并通过 `--preprocess-backend rga` 启用；没有加入 RKNN output buffer 预分配复用和 HP60C raw 原始帧入口。
+

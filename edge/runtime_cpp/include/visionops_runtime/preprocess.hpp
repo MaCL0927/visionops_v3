@@ -21,18 +21,34 @@ struct LetterboxMeta {
   float pad_y{0.0F};
 };
 
+struct PreprocessOptions {
+  std::string backend{"cpu"};  // cpu, rga, auto
+  std::string rga_mode{"resize_rgb"};
+};
+
 struct PreprocessOutput {
   MockFrame frame;
   ImageBuffer input;
   LetterboxMeta letterbox;
   double elapsed_ms{0.0};
   bool same_size_fast_path{false};
+  std::string backend{"cpu"};
+  std::string backend_requested{"cpu"};
+  std::string rga_mode;
+  bool rga_available{false};
+  bool rga_used{false};
   std::string error;
 };
 
 ImageBuffer make_mock_image(const MockFrame& frame);
 bool load_ppm_image(const std::string& path, ImageBuffer& image, std::string& error);
 bool load_test_image(const std::string& path, ImageBuffer& image, std::string& error);
+PreprocessOutput preprocess_image(
+    const MockFrame& frame,
+    const ImageBuffer& image,
+    int input_width,
+    int input_height,
+    const PreprocessOptions& options);
 PreprocessOutput preprocess_image(
     const MockFrame& frame,
     const ImageBuffer& image,

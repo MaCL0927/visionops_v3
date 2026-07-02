@@ -11,6 +11,7 @@ set(VISIONOPS_RUNTIME_SOURCES
   src/postprocess_obb.cpp
   src/postprocess_seg.cpp
   src/preprocess.cpp
+  src/rga_preprocess.cpp
   src/rknn_runner_mock.cpp
   src/rknn_runner_factory.cpp
   src/runtime_app.cpp
@@ -36,6 +37,21 @@ if(VISIONOPS_ENABLE_OPENCV)
   find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc)
 endif()
 
+if(VISIONOPS_ENABLE_RGA)
+  if(NOT VISIONOPS_ENABLE_OPENCV)
+    message(FATAL_ERROR "VISIONOPS_ENABLE_RGA=ON 需要同时启用 VISIONOPS_ENABLE_OPENCV=ON")
+  endif()
+  if(NOT VISIONOPS_RGA_INCLUDE_DIR OR
+     NOT EXISTS "${VISIONOPS_RGA_INCLUDE_DIR}/rga/im2d.hpp")
+    message(FATAL_ERROR
+      "VISIONOPS_ENABLE_RGA=ON 时必须设置 VISIONOPS_RGA_INCLUDE_DIR，且目录中包含 rga/im2d.hpp")
+  endif()
+  if(NOT VISIONOPS_RGA_LIBRARY OR NOT EXISTS "${VISIONOPS_RGA_LIBRARY}")
+    message(FATAL_ERROR
+      "VISIONOPS_ENABLE_RGA=ON 时必须设置有效的 VISIONOPS_RGA_LIBRARY")
+  endif()
+endif()
+
 add_executable(visionops_runtime_mock ${VISIONOPS_RUNTIME_SOURCES})
 
 target_include_directories(visionops_runtime_mock
@@ -53,6 +69,12 @@ if(VISIONOPS_ENABLE_OPENCV)
   target_compile_definitions(visionops_runtime_mock PRIVATE VISIONOPS_HAS_OPENCV=1)
   target_include_directories(visionops_runtime_mock PRIVATE ${OpenCV_INCLUDE_DIRS})
   target_link_libraries(visionops_runtime_mock PRIVATE ${OpenCV_LIBS})
+endif()
+
+if(VISIONOPS_ENABLE_RGA)
+  target_compile_definitions(visionops_runtime_mock PRIVATE VISIONOPS_HAS_RGA=1)
+  target_include_directories(visionops_runtime_mock PRIVATE ${VISIONOPS_RGA_INCLUDE_DIR})
+  target_link_libraries(visionops_runtime_mock PRIVATE ${VISIONOPS_RGA_LIBRARY} ${CMAKE_DL_LIBS})
 endif()
 
 target_compile_options(visionops_runtime_mock

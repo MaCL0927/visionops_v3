@@ -13,6 +13,7 @@
 #include "visionops_runtime/postprocess_obb.hpp"
 #include "visionops_runtime/postprocess_seg.hpp"
 #include "visionops_runtime/preprocess.hpp"
+#include "visionops_runtime/rga_preprocess.hpp"
 
 namespace visionops::runtime {
 
@@ -235,6 +236,10 @@ std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
          << ",\"loaded_model\":" << loaded_model_json()
          << ",\"camera_connected\":" << json_bool(frame_source.opened && frame_source.last_error.empty())
          << ",\"frame_source\":" << frame_source_json(frame_source)
+         << ",\"preprocess\":{\"backend_requested\":\"" << json_escape(config_.preprocess_backend)
+         << "\",\"backend_active\":\"" << json_escape(config_.preprocess_backend == "auto" && rga_backend_compiled() ? "rga" : config_.preprocess_backend)
+         << "\",\"rga_mode\":\"" << json_escape(config_.rga_mode)
+         << "\",\"rga_available\":" << json_bool(rga_backend_compiled()) << '}'
          << ",\"fps\":{\"camera_fps\":" << frame_source.fps << ",\"inference_fps\":" << inference_fps
          << ",\"snapshot_fps\":" << snapshot_fps << '}'
          << ",\"latency_ms\":{\"latest\":16.0,\"average\":16.0,\"p95\":16.0}"
@@ -348,8 +353,9 @@ std::string RuntimeApp::infer_once() {
   }
 
   std::lock_guard<std::recursive_mutex> model_lock(model_mutex_);
+  const PreprocessOptions preprocess_options{config_.preprocess_backend, config_.rga_mode};
   const auto preprocess = preprocess_image(
-      frame, source_image, model_info_.input_width, model_info_.input_height);
+      frame, source_image, model_info_.input_width, model_info_.input_height, preprocess_options);
   if (!preprocess.error.empty()) {
     const auto error = inference_error_json(
         identity,
@@ -608,6 +614,11 @@ std::string RuntimeApp::inference_result_json(
                    ? "null"
                    : '"' + json_escape(inference.error) + '"')
            << ",\"preprocess_same_size_fast_path\":" << json_bool(preprocess.same_size_fast_path)
+           << ",\"preprocess_backend_requested\":\"" << json_escape(preprocess.backend_requested) << '"'
+           << ",\"preprocess_backend_active\":\"" << json_escape(preprocess.backend) << '"'
+           << ",\"rga_mode\":\"" << json_escape(preprocess.rga_mode) << '"'
+           << ",\"rga_available\":" << json_bool(preprocess.rga_available)
+           << ",\"rga_used\":" << json_bool(preprocess.rga_used)
            << ",\"letterbox\":{\"scale\":" << preprocess.letterbox.scale
            << ",\"pad_x\":" << preprocess.letterbox.pad_x
            << ",\"pad_y\":" << preprocess.letterbox.pad_y << "}}";
@@ -760,6 +771,13 @@ std::string RuntimeApp::inference_error_json(
          << "\",\"detail\":null,\"recoverable\":true}"
          << ",\"debug\":{\"rknn_runner_called\":" << json_bool(runner_called)
          << ",\"raw_outputs_count\":" << raw_outputs_count;
+  if (preprocess != nullptr) {
+    stream << ",\"preprocess_backend_requested\":\"" << json_escape(preprocess->backend_requested) << '"'
+           << ",\"preprocess_backend_active\":\"" << json_escape(preprocess->backend) << '"'
+           << ",\"rga_mode\":\"" << json_escape(preprocess->rga_mode) << '"'
+           << ",\"rga_available\":" << json_bool(preprocess->rga_available)
+           << ",\"rga_used\":" << json_bool(preprocess->rga_used);
+  }
   if (!debug_key.empty()) stream << ",\"" << json_escape(debug_key) << "\":true";
   stream << "}}";
   std::string body = stream.str();

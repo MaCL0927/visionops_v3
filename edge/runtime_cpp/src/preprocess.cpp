@@ -1,5 +1,7 @@
 #include "visionops_runtime/preprocess.hpp"
 
+#include "visionops_runtime/rga_preprocess.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -81,10 +83,14 @@ PreprocessOutput preprocess_image(
     const MockFrame& frame,
     const ImageBuffer& image,
     int input_width,
-    int input_height) {
+    int input_height,
+    const PreprocessOptions& options) {
   const auto started_at = std::chrono::steady_clock::now();
   PreprocessOutput output;
   output.frame = frame;
+  output.backend_requested = options.backend;
+  output.rga_mode = options.rga_mode;
+  output.rga_available = rga_backend_compiled();
   if (!image_buffer_valid_rgb(image)) {
     output.error = "输入图像必须是非空 RGB 三通道 buffer";
     return output;
@@ -121,6 +127,36 @@ PreprocessOutput preprocess_image(
   output.input.data.assign(static_cast<std::size_t>(input_width) * input_height * 3, 114);
   const int left = static_cast<int>(std::round(meta.pad_x - 0.1F));
   const int top = static_cast<int>(std::round(meta.pad_y - 0.1F));
+
+  const bool request_rga = options.backend == "rga" || options.backend == "auto";
+  if (request_rga && rga_backend_compiled()) {
+    ImageBuffer resized;
+    std::string rga_error;
+    if (rga_resize_rgb888(image, meta.resized_width, meta.resized_height, resized, rga_error)) {
+      for (int y = 0; y < meta.resized_height; ++y) {
+        const auto* src_row = resized.data.data() +
+            (static_cast<std::size_t>(y) * meta.resized_width * 3);
+        auto* dst_row = output.input.data.data() +
+            ((static_cast<std::size_t>(top + y) * input_width + left) * 3);
+        std::copy_n(src_row, static_cast<std::size_t>(meta.resized_width) * 3, dst_row);
+      }
+      output.backend = "rga";
+      output.rga_used = true;
+      output.elapsed_ms = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started_at).count();
+      return output;
+    }
+    if (options.backend == "rga") {
+      output.error = rga_error.empty() ? "RGA 预处理失败" : rga_error;
+      return output;
+    }
+    // auto 模式下，RGA 失败时回退 CPU 最近邻 letterbox，保证现场可用。
+  } else if (options.backend == "rga" && !rga_backend_compiled()) {
+    output.error = "当前 Runtime 未编译 RGA 支持，请使用 -DVISIONOPS_ENABLE_RGA=ON";
+    return output;
+  }
+
+  output.backend = "cpu";
   const float inverse_scale = 1.0F / std::max(meta.scale, 1e-6F);
   for (int y = 0; y < meta.resized_height; ++y) {
     const int source_y = std::min(
@@ -139,6 +175,14 @@ PreprocessOutput preprocess_image(
   output.elapsed_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - started_at).count();
   return output;
+}
+
+PreprocessOutput preprocess_image(
+    const MockFrame& frame,
+    const ImageBuffer& image,
+    int input_width,
+    int input_height) {
+  return preprocess_image(frame, image, input_width, input_height, PreprocessOptions{});
 }
 
 PreprocessOutput preprocess_mock_frame(const MockFrame& frame) {

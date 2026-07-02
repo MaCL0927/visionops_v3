@@ -54,6 +54,39 @@ cmake --build build-rknn -j4
 - `VISIONOPS_ENABLE_RKNN=ON` 时才编译真实 RKNN Runner。
 - `VISIONOPS_ENABLE_OPENCV=ON` 后，HP60C JPEG 可解码为 `RGB888` 进入 RKNN 推理。
 
+## RGA 预处理加速（可选）
+
+本版本只加入 RGA 预处理入口，不包含 RKNN input/output buffer 深度复用，也不包含 HP60C raw 原始帧入口。
+
+RGA 真机构建示例：
+
+```bash
+cmake -S . -B build-rknn-rga-release \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DVISIONOPS_ENABLE_RKNN=ON \
+  -DVISIONOPS_ENABLE_OPENCV=ON \
+  -DVISIONOPS_ENABLE_RGA=ON \
+  -DVISIONOPS_RKNN_INCLUDE_DIR=/usr/include \
+  -DVISIONOPS_RKNN_LIBRARY=/usr/lib/librknnrt.so \
+  -DVISIONOPS_RGA_INCLUDE_DIR=/usr/include \
+  -DVISIONOPS_RGA_LIBRARY=/usr/lib/librga.so
+
+cmake --build build-rknn-rga-release -j4
+```
+
+启动时通过参数选择预处理后端：
+
+```bash
+--preprocess-backend cpu   # 默认 CPU letterbox
+--preprocess-backend rga   # 强制使用 RGA resize + CPU letterbox paste
+--preprocess-backend auto  # RGA 可用时优先使用，失败时回退 CPU
+--rga-mode resize_rgb      # 当前唯一支持模式
+```
+
+`/api/runtime/status` 会展示 `preprocess.backend_requested / backend_active / rga_available`，`infer_once` 的 `debug` 字段会展示 `preprocess_backend_requested / preprocess_backend_active / rga_used`，用于确认是否真正走到 RGA。
+
+注意：HP60C Bridge 当前仍使用 `/stream/snapshot.jpg` JPEG 路径；没有加入 `--hp60c-raw-path` 等 raw 原始帧参数。
+
 ## 常用启动方式
 
 ### 1. 默认 Mock
@@ -302,3 +335,12 @@ bash edge/runtime_cpp/tests/smoke_test.sh
 ```
 
 该脚本适合 x86 / mock 环境接口验证。`hp60c_bridge`、OpenCV 解码、真实 RKNN、3576 设备驱动仍需要在真机上手动验证。
+
+### LB3576 librga 兼容注意
+
+本 RGA-only 包已经处理 LB3576 当前 Rockchip librga 头文件的两个兼容问题：
+
+- `wrapbuffer_virtualaddr` 显式传入 `wstride/hstride`，避免 4 参数宏触发 `zero-size array`。
+- `imcheck` 显式传入 `src_rect/dst_rect` 和 `mode_usage=0`，避免 `imcheck(src, dst, {}, {})` 的空 `__VA_ARGS__` 触发 `zero-size array`。
+- 启用 RGA 时链接 `${CMAKE_DL_LIBS}`，避免 `dlclose@@GLIBC_2.17` 的链接错误。
+
