@@ -22,7 +22,7 @@ class CollectorConfig:
     runtime_url: str = "http://127.0.0.1:18080"
     gateway_url: str = "http://127.0.0.1:19090"
     business_app_url: str = "http://127.0.0.1:19110"
-    snapshot_refresh_interval_ms: int = 1000
+    snapshot_refresh_interval_ms: int = 200
     status_refresh_interval_ms: int = 2000
     device_id: str = "example-edge-001"
     component: str = "collector_web"
@@ -111,7 +111,7 @@ def load_config(argv: Sequence[str] | None = None) -> CollectorConfig:
         "runtime_url": args.runtime_url or downstream.get("runtime_url") or "http://127.0.0.1:18080",
         "gateway_url": args.gateway_url or downstream.get("gateway_url") or "http://127.0.0.1:19090",
         "business_app_url": args.business_app_url or downstream.get("business_app_url") or "http://127.0.0.1:19110",
-        "snapshot_refresh_interval_ms": args.snapshot_refresh_interval_ms or refresh.get("snapshot_refresh_interval_ms") or 1000,
+        "snapshot_refresh_interval_ms": args.snapshot_refresh_interval_ms or refresh.get("snapshot_refresh_interval_ms") or 200,
         "status_refresh_interval_ms": args.status_refresh_interval_ms or refresh.get("status_refresh_interval_ms") or 2000,
         "device_id": args.device_id or yaml_config.get("device_id") or "example-edge-001",
         "component": args.component or yaml_config.get("component") or "collector_web",

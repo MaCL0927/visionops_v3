@@ -115,6 +115,8 @@ def test_mock_backend_remains_default_and_healthy(
         assert result["task_type"] == "detection"
         assert result["detections"]
         assert "debug" not in result
+        assert result["timing"]["capture_ms"] == 0.0
+        assert result["timing_detail"]["rknn_run_ms"] >= 0.0
 
 
 def test_rknn_backend_degrades_cleanly_when_not_compiled(

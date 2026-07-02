@@ -33,15 +33,17 @@ class RknnRunnerMock final : public RknnRunner {
   std::string backend_name() const override { return "mock"; }
 
   RknnOutput infer(const RknnInput&) override {
-    return RknnOutput{
-        true,
-        true,
-        task_type_,
-        mock_payload(task_type_),
-        {},
-        12.0,
-        2.0,
-        ""};
+    RknnOutput output;
+    output.success = true;
+    output.runner_called = true;
+    output.task_type = task_type_;
+    output.result_payload_json = mock_payload(task_type_);
+    output.set_input_ms = 0.0;
+    output.run_ms = 12.0;
+    output.get_output_ms = 0.0;
+    output.inference_ms = 12.0;
+    output.postprocess_ms = 2.0;
+    return output;
   }
 
   std::string last_error() const override { return {}; }
@@ -67,15 +69,14 @@ class RknnRunnerUnavailable final : public RknnRunner {
   std::string backend_name() const override { return "rknn"; }
 
   RknnOutput infer(const RknnInput&) override {
-    return RknnOutput{
-        false,
-        false,
-        task_type_,
-        mock_payload(task_type_),
-        {},
-        0.0,
-        2.0,
-        error_};
+    RknnOutput output;
+    output.success = false;
+    output.runner_called = false;
+    output.task_type = task_type_;
+    output.result_payload_json = mock_payload(task_type_);
+    output.postprocess_ms = 2.0;
+    output.error = error_;
+    return output;
   }
 
   std::string last_error() const override { return error_; }

@@ -26,6 +26,7 @@ struct PreprocessOutput {
   ImageBuffer input;
   LetterboxMeta letterbox;
   double elapsed_ms{0.0};
+  bool same_size_fast_path{false};
   std::string error;
 };
 

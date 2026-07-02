@@ -42,6 +42,8 @@ class RuntimeApp {
   std::string inference_result_json(
       const InferenceIdentity& identity,
       const MockFrame& frame,
+      double capture_ms,
+      double decode_ms,
       const PreprocessOutput& preprocess,
       const RknnOutput& inference) const;
   std::string loaded_model_json() const;
@@ -51,10 +53,16 @@ class RuntimeApp {
       const MockFrame& frame,
       const std::string& code,
       const std::string& message,
+      double capture_ms = 0.0,
+      double decode_ms = 0.0,
+      const PreprocessOutput* preprocess = nullptr,
+      const RknnOutput* inference = nullptr,
       const std::string& debug_key = "") const;
   std::string postprocess_error_json(
       const InferenceIdentity& identity,
       const MockFrame& frame,
+      double capture_ms,
+      double decode_ms,
       const PreprocessOutput& preprocess,
       const RknnOutput& inference,
       const std::string& code,

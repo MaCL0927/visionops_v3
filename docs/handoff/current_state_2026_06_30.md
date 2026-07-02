@@ -57,6 +57,7 @@ Camera Bridge / HP60C Bridge
 - 避免 `snapshot / next_frame` 在未启动 preview 时一直返回首帧缓存。
 - Collector Web “模型验证”页支持扫描 `models_root` 并点击切换模型。
 - Runtime 新增 `POST /api/runtime/switch_model`，新模型加载失败时保留旧模型。
+- M13：Runtime 新增更细的耗时统计，Collector 设置页支持 `preview_refresh_interval_ms / inference_interval_ms`。
 
 ## 4.1 当前模型包目录规范
 
@@ -187,6 +188,8 @@ curl -X POST http://127.0.0.1:28081/api/runtime/infer_once | python3 -m json.too
 - `systemd` 服务化。
 - 模型包部署规范与 `current` 软链接。
 - 3576 真机验证 RKNN 模型切换稳定性。
+- 3576 真机对比 v2 / v3 `capture / decode / preprocess / rknn_run / postprocess` 口径与真实性能。
+- 评估是否在 M13.2 引入 RGA / 更深的 RKNN output buffer 复用。
 - Collector Web 真实采集保存和打包上传。
 - `carton_tube_check` 接真实检测结果。
 - `carton_partition_check` 接真实 OBB 结果。
@@ -238,3 +241,34 @@ bash edge/deploy/push.sh --host <3576-ip> --user <ssh-user>
 - `Postprocess` 负责后处理。
 - Web 前端只能访问 Collector 同源接口。
 - 不要整目录复制 `visionops_v2`，只迁必要函数和能力边界。
+
+## 9. M13 当前验证入口
+
+Release 构建建议：
+
+```bash
+cmake -S . -B build-rknn-release \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DVISIONOPS_ENABLE_RKNN=ON \
+  -DVISIONOPS_ENABLE_OPENCV=ON \
+  -DVISIONOPS_RKNN_INCLUDE_DIR=/usr/include \
+  -DVISIONOPS_RKNN_LIBRARY=/usr/lib/librknnrt.so
+
+cmake --build build-rknn-release -j4
+```
+
+基准脚本：
+
+```bash
+python3 tools/benchmark_runtime.py \
+  --runtime-url http://127.0.0.1:28081 \
+  --count 50 \
+  --warmup 5 \
+  --output /tmp/v3_runtime_benchmark.json
+```
+
+说明：
+
+- `timing` 保留兼容字段，同时增加 `capture_ms / decode_ms / result_build_ms`
+- `timing_detail` 增加 `rknn_set_input_ms / rknn_run_ms / rknn_get_output_ms`
+- Collector Web 当前已改为参考 v2 的现场大屏风格，但接口和架构保持 v3

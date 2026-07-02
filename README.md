@@ -46,6 +46,15 @@ cd /opt/visionops_v3
 
 MODEL_DIR=/opt/visionops_v3/models/test_rknn_model
 
+cmake -S . -B build-rknn \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DVISIONOPS_ENABLE_RKNN=ON \
+  -DVISIONOPS_ENABLE_OPENCV=ON \
+  -DVISIONOPS_RKNN_INCLUDE_DIR=/usr/include \
+  -DVISIONOPS_RKNN_LIBRARY=/usr/lib/librknnrt.so
+
+cmake --build build-rknn -j4
+
 ./build-rknn/edge/runtime_cpp/visionops_runtime_mock \
   --backend rknn \
   --frame-source hp60c_bridge \
@@ -115,11 +124,49 @@ Collector Web 只扫描 `models_root` 下的一级子目录。只有满足以下
 
 - `systemd` 服务化与设备启动编排。
 - 模型包部署规范与 `current` 软链接约定。
+- v2 / v3 推理耗时口径对齐与后续 RGA 优化评估。
 - 3576 真机验证模型热切换。
 - Collector Web 真实采集保存与采集包上传。
 - `carton_tube_check` 接真实检测结果。
 - `carton_partition_check` 接真实 OBB 结果。
 - 双 Runtime / 双 Collector / 双 Business App 并行验证。
+
+## M13 性能对比入口
+
+当前 Runtime 已补充更细的耗时字段。
+
+兼容字段仍保留在 `timing`：
+
+- `preprocess_ms`
+- `inference_ms`
+- `postprocess_ms`
+- `total_ms`
+
+新增字段包括：
+
+- `timing.capture_ms`
+- `timing.decode_ms`
+- `timing.result_build_ms`
+- `timing_detail.rknn_set_input_ms`
+- `timing_detail.rknn_run_ms`
+- `timing_detail.rknn_get_output_ms`
+
+Collector Web 设置页当前支持：
+
+- `preview_refresh_interval_ms`
+- `inference_interval_ms`
+
+这两个设置保存在浏览器 `localStorage`，不会写入 `.env` 或源 YAML。
+
+3576 上可使用：
+
+```bash
+python3 tools/benchmark_runtime.py \
+  --runtime-url http://127.0.0.1:28081 \
+  --count 50 \
+  --warmup 5 \
+  --output /tmp/v3_runtime_benchmark.json
+```
 
 ## 边缘端代码同步
 

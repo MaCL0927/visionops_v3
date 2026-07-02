@@ -111,17 +111,25 @@ PreprocessOutput preprocess_image(
   output.input.sequence = image.sequence;
   output.input.timestamp_ms = image.timestamp_ms;
   output.input.camera_id = image.camera_id;
+  if (image.width == input_width && image.height == input_height) {
+    output.same_size_fast_path = true;
+    output.input.data = image.data;
+    output.elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started_at).count();
+    return output;
+  }
   output.input.data.assign(static_cast<std::size_t>(input_width) * input_height * 3, 114);
   const int left = static_cast<int>(std::round(meta.pad_x - 0.1F));
   const int top = static_cast<int>(std::round(meta.pad_y - 0.1F));
+  const float inverse_scale = 1.0F / std::max(meta.scale, 1e-6F);
   for (int y = 0; y < meta.resized_height; ++y) {
     const int source_y = std::min(
         image.height - 1,
-        static_cast<int>(y / std::max(meta.scale, 1e-6F)));
+        static_cast<int>(y * inverse_scale));
     for (int x = 0; x < meta.resized_width; ++x) {
       const int source_x = std::min(
           image.width - 1,
-          static_cast<int>(x / std::max(meta.scale, 1e-6F)));
+          static_cast<int>(x * inverse_scale));
       const std::size_t source = (static_cast<std::size_t>(source_y) * image.width + source_x) * 3;
       const std::size_t target =
           (static_cast<std::size_t>(top + y) * input_width + left + x) * 3;

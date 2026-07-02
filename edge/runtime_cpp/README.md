@@ -24,7 +24,7 @@ Runtime 负责生产推理、预处理、后处理、状态输出和快照；Col
 x86 / 默认 mock 构建：
 
 ```bash
-cmake -S . -B build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j4
 ```
 
@@ -38,6 +38,7 @@ RKNN 真机构建示例：
 
 ```bash
 cmake -S . -B build-rknn \
+  -DCMAKE_BUILD_TYPE=Release \
   -DVISIONOPS_ENABLE_RKNN=ON \
   -DVISIONOPS_ENABLE_OPENCV=ON \
   -DVISIONOPS_RKNN_INCLUDE_DIR=/path/to/rknn/include \
@@ -48,6 +49,7 @@ cmake --build build-rknn -j4
 
 说明：
 
+- 若未显式指定 `CMAKE_BUILD_TYPE`，当前仓库默认会走 `Release`。
 - 默认构建不依赖 RKNN SDK。
 - `VISIONOPS_ENABLE_RKNN=ON` 时才编译真实 RKNN Runner。
 - `VISIONOPS_ENABLE_OPENCV=ON` 后，HP60C JPEG 可解码为 `RGB888` 进入 RKNN 推理。
@@ -148,6 +150,39 @@ models/
 - `manifest.json` 指向的 `rknn / yaml / labels` 必须都存在
 - 当前不自动识别同目录中的额外 `model2.rknn`
 
+## M13 耗时字段说明
+
+`POST /api/runtime/infer_once` 当前会返回两组耗时信息。
+
+兼容字段 `timing`：
+
+- `capture_ms`
+- `decode_ms`
+- `preprocess_ms`
+- `inference_ms`
+- `postprocess_ms`
+- `result_build_ms`
+- `total_ms`
+
+细分字段 `timing_detail`：
+
+- `capture_ms`
+- `decode_ms`
+- `preprocess_ms`
+- `rknn_set_input_ms`
+- `rknn_run_ms`
+- `rknn_get_output_ms`
+- `postprocess_ms`
+- `result_build_ms`
+- `total_ms`
+
+说明：
+
+- `inference_ms = rknn_set_input_ms + rknn_run_ms + rknn_get_output_ms`
+- `snapshot.jpg` 编码、Web overlay 绘制、HTTP 响应发送不计入 `preprocess / inference / postprocess`
+- HP60C Bridge 的 HTTP 拉图与 JPEG 解码会单独进入 `capture_ms / decode_ms`
+- `result_build_ms` 只统计 Runtime 构建标准 JSON 结果的时间
+
 ## HTTP API
 
 ```text
@@ -218,6 +253,20 @@ curl -s http://127.0.0.1:28081/api/runtime/status
 - `frame_source.frames_captured`
 - `frame_source.latest_timestamp_ms`
 - `frame_source.last_error`
+
+连续对比推理耗时：
+
+```bash
+for i in $(seq 1 20); do
+  curl -s -X POST http://127.0.0.1:28081/api/runtime/infer_once > /tmp/v3_infer_$i.json
+done
+
+python3 tools/benchmark_runtime.py \
+  --runtime-url http://127.0.0.1:28081 \
+  --count 50 \
+  --warmup 5 \
+  --output /tmp/v3_runtime_benchmark.json
+```
 
 ### 3576 上验证模型切换
 

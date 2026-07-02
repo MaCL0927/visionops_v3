@@ -57,6 +57,8 @@ struct FrameReadResult {
   bool ok{true};
   std::string error;
   bool from_cache{false};
+  double capture_ms{0.0};
+  double decode_ms{0.0};
 };
 
 class StreamWorkerMock {
@@ -83,9 +85,9 @@ class StreamWorkerMock {
   bool open_source(std::string& error);
   void close_source();
   void camera_loop();
-  bool read_frame_once(ImageBuffer& image, std::string& error);
-  bool read_v4l2_frame(ImageBuffer& image, std::string& error);
-  bool read_hp60c_bridge_frame(ImageBuffer& image, std::string& error);
+  bool read_frame_once(ImageBuffer& image, double& capture_ms, double& decode_ms, std::string& error);
+  bool read_v4l2_frame(ImageBuffer& image, double& capture_ms, std::string& error);
+  bool read_hp60c_bridge_frame(ImageBuffer& image, double& capture_ms, double& decode_ms, std::string& error);
   bool open_hp60c_bridge(std::string& error);
   bool open_v4l2(std::string& error);
   void close_v4l2();

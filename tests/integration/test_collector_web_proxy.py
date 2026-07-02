@@ -232,6 +232,7 @@ def test_collector_status_survives_unreachable_runtime() -> None:
         status, frontend_config = _request_json(f"{collector_url}/api/collector/config")
         assert status == 200
         assert frontend_config["device_id"] == "example-edge-collector-test"
+        assert frontend_config["snapshot_refresh_interval_ms"] >= 100
 
         frontend_root = PROJECT_ROOT / "apps/collector_web/frontend/static/js"
         source = "\n".join(path.read_text(encoding="utf-8") for path in frontend_root.rglob("*.js"))

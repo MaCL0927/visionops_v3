@@ -95,6 +95,13 @@ POST /api/runtime/start_preview
 
 这样可以让 Runtime 进入 preview 状态，持续刷新 `snapshot.jpg`。如果该调用失败，页面不会阻塞，但实时预览会退化，需要检查 Runtime 与帧源状态。
 
+当前前端还支持两个浏览器侧节流设置：
+
+- `preview_refresh_interval_ms`：控制校验页、采集页对 `/api/runtime/snapshot.jpg` 的刷新间隔，默认 `200ms`
+- `inference_interval_ms`：控制模型验证页“实时检测”循环触发 `/api/runtime/infer_once` 的间隔，默认 `500ms`
+
+这两个设置通过设置页保存到浏览器 `localStorage`，刷新页面后仍会生效，但不会写入 Runtime 或 Collector 的后端配置文件。
+
 ## 模型扫描与切换
 
 “模型验证”页面当前支持：
@@ -154,6 +161,7 @@ GET  /api/app/registers
 - Collector 不做生产推理。
 - Collector 不直接保存真实模型或现场私密配置。
 - 设置页当前以代理配置与前端临时配置为主，不写 `.env`。
+- M13 起，预览刷新与自动推理间隔会持久化到浏览器本地存储。
 - 真实采集保存、采集包导出和上传仍是后续工作。
 
 ## 验证

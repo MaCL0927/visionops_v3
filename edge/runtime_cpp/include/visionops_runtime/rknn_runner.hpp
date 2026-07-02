@@ -34,6 +34,9 @@ struct RknnOutput {
   std::string task_type;
   std::string result_payload_json;
   std::vector<RuntimeTensor> tensors;
+  double set_input_ms{0.0};
+  double run_ms{0.0};
+  double get_output_ms{0.0};
   double inference_ms{0.0};
   double postprocess_ms{0.0};
   std::string error;

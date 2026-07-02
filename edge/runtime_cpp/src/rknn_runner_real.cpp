@@ -93,7 +93,6 @@ class RknnRunnerReal final : public RknnRunner {
       input_infos_.push_back(std::move(info));
     }
     output_infos_.clear();
-    input_infos_.clear();
     output_infos_.reserve(output_count_);
     for (std::uint32_t index = 0; index < output_count_; ++index) {
       rknn_tensor_attr attribute{};
@@ -155,14 +154,19 @@ class RknnRunnerReal final : public RknnRunner {
     rknn_input_value.type = RKNN_TENSOR_UINT8;
     rknn_input_value.fmt = RKNN_TENSOR_NHWC;
 
-    const auto started_at = std::chrono::steady_clock::now();
+    const auto set_input_started = std::chrono::steady_clock::now();
     int code = rknn_inputs_set(context_, 1, &rknn_input_value);
+    result.set_input_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - set_input_started).count();
     if (code < 0) {
       result.error = "rknn_inputs_set 失败，错误码 " + std::to_string(code);
       last_error_ = result.error;
       return result;
     }
+    const auto run_started = std::chrono::steady_clock::now();
     code = rknn_run(context_, nullptr);
+    result.run_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - run_started).count();
     if (code < 0) {
       result.error = "rknn_run 失败，错误码 " + std::to_string(code);
       last_error_ = result.error;
@@ -175,8 +179,11 @@ class RknnRunnerReal final : public RknnRunner {
       outputs[index].want_float = 1;
       outputs[index].is_prealloc = 0;
     }
+    const auto get_output_started = std::chrono::steady_clock::now();
     code = rknn_outputs_get(context_, output_count_, outputs.data(), nullptr);
     if (code < 0) {
+      result.get_output_ms = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - get_output_started).count();
       result.error = "rknn_outputs_get 失败，错误码 " + std::to_string(code);
       last_error_ = result.error;
       return result;
@@ -194,10 +201,11 @@ class RknnRunnerReal final : public RknnRunner {
       result.tensors.push_back(std::move(tensor));
     }
     rknn_outputs_release(context_, output_count_, outputs.data());
+    result.get_output_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - get_output_started).count();
 
     result.success = true;
-    result.inference_ms = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - started_at).count();
+    result.inference_ms = result.set_input_ms + result.run_ms + result.get_output_ms;
     last_error_.clear();
     return result;
   }

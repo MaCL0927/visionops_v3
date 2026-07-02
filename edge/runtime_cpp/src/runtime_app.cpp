@@ -92,6 +92,20 @@ std::optional<std::string> json_string_field(const std::string& text, const std:
   return std::nullopt;
 }
 
+std::string format_ms(double value) {
+  std::ostringstream stream;
+  stream << std::fixed << std::setprecision(4) << value;
+  return stream.str();
+}
+
+void replace_token(std::string& target, const std::string& token, const std::string& replacement) {
+  std::size_t position = 0;
+  while ((position = target.find(token, position)) != std::string::npos) {
+    target.replace(position, token.size(), replacement);
+    position += replacement.size();
+  }
+}
+
 PreparedModelRuntime prepare_model_runtime(const AppConfig& config) {
   PreparedModelRuntime prepared;
   prepared.model_info = load_model_package(config);
@@ -286,7 +300,15 @@ std::string RuntimeApp::infer_once() {
   auto frame = frame_result.frame;
   if (!frame_result.ok) {
     const auto error = inference_error_json(
-        identity, frame, "CAMERA_FRAME_UNAVAILABLE", frame_result.error, "frame_source_error");
+        identity,
+        frame,
+        "CAMERA_FRAME_UNAVAILABLE",
+        frame_result.error,
+        frame_result.capture_ms,
+        frame_result.decode_ms,
+        nullptr,
+        nullptr,
+        "frame_source_error");
     state_.complete_inference_error(identity, error);
     return error;
   }
@@ -295,7 +317,9 @@ std::string RuntimeApp::infer_once() {
         identity,
         frame,
         "RKNN_MODEL_NOT_LOADED",
-        rknn_runner_->last_error());
+        rknn_runner_->last_error(),
+        frame_result.capture_ms,
+        frame_result.decode_ms);
     state_.complete_inference_error(identity, error);
     return error;
   }
@@ -314,7 +338,7 @@ std::string RuntimeApp::infer_once() {
   }
   if (!image_error.empty()) {
     const auto error = inference_error_json(
-        identity, frame, "TEST_IMAGE_LOAD_FAILED", image_error);
+        identity, frame, "TEST_IMAGE_LOAD_FAILED", image_error, frame_result.capture_ms, frame_result.decode_ms);
     state_.complete_inference_error(identity, error);
     return error;
   }
@@ -328,7 +352,13 @@ std::string RuntimeApp::infer_once() {
       frame, source_image, model_info_.input_width, model_info_.input_height);
   if (!preprocess.error.empty()) {
     const auto error = inference_error_json(
-        identity, frame, "PREPROCESS_FAILED", preprocess.error);
+        identity,
+        frame,
+        "PREPROCESS_FAILED",
+        preprocess.error,
+        frame_result.capture_ms,
+        frame_result.decode_ms,
+        &preprocess);
     state_.complete_inference_error(identity, error);
     return error;
   }
@@ -343,7 +373,11 @@ std::string RuntimeApp::infer_once() {
         identity,
         frame,
         "RKNN_INFERENCE_FAILED",
-        inference.error.empty() ? rknn_runner_->last_error() : inference.error);
+        inference.error.empty() ? rknn_runner_->last_error() : inference.error,
+        frame_result.capture_ms,
+        frame_result.decode_ms,
+        &preprocess,
+        &inference);
     state_.complete_inference_error(identity, error);
     return error;
   }
@@ -368,6 +402,10 @@ std::string RuntimeApp::infer_once() {
           frame,
           "UNSUPPORTED_TASK_TYPE",
           "RKNN 后处理暂不支持 task_type: " + model_info_.task_type,
+          frame_result.capture_ms,
+          frame_result.decode_ms,
+          &preprocess,
+          &inference,
           "unsupported_task_type");
       state_.complete_inference_error(identity, error);
       return error;
@@ -378,6 +416,8 @@ std::string RuntimeApp::infer_once() {
       const auto error = postprocess_error_json(
           identity,
           frame,
+          frame_result.capture_ms,
+          frame_result.decode_ms,
           preprocess,
           inference,
           postprocess.error_code.empty() ? "POSTPROCESS_FAILED" : postprocess.error_code,
@@ -410,7 +450,13 @@ std::string RuntimeApp::infer_once() {
     inference.result_payload_json = fallback_postprocess(model_info_.task_type);
     inference.postprocess_ms = 2.0;
   }
-  const auto result = inference_result_json(identity, frame, preprocess, inference);
+  const auto result = inference_result_json(
+      identity,
+      frame,
+      frame_result.capture_ms,
+      frame_result.decode_ms,
+      preprocess,
+      inference);
   state_.complete_inference(identity, result);
   return result;
 }
@@ -514,11 +560,15 @@ RuntimeApiResult RuntimeApp::switch_model(const std::string& request_body) {
 std::string RuntimeApp::inference_result_json(
     const InferenceIdentity& identity,
     const MockFrame& frame,
+    double capture_ms,
+    double decode_ms,
     const PreprocessOutput& preprocess,
     const RknnOutput& inference) const {
   const auto now = now_timestamp_ms();
   (void)frame;
-  const double total_ms = preprocess.elapsed_ms + inference.inference_ms + inference.postprocess_ms;
+  constexpr char kResultBuildToken[] = "__RESULT_BUILD_MS__";
+  constexpr char kTotalToken[] = "__TOTAL_MS__";
+  const auto build_started = std::chrono::steady_clock::now();
   std::ostringstream stream;
   stream << "{\"schema_version\":\"1.0\",\"message_type\":\"inference_result\""
          << ",\"device_id\":\"" << json_escape(config_.device_id) << '"'
@@ -532,10 +582,22 @@ std::string RuntimeApp::inference_result_json(
          << ",\"model\":" << loaded_model_json()
          << ",\"image\":{\"width\":" << preprocess.letterbox.orig_width
          << ",\"height\":" << preprocess.letterbox.orig_height << '}'
-         << ",\"timing\":{\"preprocess_ms\":" << preprocess.elapsed_ms
+         << ",\"timing\":{\"capture_ms\":" << capture_ms
+         << ",\"decode_ms\":" << decode_ms
+         << ",\"preprocess_ms\":" << preprocess.elapsed_ms
          << ",\"inference_ms\":" << inference.inference_ms
          << ",\"postprocess_ms\":" << inference.postprocess_ms
-         << ",\"total_ms\":" << total_ms << '}'
+         << ",\"result_build_ms\":" << kResultBuildToken
+         << ",\"total_ms\":" << kTotalToken << '}'
+         << ",\"timing_detail\":{\"capture_ms\":" << capture_ms
+         << ",\"decode_ms\":" << decode_ms
+         << ",\"preprocess_ms\":" << preprocess.elapsed_ms
+         << ",\"rknn_set_input_ms\":" << inference.set_input_ms
+         << ",\"rknn_run_ms\":" << inference.run_ms
+         << ",\"rknn_get_output_ms\":" << inference.get_output_ms
+         << ",\"postprocess_ms\":" << inference.postprocess_ms
+         << ",\"result_build_ms\":" << kResultBuildToken
+         << ",\"total_ms\":" << kTotalToken << '}'
          << inference.result_payload_json;
   if (config_.backend == "rknn") {
     stream << ",\"debug\":{\"rknn_runner_called\":" << json_bool(inference.runner_called)
@@ -545,25 +607,38 @@ std::string RuntimeApp::inference_result_json(
            << (inference.error.empty()
                    ? "null"
                    : '"' + json_escape(inference.error) + '"')
+           << ",\"preprocess_same_size_fast_path\":" << json_bool(preprocess.same_size_fast_path)
            << ",\"letterbox\":{\"scale\":" << preprocess.letterbox.scale
            << ",\"pad_x\":" << preprocess.letterbox.pad_x
            << ",\"pad_y\":" << preprocess.letterbox.pad_y << "}}";
   }
   stream << '}';
-  return stream.str();
+  std::string body = stream.str();
+  const double result_build_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - build_started).count();
+  const double total_ms = capture_ms + decode_ms + preprocess.elapsed_ms +
+      inference.inference_ms + inference.postprocess_ms + result_build_ms;
+  replace_token(body, kResultBuildToken, format_ms(result_build_ms));
+  replace_token(body, kTotalToken, format_ms(total_ms));
+  return body;
 }
 
 
 std::string RuntimeApp::postprocess_error_json(
     const InferenceIdentity& identity,
     const MockFrame& frame,
+    double capture_ms,
+    double decode_ms,
     const PreprocessOutput& preprocess,
     const RknnOutput& inference,
     const std::string& code,
     const std::string& message,
     const std::string& debug_key) const {
   const auto now = now_timestamp_ms();
-  const double total_ms = preprocess.elapsed_ms + inference.inference_ms + inference.postprocess_ms;
+  (void)frame;
+  constexpr char kResultBuildToken[] = "__RESULT_BUILD_MS__";
+  constexpr char kTotalToken[] = "__TOTAL_MS__";
+  const auto build_started = std::chrono::steady_clock::now();
   std::ostringstream stream;
   stream << "{\"schema_version\":\"1.0\",\"message_type\":\"inference_result\""
          << ",\"device_id\":\"" << json_escape(config_.device_id) << '"'
@@ -577,10 +652,22 @@ std::string RuntimeApp::postprocess_error_json(
          << ",\"model\":" << loaded_model_json()
          << ",\"image\":{\"width\":" << preprocess.letterbox.orig_width
          << ",\"height\":" << preprocess.letterbox.orig_height << '}'
-         << ",\"timing\":{\"preprocess_ms\":" << preprocess.elapsed_ms
+         << ",\"timing\":{\"capture_ms\":" << capture_ms
+         << ",\"decode_ms\":" << decode_ms
+         << ",\"preprocess_ms\":" << preprocess.elapsed_ms
          << ",\"inference_ms\":" << inference.inference_ms
          << ",\"postprocess_ms\":" << inference.postprocess_ms
-         << ",\"total_ms\":" << total_ms << '}'
+         << ",\"result_build_ms\":" << kResultBuildToken
+         << ",\"total_ms\":" << kTotalToken << '}'
+         << ",\"timing_detail\":{\"capture_ms\":" << capture_ms
+         << ",\"decode_ms\":" << decode_ms
+         << ",\"preprocess_ms\":" << preprocess.elapsed_ms
+         << ",\"rknn_set_input_ms\":" << inference.set_input_ms
+         << ",\"rknn_run_ms\":" << inference.run_ms
+         << ",\"rknn_get_output_ms\":" << inference.get_output_ms
+         << ",\"postprocess_ms\":" << inference.postprocess_ms
+         << ",\"result_build_ms\":" << kResultBuildToken
+         << ",\"total_ms\":" << kTotalToken << '}'
          << ",\"error\":{\"code\":\"" << json_escape(code)
          << "\",\"message\":\"" << json_escape(message)
          << "\",\"detail\":null,\"recoverable\":true}"
@@ -609,7 +696,14 @@ std::string RuntimeApp::postprocess_error_json(
   stream << ",\"letterbox\":{\"scale\":" << preprocess.letterbox.scale
          << ",\"pad_x\":" << preprocess.letterbox.pad_x
          << ",\"pad_y\":" << preprocess.letterbox.pad_y << "}}}";
-  return stream.str();
+  std::string body = stream.str();
+  const double result_build_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - build_started).count();
+  const double total_ms = capture_ms + decode_ms + preprocess.elapsed_ms +
+      inference.inference_ms + inference.postprocess_ms + result_build_ms;
+  replace_token(body, kResultBuildToken, format_ms(result_build_ms));
+  replace_token(body, kTotalToken, format_ms(total_ms));
+  return body;
 }
 
 std::string RuntimeApp::inference_error_json(
@@ -617,8 +711,23 @@ std::string RuntimeApp::inference_error_json(
     const MockFrame& frame,
     const std::string& code,
     const std::string& message,
+    double capture_ms,
+    double decode_ms,
+    const PreprocessOutput* preprocess,
+    const RknnOutput* inference,
     const std::string& debug_key) const {
   const auto now = now_timestamp_ms();
+  constexpr char kResultBuildToken[] = "__RESULT_BUILD_MS__";
+  constexpr char kTotalToken[] = "__TOTAL_MS__";
+  const double preprocess_ms = preprocess == nullptr ? 0.0 : preprocess->elapsed_ms;
+  const double inference_ms = inference == nullptr ? 0.0 : inference->inference_ms;
+  const double postprocess_ms = inference == nullptr ? 0.0 : inference->postprocess_ms;
+  const double set_input_ms = inference == nullptr ? 0.0 : inference->set_input_ms;
+  const double run_ms = inference == nullptr ? 0.0 : inference->run_ms;
+  const double get_output_ms = inference == nullptr ? 0.0 : inference->get_output_ms;
+  const bool runner_called = inference != nullptr && inference->runner_called;
+  const std::size_t raw_outputs_count = inference == nullptr ? 0 : inference->tensors.size();
+  const auto build_started = std::chrono::steady_clock::now();
   std::ostringstream stream;
   stream << "{\"schema_version\":\"1.0\",\"message_type\":\"inference_result\""
          << ",\"device_id\":\"" << json_escape(config_.device_id) << '"'
@@ -626,19 +735,41 @@ std::string RuntimeApp::inference_error_json(
          << ",\"timestamp_ms\":" << now
          << ",\"trace_id\":\"" << make_trace_id(now) << '"'
          << ",\"frame_id\":\"" << json_escape(identity.frame_id) << '"'
-         << ",\"source\":\"runtime:" << json_escape(config_.backend) << "\",\"status\":\"ok\""
          << ",\"task_type\":\"" << json_escape(model_info_.task_type) << '"'
-         << ",\"source\":\"runtime:rknn\",\"status\":\"error\""
+         << ",\"source\":\"runtime:" << json_escape(config_.backend) << "\",\"status\":\"error\""
          << ",\"model\":" << loaded_model_json()
          << ",\"image\":{\"width\":" << frame.width << ",\"height\":" << frame.height << '}'
-         << ",\"timing\":{\"preprocess_ms\":0.0,\"inference_ms\":0.0,\"postprocess_ms\":0.0,\"total_ms\":0.0}"
+         << ",\"timing\":{\"capture_ms\":" << capture_ms
+         << ",\"decode_ms\":" << decode_ms
+         << ",\"preprocess_ms\":" << preprocess_ms
+         << ",\"inference_ms\":" << inference_ms
+         << ",\"postprocess_ms\":" << postprocess_ms
+         << ",\"result_build_ms\":" << kResultBuildToken
+         << ",\"total_ms\":" << kTotalToken << '}'
+         << ",\"timing_detail\":{\"capture_ms\":" << capture_ms
+         << ",\"decode_ms\":" << decode_ms
+         << ",\"preprocess_ms\":" << preprocess_ms
+         << ",\"rknn_set_input_ms\":" << set_input_ms
+         << ",\"rknn_run_ms\":" << run_ms
+         << ",\"rknn_get_output_ms\":" << get_output_ms
+         << ",\"postprocess_ms\":" << postprocess_ms
+         << ",\"result_build_ms\":" << kResultBuildToken
+         << ",\"total_ms\":" << kTotalToken << '}'
          << ",\"error\":{\"code\":\"" << json_escape(code)
          << "\",\"message\":\"" << json_escape(message)
          << "\",\"detail\":null,\"recoverable\":true}"
-         << ",\"debug\":{\"rknn_runner_called\":false,\"raw_outputs_count\":0";
+         << ",\"debug\":{\"rknn_runner_called\":" << json_bool(runner_called)
+         << ",\"raw_outputs_count\":" << raw_outputs_count;
   if (!debug_key.empty()) stream << ",\"" << json_escape(debug_key) << "\":true";
   stream << "}}";
-  return stream.str();
+  std::string body = stream.str();
+  const double result_build_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - build_started).count();
+  const double total_ms = capture_ms + decode_ms + preprocess_ms +
+      inference_ms + postprocess_ms + result_build_ms;
+  replace_token(body, kResultBuildToken, format_ms(result_build_ms));
+  replace_token(body, kTotalToken, format_ms(total_ms));
+  return body;
 }
 
 std::optional<std::string> RuntimeApp::latest_result_json() const {

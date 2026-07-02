@@ -19,6 +19,7 @@ let realtimeBusy = false;
 let currentCatalog = null;
 let switchingModelId = null;
 let selectedCaptureRecord = null;
+let realtimeEnabled = false;
 
 function formatBytes(value) {
   if (value == null || Number.isNaN(Number(value))) return "--";
@@ -48,6 +49,15 @@ function setRealtimeButtonState(running) {
   button.textContent = running ? "停止实时" : "实时检测";
   button.setAttribute("aria-pressed", running ? "true" : "false");
   button.classList.toggle("active", running);
+}
+
+function stopRealtimeLoop() {
+  realtimeEnabled = false;
+  if (realtimeTimer) {
+    clearTimeout(realtimeTimer);
+    realtimeTimer = null;
+  }
+  setRealtimeButtonState(false);
 }
 
 function hidePicker() {
@@ -238,9 +248,7 @@ export async function inferOnce() {
 
 async function selectCaptureAndInfer(record) {
   if (realtimeTimer) {
-    clearInterval(realtimeTimer);
-    realtimeTimer = null;
-    setRealtimeButtonState(false);
+    stopRealtimeLoop();
   }
   selectedCaptureRecord = record;
   hidePicker();
@@ -305,40 +313,43 @@ export async function switchModel(modelId) {
 }
 
 function toggleRealtime() {
-  if (realtimeTimer) {
-    clearInterval(realtimeTimer);
-    realtimeTimer = null;
-    setRealtimeButtonState(false);
+  if (realtimeEnabled) {
+    stopRealtimeLoop();
     return;
   }
   selectedCaptureRecord = null;
   hidePicker();
   setRealtimeButtonState(true);
-  realtimeTimer = setInterval(async () => {
-    if (realtimeBusy) return;
+  realtimeEnabled = true;
+  const runLoop = async () => {
+    if (!realtimeEnabled) return;
+    if (realtimeBusy) {
+      realtimeTimer = setTimeout(runLoop, getState().config.inference_interval_ms);
+      return;
+    }
     realtimeBusy = true;
     try {
       await inferOnce();
     } finally {
       realtimeBusy = false;
+      if (realtimeEnabled) {
+        realtimeTimer = setTimeout(runLoop, getState().config.inference_interval_ms);
+      }
     }
-  }, 1500);
-  inferOnce();
+  };
+  runLoop();
 }
 
 export function initValidate() {
   document.getElementById("validate-infer").addEventListener("click", () => {
-    if (realtimeTimer) {
-      clearInterval(realtimeTimer);
-      realtimeTimer = null;
-      setRealtimeButtonState(false);
-    }
+    stopRealtimeLoop();
     renderCapturePicker();
     capturePickerPanel.classList.toggle("hidden");
   });
   document.getElementById("validate-photo").addEventListener("click", async () => {
     selectedCaptureRecord = null;
     hidePicker();
+    stopRealtimeLoop();
     await inferOnce();
   });
   document.getElementById("validate-realtime").addEventListener("click", toggleRealtime);

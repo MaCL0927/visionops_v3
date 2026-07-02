@@ -178,6 +178,9 @@ def test_runtime_mock_state_and_inference_flow(runtime_server: str) -> None:
     assert first_result["frame_id"] == "frame-mock-00000001"
     assert first_result["result_id"] == "result-mock-00000001"
     assert first_result["detections"]
+    assert first_result["timing"]["capture_ms"] == 0.0
+    assert "timing_detail" in first_result
+    assert "result_build_ms" in first_result["timing_detail"]
     validate_example(first_result, "first inference response")
 
     status_code, second_result = _request_json(

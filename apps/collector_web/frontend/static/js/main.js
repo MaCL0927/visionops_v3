@@ -1,5 +1,5 @@
 import { endpoints, requestJson, postJson } from "./api.js";
-import { getState, updateState } from "./state.js";
+import { getState, loadPersistedConfig, normalizeConfig, updateState } from "./state.js";
 import { initCalibration, refreshCalibration } from "./pages/calibration.js";
 import { initCapture, refreshCapture } from "./pages/capture.js";
 import { initValidate } from "./pages/validate.js";
@@ -27,8 +27,21 @@ function toggleProduction() {
 }
 
 async function loadConfig() {
-  try { const config = await requestJson(endpoints.frontendConfig); updateState({ config, savedConfig: { ...config } }); }
-  catch (_error) { updateState({ savedConfig: { ...getState().config } }); }
+  try {
+    const backendConfig = normalizeConfig(await requestJson(endpoints.frontendConfig));
+    const persistedConfig = loadPersistedConfig();
+    updateState({
+      config: persistedConfig ? normalizeConfig({ ...backendConfig, ...persistedConfig }) : backendConfig,
+      savedConfig: { ...backendConfig },
+    });
+  } catch (_error) {
+    const fallbackConfig = normalizeConfig(getState().config);
+    const persistedConfig = loadPersistedConfig();
+    updateState({
+      config: persistedConfig ? normalizeConfig({ ...fallbackConfig, ...persistedConfig }) : fallbackConfig,
+      savedConfig: { ...fallbackConfig },
+    });
+  }
 }
 
 async function checkCollector() {
@@ -43,7 +56,7 @@ function scheduleSnapshotRefresh() {
     if (!state.productionMode && state.activePage === "calibration") await refreshCalibration();
     if (!state.productionMode && state.activePage === "capture") await refreshCapture();
     scheduleSnapshotRefresh();
-  }, getState().config.snapshot_refresh_interval_ms);
+  }, getState().config.preview_refresh_interval_ms);
 }
 
 function scheduleStatusRefresh() {

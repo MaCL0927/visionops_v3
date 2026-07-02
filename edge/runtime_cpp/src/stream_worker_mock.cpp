@@ -314,7 +314,9 @@ void StreamWorkerMock::start_preview() {
   if (config_.type == "v4l2" || is_hp60c_source(config_.type)) {
     ImageBuffer initial_image;
     std::string initial_error;
-    if (read_frame_once(initial_image, initial_error)) {
+    double capture_ms = 0.0;
+    double decode_ms = 0.0;
+    if (read_frame_once(initial_image, capture_ms, decode_ms, initial_error)) {
       update_latest(std::move(initial_image));
       clear_error();
     } else if (!is_hp60c_source(config_.type)) {
@@ -455,7 +457,7 @@ FrameReadResult StreamWorkerMock::next_frame(std::uint64_t sequence) {
     return result;
   }
   ImageBuffer image;
-  if (!read_frame_once(image, error)) {
+  if (!read_frame_once(image, result.capture_ms, result.decode_ms, error)) {
     result.ok = false;
     result.error = error;
     set_error(error);
@@ -500,7 +502,9 @@ void StreamWorkerMock::camera_loop() {
   while (!stop_thread_.load()) {
     ImageBuffer image;
     std::string error;
-    if (read_frame_once(image, error)) {
+    double capture_ms = 0.0;
+    double decode_ms = 0.0;
+    if (read_frame_once(image, capture_ms, decode_ms, error)) {
       ++frames;
       update_latest(std::move(image));
       const auto elapsed = std::chrono::duration<double>(
@@ -517,15 +521,21 @@ void StreamWorkerMock::camera_loop() {
   }
 }
 
-bool StreamWorkerMock::read_frame_once(ImageBuffer& image, std::string& error) {
+bool StreamWorkerMock::read_frame_once(
+    ImageBuffer& image,
+    double& capture_ms,
+    double& decode_ms,
+    std::string& error) {
+  capture_ms = 0.0;
+  decode_ms = 0.0;
   if (is_hp60c_source(config_.type)) {
-    return read_hp60c_bridge_frame(image, error);
+    return read_hp60c_bridge_frame(image, capture_ms, decode_ms, error);
   }
   if (config_.type != "v4l2") {
     image = make_mock_image_for_sequence(++latest_sequence_);
     return true;
   }
-  return read_v4l2_frame(image, error);
+  return read_v4l2_frame(image, capture_ms, error);
 }
 
 void StreamWorkerMock::update_latest(ImageBuffer image) {
@@ -554,18 +564,28 @@ bool StreamWorkerMock::open_hp60c_bridge(std::string& error) {
   return true;
 }
 
-bool StreamWorkerMock::read_hp60c_bridge_frame(ImageBuffer& image, std::string& error) {
+bool StreamWorkerMock::read_hp60c_bridge_frame(
+    ImageBuffer& image,
+    double& capture_ms,
+    double& decode_ms,
+    std::string& error) {
 #ifndef VISIONOPS_HAS_OPENCV
   (void)image;
+  (void)decode_ms;
 #endif
   const std::string snapshot_url = join_url_path(config_.hp60c_url, config_.hp60c_snapshot_path);
   std::vector<std::uint8_t> jpeg;
   int status_code = 0;
   std::string content_type;
+  const auto capture_started = std::chrono::steady_clock::now();
   if (!http_get_bytes(snapshot_url, config_.camera_read_timeout_ms, jpeg, status_code, content_type, error)) {
+    capture_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - capture_started).count();
     error = "HP60C SDK Bridge 快照读取失败: " + error;
     return false;
   }
+  capture_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - capture_started).count();
   if (jpeg.size() < 4 || jpeg[0] != 0xFF || jpeg[1] != 0xD8) {
     error = "HP60C SDK Bridge 返回的不是 JPEG 图像";
     return false;
@@ -579,9 +599,14 @@ bool StreamWorkerMock::read_hp60c_bridge_frame(ImageBuffer& image, std::string& 
   }
 
 #ifdef VISIONOPS_HAS_OPENCV
+  const auto decode_started = std::chrono::steady_clock::now();
   if (!decode_jpeg_to_rgb888(jpeg, image, error)) {
+    decode_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - decode_started).count();
     return false;
   }
+  decode_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - decode_started).count();
   image.timestamp_ms = now_timestamp_ms();
   image.sequence = latest_sequence_ + 1;
   image.camera_id = config_.hp60c_url;
@@ -734,11 +759,16 @@ void StreamWorkerMock::close_v4l2() {
   if (config_.type == "v4l2") opened_ = false;
 }
 
-bool StreamWorkerMock::read_v4l2_frame(ImageBuffer& image, std::string& error) {
+bool StreamWorkerMock::read_v4l2_frame(
+    ImageBuffer& image,
+    double& capture_ms,
+    std::string& error) {
 #ifndef __linux__
+  (void)capture_ms;
   error = "当前平台不支持 V4L2";
   return false;
 #else
+  const auto started_at = std::chrono::steady_clock::now();
   if (v4l2_fd_ < 0 || !v4l2_streaming_) {
     if (!open_v4l2(error)) return false;
   }
@@ -780,6 +810,8 @@ bool StreamWorkerMock::read_v4l2_frame(ImageBuffer& image, std::string& error) {
     return false;
   }
   if (!error.empty()) return false;
+  capture_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started_at).count();
   return image_buffer_valid_rgb(image);
 #endif
 }
