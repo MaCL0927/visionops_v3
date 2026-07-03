@@ -366,3 +366,9 @@ bash edge/runtime_cpp/tests/smoke_test.sh
 - `imcheck` 显式传入 `src_rect/dst_rect` 和 `mode_usage=0`，避免 `imcheck(src, dst, {}, {})` 的空 `__VA_ARGS__` 触发 `zero-size array`。
 - 启用 RGA 时链接 `${CMAKE_DL_LIBS}`，避免 `dlclose@@GLIBC_2.17` 的链接错误。
 
+
+### Segmentation split-DFL 输出兼容
+
+Runtime segmentation 后处理支持 Rockchip YOLOv8-seg split-DFL 多输出格式。该格式通常包含 3 个尺度，每个尺度分别输出 bbox DFL、class、objectness、mask coefficients，并额外输出 proto。后处理根据 head 的 H/W 与模型输入尺寸动态推导 stride，不写死 640 或 8400。
+
+当前 segmentation mask 使用 bbox polygon 简化表示，满足 Web 可视化与基础结果查看；真正基于 proto 的实例 mask 栅格化后续再实现。

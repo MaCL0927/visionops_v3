@@ -274,3 +274,10 @@ python3 tools/benchmark_runtime.py \
 - `timing` 保留兼容字段，同时增加 `capture_ms / decode_ms / result_build_ms`
 - `timing_detail` 增加 `rknn_set_input_ms / rknn_run_ms / rknn_get_output_ms`
 - Collector Web 当前已改为参考 v2 的现场大屏风格，但接口和架构保持 v3
+
+## M13 segmentation split-DFL 兼容更新
+
+- Runtime segmentation 后处理新增 Rockchip YOLOv8-seg split-DFL 多输出格式支持。
+- 支持形如 13 输出的 RKNN seg 模型：每个尺度包含 `[1,64,H,W]` bbox DFL、`[1,nc,H,W]` class、`[1,1,H,W]` objectness、`[1,mask_dim,H,W]` mask coefficients，最后一个 proto 为 `[1,mask_dim,proto_h,proto_w]`。
+- stride 由 `letterbox.input_width / W` 与 `letterbox.input_height / H` 动态推导，不写死 640 或 8400；因此 640、1280 或其他输入尺寸只要保持 YOLOv8-seg split-DFL 输出结构即可兼容。
+- 当前 mask 输出仍采用 bbox polygon 简化表示，用于 Web 可视化；proto 已识别，真正 mask 栅格化留作后续优化。

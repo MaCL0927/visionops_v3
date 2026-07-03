@@ -104,6 +104,26 @@ int main(int argc, char* argv[]) {
         },
         config,
         meta);
+  } else if (task == "segmentation_split") {
+    const visionops::runtime::PostprocessConfig seg_config{{"person", "bag"}, 0.5F, 0.45F, 100};
+    auto box_head = []() {
+      std::vector<float> values(64, -20.0F);
+      for (int side = 0; side < 4; ++side) {
+        values[side * 16 + 3] = 20.0F;
+      }
+      return values;
+    };
+    result = visionops::runtime::postprocess_segmentation(
+        {
+            make_tensor({1, 64, 1, 1}, box_head()),
+            make_tensor({1, 2, 1, 1}, {-20.0F, 20.0F}),
+            make_tensor({1, 1, 1, 1}, {20.0F}),
+            make_tensor({1, 32, 1, 1}, std::vector<float>(32, 0.1F)),
+            make_tensor({1, 32, 2, 2}, std::vector<float>(128, 0.0F)),
+        },
+        seg_config,
+        meta);
+    output_task = "segmentation";
   } else {
     std::cerr << "未知 fixture task\n";
     return 2;
