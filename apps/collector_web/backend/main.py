@@ -18,6 +18,7 @@ from .config_loader import CollectorConfig, load_config
 from .model_catalog import find_scanned_model, scan_model_catalog
 from .response_utils import error_document, send_bytes, send_json, timestamp_ms
 from .runtime_client import RuntimeClient, RuntimeResponse, RuntimeUnavailable
+from .sdk_bridge_settings import apply_orbbec_settings, get_orbbec_settings_payload
 
 
 FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
@@ -87,6 +88,9 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/models":
             self._send_model_catalog()
             return
+        if path == "/api/settings/sdk_bridge/orbbec336l":
+            self._send_orbbec_settings()
+            return
         if path in DOWNSTREAM_PATHS:
             name, target, status_endpoint = DOWNSTREAM_PATHS[path]
             self._proxy_downstream(name, target, status_endpoint)
@@ -106,6 +110,9 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/models/switch":
             self._switch_model()
+            return
+        if path == "/api/settings/sdk_bridge/orbbec336l":
+            self._apply_orbbec_settings()
             return
         if path in PROXY_PATHS:
             self._proxy_runtime(path, expected_method=PROXY_PATHS[path])
@@ -164,6 +171,56 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             "snapshot_refresh_interval_ms": config.snapshot_refresh_interval_ms,
             "status_refresh_interval_ms": config.status_refresh_interval_ms,
         })
+
+
+    def _send_orbbec_settings(self) -> None:
+        try:
+            payload = get_orbbec_settings_payload()
+        except Exception as error:  # noqa: BLE001 - expose local settings diagnostics
+            self._send_collector_error(
+                500,
+                "SDK_BRIDGE_SETTINGS_READ_FAILED",
+                "读取 Orbbec 336L SDK Bridge 设置失败",
+                True,
+                detail=str(error),
+            )
+            return
+        send_json(self, 200, payload)
+
+    def _apply_orbbec_settings(self) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        try:
+            result = apply_orbbec_settings(payload)
+        except ValueError as error:
+            self._send_collector_error(
+                400,
+                "SDK_BRIDGE_SETTINGS_INVALID",
+                str(error),
+                True,
+            )
+            return
+        except PermissionError as error:
+            self._send_collector_error(
+                403,
+                "SDK_BRIDGE_SETTINGS_PERMISSION_DENIED",
+                "写入 Bridge env 或重启服务权限不足",
+                True,
+                detail=str(error),
+            )
+            return
+        except Exception as error:  # noqa: BLE001 - expose local apply diagnostics
+            self._send_collector_error(
+                500,
+                "SDK_BRIDGE_SETTINGS_APPLY_FAILED",
+                "应用 Orbbec 336L SDK Bridge 设置失败",
+                True,
+                detail=str(error),
+            )
+            return
+        status_code = 200 if result.get("status") == "ok" else 500
+        send_json(self, status_code, result)
 
     def _send_model_catalog(self) -> None:
         current_model: dict[str, Any] | None = None

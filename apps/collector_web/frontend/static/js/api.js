@@ -44,6 +44,7 @@ export const endpoints = {
   snapshot: "/api/runtime/snapshot.jpg",
   models: "/api/models",
   switchModel: "/api/models/switch",
+  orbbecSettings: "/api/settings/sdk_bridge/orbbec336l",
   gatewayStatus: "/api/gateway/status",
   gatewayRegisters: "/api/gateway/registers",
   appStatus: "/api/app/status",

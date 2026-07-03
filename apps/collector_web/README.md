@@ -172,3 +172,41 @@ bash apps/collector_web/tests/smoke_test.sh
 ```
 
 `Runtime / Gateway / Business App` 的真实联调仍需在 3576 真机上验证。
+
+## M14 设置界面
+
+Collector Web 的设置弹窗已拆分为“相机设置 / 视觉盒子设置 / 算法设置”三页。当前保存方式为浏览器 localStorage，用于前端刷新间隔和模型验证页可视化开关；真实后端配置保存接口后续接入。
+
+算法设置页中的可视化开关会立即影响模型验证页 overlay，例如关闭 OBB 外接水平框、保留 OBB 旋转框，或控制 segmentation bbox / mask polygon 显示。
+
+## M14.1 SDK Bridge 相机设置页
+
+设置中心的相机页已改为 SDK Bridge 通用配置入口，面向 HP60C 与 Orbbec Gemini 336L 两类 SDK + HTTP Bridge。固定的服务 URL、快照路径和深度图路径不再作为用户可编辑项展示；页面只保留相机型号、画面帧率、RGB/Depth profile、JPEG 质量、翻转、RGB 顺序、深度单位等现场配置入口。当前所有设置仍保存到浏览器 localStorage，后续再接入后端配置 API 写入对应 bridge env 并重启服务。
+
+## M14 Orbbec 336L 设置 API
+
+Collector Web 提供 Orbbec 336L SDK Bridge 设置接口：
+
+```bash
+curl -s http://127.0.0.1:18091/api/settings/sdk_bridge/orbbec336l | python3 -m json.tool
+```
+
+保存设置示例：
+
+```bash
+curl -s -X POST http://127.0.0.1:18091/api/settings/sdk_bridge/orbbec336l \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "camera_model":"orbbec336l",
+    "rgb_profile":"orbbec:1280x720@30",
+    "depth_profile":"orbbec:1280x720@30",
+    "display_fps":10,
+    "camera_jpeg_quality":95,
+    "flip_vertical":"false",
+    "flip_horizontal":"false",
+    "depth_unit":"mm",
+    "orbbec_serial":""
+  }' | python3 -m json.tool
+```
+
+该接口会写入 Orbbec Bridge env 并重启 `visionops-orbbec336l-bridge.service`。如果 Collector 不是 root 运行，需要配置受限 sudo 权限。

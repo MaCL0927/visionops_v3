@@ -281,3 +281,38 @@ python3 tools/benchmark_runtime.py \
 - 支持形如 13 输出的 RKNN seg 模型：每个尺度包含 `[1,64,H,W]` bbox DFL、`[1,nc,H,W]` class、`[1,1,H,W]` objectness、`[1,mask_dim,H,W]` mask coefficients，最后一个 proto 为 `[1,mask_dim,proto_h,proto_w]`。
 - stride 由 `letterbox.input_width / W` 与 `letterbox.input_height / H` 动态推导，不写死 640 或 8400；因此 640、1280 或其他输入尺寸只要保持 YOLOv8-seg split-DFL 输出结构即可兼容。
 - 当前 mask 输出仍采用 bbox polygon 简化表示，用于 Web 可视化；proto 已识别，真正 mask 栅格化留作后续优化。
+
+## M14 设置界面优化
+
+- 设置弹窗重构为三页：相机设置、视觉盒子设置、算法设置。
+- 当前设置保存到浏览器 localStorage，不写入 `.env`、`model.yaml` 或 systemd。
+- 算法设置新增模型验证页可视化开关：Detection bbox、OBB 旋转框、OBB 外接水平框、Seg bbox、Seg mask polygon、标签、中心点、mask 透明度。
+- OBB 外接水平框默认关闭，避免 Web 端同时显示旋转框和水平外接框。
+- Segmentation 当前仍显示 Runtime 返回的 polygon；若 Runtime 输出为 bbox polygon，则 Web 端显示的仍是矩形简化 mask，真实 mask 栅格化属于后续 Runtime 后处理工作。
+
+## M14 补充：SDK Bridge 相机设置页优化
+
+- 设置中心弹窗上下占比进一步加长，接近全屏设置面板。
+- 相机设置页统一使用 SDK Bridge 命名，适配 HP60C 与 Orbbec Gemini 336L 两类 SDK + HTTP Bridge 取流方式。
+- 固定 Bridge URL 与 snapshot path 不再作为用户编辑项展示。
+- 预览刷新间隔与快照刷新间隔合并为“画面帧率 FPS”，保存时同步换算为两个旧 interval 字段。
+- RGB 分辨率 / FPS、Depth 分辨率 / FPS 改为 profile 下拉框，并增加 RGB / Depth 匹配提示。
+- 新增 JPEG 质量、RGB 数据优先级、垂直/水平翻转、RGB 顺序、深度单位、Orbbec 序列号等 SDK Bridge 相关配置入口。
+- 当前仍为前端本地设置，不写入 SDK Bridge env，不重启 systemd 服务。
+
+## M14 Orbbec 336L SDK Bridge 设置 API
+
+- Collector Web 新增 `GET/POST /api/settings/sdk_bridge/orbbec336l`。
+- 相机设置页的 RGB / Depth profile 下拉框改为后端动态加载，不在前端写死。
+- 后端优先从 Orbbec Bridge `GET /stream/profiles` 读取 SDK 实际支持组合。
+- 保存设置会写入 `/opt/visionops_v3/edge/robot_gateway/orbbec336l_bridge/orbbec336l_bridge.env` 并重启 `visionops-orbbec336l-bridge.service`。
+- 新增 `edge/robot_gateway/orbbec336l_bridge/`，提供带 `/stream/profiles` 的 Orbbec Bridge 源码、CMakeLists、env 和安装脚本。
+- 当前真实设置应用优先支持 Orbbec Gemini 336L；HP60C 后续再接入。
+
+## M14 Orbbec 设置 API 路径与耗时修正
+
+- Orbbec 336L 设置 API 默认 env 路径已改为 `/opt/visionops_v3/edge/robot_gateway/orbbec336l_bridge/orbbec336l_bridge.env`。
+- Orbbec Bridge install 脚本默认部署到 `/opt/visionops_v3/edge/robot_gateway/orbbec336l_bridge`，二进制安装到 `/opt/visionops_v3/bin`。
+- 保存相机设置时不再生成 `orbbec336l_bridge.env.bak.*`。
+- POST 保存设置时不再重复访问 `/stream/profiles`；前端会把 GET 时已枚举的 `known_profiles` 提交给后端做校验，减少等待时间。
+- 保存 API 返回 `apply_timings_ms`，用于定位 read env、profile 校验、写 env、restart、health 检查等步骤的耗时。

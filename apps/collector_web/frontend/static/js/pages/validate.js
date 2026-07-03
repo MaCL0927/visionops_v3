@@ -355,6 +355,7 @@ export function initValidate() {
   document.getElementById("validate-realtime").addEventListener("click", toggleRealtime);
   document.getElementById("validate-model-scan").addEventListener("click", refreshModelCatalog);
   window.addEventListener("resize", () => currentResult && drawInferenceOverlay(canvas, image, currentResult));
+  window.addEventListener("visionops:settings-saved", () => currentResult && drawInferenceOverlay(canvas, image, currentResult));
   renderEmptySummary("执行检测后显示目标摘要");
   setRealtimeButtonState(false);
   renderCapturePicker();

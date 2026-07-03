@@ -120,17 +120,231 @@
     </main>
 
     <div id="settings-modal" class="modal-mask" aria-hidden="true">
-      <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-        <div class="dialog-head"><div><div class="kicker">系统配置</div><h2 id="settings-title">设置</h2></div><button id="close-settings" class="close-btn" aria-label="关闭设置">×</button></div>
-        <p class="settings-notice">当前为前端临时设置，配置保存接口待接入。保存不会写入 .env 或源 YAML。</p>
-        <div class="settings-groups">
-          <fieldset><legend>Runtime 设置</legend><label>runtime_url<input id="setting-runtime-url" readonly></label></fieldset>
-          <fieldset><legend>Gateway 设置</legend><label>gateway_url<input id="setting-gateway-url" readonly></label></fieldset>
-          <fieldset><legend>Business App 设置</legend><label>business_app_url<input id="setting-business-app-url" readonly></label></fieldset>
-          <fieldset><legend>刷新间隔设置</legend><label>preview_refresh_interval_ms<input id="setting-preview-interval" type="number" min="100" step="100"></label><label>inference_interval_ms<input id="setting-inference-interval" type="number" min="100" step="100"></label><label>snapshot_refresh_interval_ms<input id="setting-snapshot-interval" type="number" min="100" step="100"></label><label>status_refresh_interval_ms<input id="setting-status-interval" type="number" min="100" step="100"></label></fieldset>
-          <fieldset><legend>设备信息设置</legend><label>device_id<input id="setting-device-id" readonly></label></fieldset>
+      <section class="settings-dialog m14-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div class="dialog-head settings-head">
+          <div>
+            <div class="kicker">系统配置 / M14</div>
+            <h2 id="settings-title">设置中心</h2>
+            <p>按现场使用习惯拆分为相机、视觉盒子、算法三个设置页面；相机设置已接入 Orbbec 336L SDK Bridge 设置 API；算法显示开关仍保存到浏览器本地。</p>
+          </div>
+          <button id="close-settings" class="close-btn" aria-label="关闭设置">×</button>
         </div>
-        <div class="dialog-actions"><button id="settings-reset">重置</button><button id="settings-save" class="primary">保存临时设置</button></div>
+
+        <div class="settings-tab-row" role="tablist" aria-label="设置分类">
+          <button class="settings-main-tab active" data-settings-tab="camera-settings-panel" role="tab" aria-selected="true">相机设置</button>
+          <button class="settings-main-tab" data-settings-tab="board-settings-panel" role="tab" aria-selected="false">视觉盒子设置</button>
+          <button class="settings-main-tab" data-settings-tab="algorithm-settings-panel" role="tab" aria-selected="false">算法设置</button>
+        </div>
+
+        <p class="settings-notice">相机设置保存后会写入 Orbbec 336L SDK Bridge env 并重启服务；视觉盒子和算法可视化设置仍以本地保存为主。</p>
+
+        <div class="settings-body">
+          <section id="camera-settings-panel" class="settings-panel active" role="tabpanel">
+            <div class="settings-panel-head">
+              <div>
+                <h3>相机设置</h3>
+                <p>统一管理 SDK Bridge 相机链路。HP60C 与 Orbbec Gemini 336L 都通过 SDK + HTTP Bridge 提供固定快照、MJPEG 与深度图接口。</p>
+              </div>
+              <span class="settings-status-badge">SDK Bridge API</span>
+            </div>
+
+            <div class="settings-section cpp-settings-card">
+              <div class="settings-section-title"><b>相机与画面刷新</b><span>固定服务地址和快照路径由系统服务管理，Web 端不再展示。</span></div>
+              <div class="settings-grid three">
+                <label class="setting-field">相机型号
+                  <select id="setting-camera-model">
+                    <option value="orbbec336l">Orbbec Gemini 336L</option>
+                    <option value="hp60c" disabled>HP60C / HP60CN（后续接入）</option>
+                    <option value="auto">自动 / 当前按 Orbbec 处理</option>
+                  </select>
+                  <small>当前真实应用优先接入 Orbbec Gemini 336L。</small>
+                </label>
+                <label class="setting-field">画面帧率 FPS
+                  <select id="setting-display-fps">
+                    <option value="1">1 FPS</option>
+                    <option value="2">2 FPS</option>
+                    <option value="5">5 FPS</option>
+                    <option value="10">10 FPS</option>
+                    <option value="15">15 FPS</option>
+                    <option value="20">20 FPS</option>
+                    <option value="30">30 FPS</option>
+                  </select>
+                  <small>同时控制预览刷新间隔和快照刷新间隔。</small>
+                </label>
+                <label class="setting-field readonly-setting-field">Bridge 固定接口
+                  <div class="bridge-endpoint-list">
+                    <span>snapshot.jpg</span>
+                    <span>depth.png</span>
+                    <span>stream.mjpeg</span>
+                    <span>health/status</span>
+                  </div>
+                  <small>端口、URL、路径后续由后端读取 systemd/env 展示。</small>
+                </label>
+              </div>
+              <div id="setting-bridge-service-status" class="profile-match-hint warn">等待读取 Bridge 服务状态</div>
+              <div id="setting-bridge-profile-source" class="settings-inline-status warn">等待从 SDK Bridge 枚举 profile</div>
+            </div>
+
+            <div class="settings-section reserved-setting-block">
+              <div class="settings-section-title"><b>RGB / 彩色图 profile</b><span>分辨率和帧率必须成组选择，避免用户随意输入不被相机支持的组合。</span></div>
+              <div class="settings-grid three">
+                <label class="setting-field">RGB 分辨率 / 帧率
+                  <select id="setting-rgb-profile">
+                    <option value="">正在从 SDK Bridge 读取 RGB profile...</option>
+                  </select>
+                  <small>由后端调用 Orbbec Bridge /stream/profiles 动态获取，不在前端写死。</small>
+                </label>
+                <label class="setting-field">JPEG 质量
+                  <select id="setting-camera-jpeg-quality">
+                    <option value="70">70</option>
+                    <option value="80">80</option>
+                    <option value="85">85</option>
+                    <option value="90">90</option>
+                    <option value="95">95</option>
+                    <option value="100">100</option>
+                  </select>
+                </label>
+                <label class="setting-field">RGB 数据优先级
+                  <select id="setting-rgb-source-preference">
+                    <option value="auto">自动</option>
+                    <option value="prefer_mjpeg">优先 MJPEG</option>
+                    <option value="prefer_rgb">优先 RGB</option>
+                    <option value="prefer_yuyv">优先 YUYV</option>
+                  </select>
+                  <small>HP60C SDK Bridge 支持 MJPEG/RGB/YUYV 优先级；Orbbec 通常由 SDK profile 决定。</small>
+                </label>
+              </div>
+            </div>
+
+            <div class="settings-section reserved-setting-block">
+              <div class="settings-section-title"><b>Depth / 深度图 profile</b><span>RGB 与 Depth profile 不匹配时可能导致同步、取帧或深度对齐异常。</span></div>
+              <div class="settings-grid three">
+                <label class="setting-field">Depth 分辨率 / 帧率
+                  <select id="setting-depth-profile">
+                    <option value="">正在从 SDK Bridge 读取 Depth profile...</option>
+                  </select>
+                  <small>由 Orbbec SDK 支持的 Depth profile 枚举生成；保存前会校验 FPS 是否匹配。</small>
+                </label>
+                <label class="setting-field">深度单位
+                  <select id="setting-depth-unit">
+                    <option value="mm">mm</option>
+                    <option value="raw_uint16">raw uint16</option>
+                  </select>
+                </label>
+                <label class="setting-field readonly-setting-field">RGB / Depth 匹配提示
+                  <div id="setting-depth-match-hint" class="profile-match-hint">等待选择 profile</div>
+                  <small>保存时会写入 VISIONOPS_ORBBEC336L_COLOR/DEPTH_WIDTH/HEIGHT 和 FPS。</small>
+                </label>
+              </div>
+            </div>
+
+            <div class="settings-section reserved-setting-block">
+              <div class="settings-section-title"><b>图像方向与设备选择</b><span>来自 HP60C / Orbbec SDK Bridge 当前可配置项。</span></div>
+              <div class="settings-grid three">
+                <label class="setting-field">垂直翻转
+                  <select id="setting-flip-vertical"><option value="false">关闭</option><option value="true">开启</option></select>
+                  <small>HP60C 默认开启；Orbbec 默认关闭。</small>
+                </label>
+                <label class="setting-field">水平翻转
+                  <select id="setting-flip-horizontal"><option value="false">关闭</option><option value="true">开启</option></select>
+                  <small>Orbbec Bridge 支持；HP60C 当前不使用该项。</small>
+                </label>
+                <label class="setting-field">RGB 通道顺序
+                  <select id="setting-rgb-order"><option value="bgr">BGR</option><option value="rgb">RGB</option><option value="auto">自动</option></select>
+                  <small>HP60C rgbImg 默认按 BGR 兼容处理。</small>
+                </label>
+                <label class="setting-field">Orbbec 序列号
+                  <input id="setting-orbbec-serial" placeholder="留空表示使用第一台设备">
+                  <small>对应 VISIONOPS_ORBBEC336L_SERIAL。</small>
+                </label>
+              </div>
+              <div class="settings-inline-status">这些字段保存后会写入 /opt/visionops_v3/edge/robot_gateway/orbbec336l_bridge/orbbec336l_bridge.env，并重启 visionops-orbbec336l-bridge.service。</div>
+            </div>
+          </section>
+
+          <section id="board-settings-panel" class="settings-panel" role="tabpanel">
+            <div class="settings-panel-head">
+              <div>
+                <h3>视觉盒子设置</h3>
+                <p>集中展示边缘端设备身份、服务地址、端口和运行目录。当前多数字段只读，后续接入真实配置接口。</p>
+              </div>
+              <span class="settings-status-badge">边缘端</span>
+            </div>
+
+            <div class="settings-section">
+              <div class="settings-section-title"><b>服务地址</b><span>Collector 代理 Runtime、Gateway 和 Business App。</span></div>
+              <div class="settings-grid three">
+                <label class="setting-field readonly-setting-field">Runtime URL<input id="setting-runtime-url" readonly></label>
+                <label class="setting-field readonly-setting-field">Gateway URL<input id="setting-gateway-url" readonly></label>
+                <label class="setting-field readonly-setting-field">Business App URL<input id="setting-business-app-url" readonly></label>
+                <label class="setting-field readonly-setting-field">Device ID<input id="setting-device-id" readonly></label>
+                <label class="setting-field">状态刷新间隔 ms<input id="setting-status-interval" type="number" min="100" step="100"></label>
+                <label class="setting-field">默认启动模式<select id="setting-default-mode"><option value="factory">工厂模式</option><option value="production">生产模式</option></select></label>
+              </div>
+            </div>
+
+            <div class="settings-section reserved-setting-block">
+              <div class="settings-section-title"><b>运行目录与存储</b><span>仅作为现场配置入口展示，暂不写入系统。</span></div>
+              <div class="settings-grid three">
+                <label class="setting-field">模型目录<input id="setting-models-root" value="/opt/visionops_v3/models"></label>
+                <label class="setting-field">采集数据目录<input id="setting-data-root" value="/opt/visionops_v3/data"></label>
+                <label class="setting-field">日志目录<input id="setting-log-root" value="/opt/visionops_v3/logs"></label>
+                <label class="setting-field">磁盘告警阈值 %<input id="setting-disk-warning" type="number" min="50" max="99" value="85"></label>
+                <label class="setting-field">Runtime 端口<input id="setting-runtime-port" type="number" value="28081"></label>
+                <label class="setting-field">Collector Web 端口<input id="setting-collector-port" type="number" value="18091"></label>
+              </div>
+              <div class="settings-inline-status warn">后续 M15/M16 可把这些字段接入后端设置 API、systemd env 或部署脚本。</div>
+            </div>
+          </section>
+
+          <section id="algorithm-settings-panel" class="settings-panel" role="tabpanel">
+            <div class="settings-panel-head">
+              <div>
+                <h3>算法设置</h3>
+                <p>管理模型验证刷新、预处理后端和前端可视化开关。OBB 外接水平框、旋转框、分割 mask/box 均可在这里调整。</p>
+              </div>
+              <span class="settings-status-badge cpp-implemented-badge">前端已生效</span>
+            </div>
+
+            <div class="settings-section cpp-settings-card">
+              <div class="settings-section-title"><b>推理与预处理</b><span>Runtime 真实参数仍由启动命令决定；这里先保存前端偏好。</span></div>
+              <div class="settings-grid three">
+                <label class="setting-field">自动推理间隔 ms<input id="setting-inference-interval" type="number" min="100" step="100"></label>
+                <label class="setting-field">预处理后端偏好
+                  <select id="setting-preprocess-backend"><option value="auto">auto</option><option value="rga">rga</option><option value="cpu">cpu</option></select>
+                  <small>仅作为显示偏好；Runtime 需启动时指定。</small>
+                </label>
+                <label class="setting-field">模型任务类型偏好
+                  <select id="setting-task-view"><option value="auto">自动识别</option><option value="detection">Detection</option><option value="obb">OBB</option><option value="segmentation">Segmentation</option><option value="classification">Classification</option></select>
+                </label>
+              </div>
+            </div>
+
+            <div class="settings-section implemented-setting-block">
+              <div class="settings-section-title"><b>可视化显示</b><span>保存后立即影响模型验证页 overlay 绘制。</span></div>
+              <div class="settings-grid two visual-settings-grid">
+                <label class="setting-check"><input id="setting-overlay-show-labels" type="checkbox"><span><b>显示标签和置信度</b><em>类别名、score 文本</em></span></label>
+                <label class="setting-check"><input id="setting-overlay-show-centers" type="checkbox"><span><b>显示中心点</b><em>bbox / OBB 中心点</em></span></label>
+                <label class="setting-check"><input id="setting-overlay-show-detection-bbox" type="checkbox"><span><b>Detection 显示水平框</b><em>普通检测任务 bbox_xyxy</em></span></label>
+                <label class="setting-check"><input id="setting-overlay-show-obb-rotated" type="checkbox"><span><b>OBB 显示旋转框</b><em>obb.points 四点连线</em></span></label>
+                <label class="setting-check"><input id="setting-overlay-show-obb-bbox" type="checkbox"><span><b>OBB 显示外接水平框</b><em>关闭后只显示旋转矩形框</em></span></label>
+                <label class="setting-check"><input id="setting-overlay-show-seg-bbox" type="checkbox"><span><b>Seg 显示检测框</b><em>分割结果 bbox_xyxy</em></span></label>
+                <label class="setting-check"><input id="setting-overlay-show-seg-mask" type="checkbox"><span><b>Seg 显示 mask polygon</b><em>当前 Runtime 输出 polygon；真实 mask 栅格化后沿用此开关</em></span></label>
+                <label class="setting-field">Mask 透明度
+                  <input id="setting-overlay-mask-opacity" type="number" min="0" max="1" step="0.05">
+                </label>
+              </div>
+              <div class="settings-inline-status">说明：当前 segmentation 后处理输出的是 bbox polygon 简化 mask；后续实现 proto 栅格化后，Web 端会继续使用同一 mask 开关显示真实分割区域。</div>
+            </div>
+          </section>
+        </div>
+
+        <div class="dialog-actions settings-actions">
+          <span id="settings-save-status" class="settings-footer-note">未保存修改</span>
+          <button id="settings-refresh-profiles">重新读取 Profile</button>
+          <button id="settings-reset">重置</button>
+          <button id="settings-save" class="primary">保存并应用设置</button>
+        </div>
       </section>
     </div>
 
