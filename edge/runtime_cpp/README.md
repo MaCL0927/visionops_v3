@@ -183,6 +183,28 @@ models/
 - `manifest.json` 指向的 `rknn / yaml / labels` 必须都存在
 - 当前不自动识别同目录中的额外 `model2.rknn`
 
+
+## OBB 1280 / 动态输入尺寸兼容
+
+OBB RKNN split-DFL 后处理现在不再写死 640 输入或固定 8400 candidates。
+对 Rockchip YOLOv8-OBB 多输出：
+
+```text
+[1, 64 + nc, H, W] 或 [1, 64 + nc + 1, H, W]
+[1, 1, sum(H*W)]
+```
+
+都会按输出 shape 动态识别。例如 1280 输入常见为：
+
+```text
+[1,67,160,160]
+[1,67,80,80]
+[1,67,40,40]
+[1,1,33600]
+```
+
+其中 `33600 = 160*160 + 80*80 + 40*40`。如果 head 比 `64 + labels_count` 多 1 个辅助通道，后处理会使用配置中的类别通道并忽略额外辅助通道，避免误判为不支持。
+
 ## M13 耗时字段说明
 
 `POST /api/runtime/infer_once` 当前会返回两组耗时信息。

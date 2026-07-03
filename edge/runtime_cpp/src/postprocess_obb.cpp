@@ -190,27 +190,47 @@ std::vector<ObbItem> apply_obb_nms(
   return kept;
 }
 
+int rockchip_obb_head_channels(const RuntimeTensor& tensor, int class_count) {
+  const auto& dims = tensor.info.dimensions;
+  if (dims.size() != 4 || dims[0] != 1 || dims[2] == 0 || dims[3] == 0) return 0;
+  const int channels = static_cast<int>(dims[1]);
+  // Rockchip/Ultralytics YOLOv8-OBB split-DFL head is normally 64 + nc.
+  // Some exported RKNN models keep one auxiliary channel in the head, giving
+  // 64 + nc + 1, while angle is still emitted as a separate [1,1,N] tensor.
+  // Do not tie recognition to a fixed input size or to exactly 64+nc.
+  return channels >= 64 + class_count ? channels : 0;
+}
+
+long long spatial_count_after_batch_channel(const RuntimeTensor& tensor) {
+  const auto& dims = tensor.info.dimensions;
+  if (dims.size() < 3) return 0;
+  long long count = 1;
+  for (std::size_t index = 2; index < dims.size(); ++index) {
+    count *= std::max<std::uint32_t>(1, dims[index]);
+  }
+  return count;
+}
+
 bool is_rockchip_obb_outputs(const std::vector<RuntimeTensor>& outputs, int class_count) {
   if (outputs.size() < 4) return false;
   int head_count = 0;
-  bool has_angle = false;
+  long long head_spatial_total = 0;
+  long long best_angle_count = 0;
   for (const auto& tensor : outputs) {
     const auto& dims = tensor.info.dimensions;
-    if (dims.size() == 4 && dims[0] == 1 && static_cast<int>(dims[1]) == 64 + class_count &&
-        dims[2] > 0 && dims[3] > 0) {
+    const int head_channels = rockchip_obb_head_channels(tensor, class_count);
+    if (head_channels > 0) {
       ++head_count;
+      head_spatial_total += static_cast<long long>(dims[2]) * static_cast<long long>(dims[3]);
+      continue;
     }
     if (dims.size() >= 3 && dims[0] == 1 && dims[1] == 1) {
-      long long count = 1;
-      for (std::size_t index = 2; index < dims.size(); ++index) {
-        count *= std::max<std::uint32_t>(1, dims[index]);
-      }
-      // YOLOv8 640 输入常见为 80*80 + 40*40 + 20*20 = 8400。
-      // 这里不强制写死 8400，避免后续 320/960 输入无法探测。
-      if (count > 0) has_angle = true;
+      best_angle_count = std::max(best_angle_count, spatial_count_after_batch_channel(tensor));
     }
   }
-  return head_count >= 3 && has_angle;
+  // Keep this dynamic: 640 -> 8400, 1280 -> 33600, and other input sizes should
+  // work as long as the angle tensor covers all head grids.
+  return head_count >= 3 && best_angle_count >= head_spatial_total && head_spatial_total > 0;
 }
 
 const RuntimeTensor* find_rockchip_obb_angle_output(const std::vector<RuntimeTensor>& outputs) {
@@ -244,9 +264,7 @@ std::vector<ObbItem> decode_rockchip_obb_outputs(
 
   std::vector<const RuntimeTensor*> heads;
   for (const auto& tensor : outputs) {
-    const auto& dims = tensor.info.dimensions;
-    if (dims.size() == 4 && dims[0] == 1 && static_cast<int>(dims[1]) == 64 + class_count &&
-        dims[2] > 0 && dims[3] > 0) {
+    if (rockchip_obb_head_channels(tensor, class_count) > 0) {
       heads.push_back(&tensor);
     }
   }
@@ -263,16 +281,20 @@ std::vector<ObbItem> decode_rockchip_obb_outputs(
     const int height = static_cast<int>(dims[2]);
     const int width = static_cast<int>(dims[3]);
     const int spatial_size = height * width;
+    const int head_channels = static_cast<int>(dims[1]);
+    const int class_channels_available = std::max(0, head_channels - 64);
+    const int decode_class_count = std::min(class_count, class_channels_available);
     const auto values = tensor_float_data(*head);
-    if (!valid_tensor_data(*head, static_cast<std::size_t>(64 + class_count) * spatial_size) ||
-        values.size() < static_cast<std::size_t>(64 + class_count) * spatial_size) {
+    if (decode_class_count <= 0 ||
+        !valid_tensor_data(*head, static_cast<std::size_t>(head_channels) * spatial_size) ||
+        values.size() < static_cast<std::size_t>(head_channels) * spatial_size) {
       angle_offset += spatial_size;
       continue;
     }
     const float stride_x = letterbox.input_width / static_cast<float>(width);
     const float stride_y = letterbox.input_height / static_cast<float>(height);
     const float stride = (stride_x + stride_y) * 0.5F;
-    const bool class_need_sigmoid = tensor_need_sigmoid_sampled(values, 64, class_count, spatial_size);
+    const bool class_need_sigmoid = tensor_need_sigmoid_sampled(values, 64, decode_class_count, spatial_size);
     const float raw_threshold = class_need_sigmoid
         ? logit_threshold(config.score_threshold)
         : config.score_threshold;
@@ -286,7 +308,7 @@ std::vector<ObbItem> decode_rockchip_obb_outputs(
 
         int best_class = 0;
         float best_raw_score = values[(64 + 0) * spatial_size + index];
-        for (int class_id = 1; class_id < class_count; ++class_id) {
+        for (int class_id = 1; class_id < decode_class_count; ++class_id) {
           const float raw_score = values[(64 + class_id) * spatial_size + index];
           if (raw_score > best_raw_score) {
             best_raw_score = raw_score;

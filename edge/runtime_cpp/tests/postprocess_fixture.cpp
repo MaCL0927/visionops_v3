@@ -62,16 +62,39 @@ int main(int argc, char* argv[]) {
       head[side * 16 + 5] = 20.0F;
     }
     head[64] = 20.0F;
-    std::vector<float> angle(1, 0.5F);
+    std::vector<float> angle(3, 0.5F);
     result = visionops::runtime::postprocess_obb(
         {
             make_tensor({1, 65, 1, 1}, head),
             make_tensor({1, 65, 1, 1}, head),
             make_tensor({1, 65, 1, 1}, head),
-            make_tensor({1, 1, 1}, angle),
+            make_tensor({1, 1, 3}, angle),
         },
         config,
         meta);
+    output_task = "obb";
+  } else if (task == "obb_rockchip_extra_channel") {
+    const visionops::runtime::LetterboxMeta meta1280{1280, 720, 1280, 1280, 1280, 720, 1.0F, 0.0F, 280.0F};
+    const visionops::runtime::PostprocessConfig config2{{"bag", "point"}, 0.5F, 0.45F, 100};
+    std::vector<float> head(67, -20.0F);
+    // 64 个 DFL 通道 + 2 个类别通道 + 1 个额外辅助通道。
+    // 1280 OBB RKNN 常见输出为 [1,67,160,160] + [1,1,33600]。
+    for (int side = 0; side < 4; ++side) {
+      head[side * 16 + 5] = 20.0F;
+    }
+    head[64] = 20.0F;
+    head[65] = -20.0F;
+    head[66] = 0.0F;
+    std::vector<float> angle(3, 0.5F);
+    result = visionops::runtime::postprocess_obb(
+        {
+            make_tensor({1, 67, 1, 1}, head),
+            make_tensor({1, 67, 1, 1}, head),
+            make_tensor({1, 67, 1, 1}, head),
+            make_tensor({1, 1, 3}, angle),
+        },
+        config2,
+        meta1280);
     output_task = "obb";
   } else if (task == "segmentation") {
     result = visionops::runtime::postprocess_segmentation(
