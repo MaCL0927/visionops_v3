@@ -10,7 +10,7 @@
 安装/更新：
 
 ```bash
-cd /opt/visionops_v3/edge/robot_gateway/orbbec336l_bridge
+cd /opt/visionops_v3/edge/camera_bridge/orbbec336l_bridge
 sudo bash install_orbbec336l_bridge_service.sh
 sudo systemctl restart visionops-orbbec336l-bridge.service
 ```

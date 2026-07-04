@@ -31,6 +31,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <opencv2/core.hpp>
@@ -42,6 +43,7 @@
 namespace {
 
 std::atomic<bool> g_running{true};
+std::atomic<int> g_server_fd{-1};
 
 static std::string getenv_str(const char *name, const std::string &fallback) {
     const char *v = std::getenv(name);
@@ -61,6 +63,15 @@ static bool getenv_bool(const char *name, bool fallback) {
     std::string s(v);
     std::transform(s.begin(), s.end(), s.begin(), ::tolower);
     return (s == "1" || s == "true" || s == "yes" || s == "on");
+}
+
+static void prepare_runtime_workdir() {
+    std::string dir = getenv_str("VISIONOPS_ORBBEC336L_RUNTIME_DIR", "/run/visionops-orbbec336l-bridge");
+    if (dir.empty()) return;
+    ::mkdir(dir.c_str(), 0755);
+    if (::chdir(dir.c_str()) != 0) {
+        std::cerr << "[WARN] failed to chdir to runtime dir " << dir << ": " << std::strerror(errno) << std::endl;
+    }
 }
 
 static std::string now_string() {
@@ -203,6 +214,7 @@ public:
 
     bool start_http() {
         server_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        g_server_fd.store(server_fd_);
         if (server_fd_ < 0) {
             std::cerr << "[FATAL] socket failed" << std::endl;
             return false;
@@ -222,6 +234,7 @@ public:
         }
         if (::bind(server_fd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
             std::cerr << "[FATAL] bind failed on port " << http_port_ << ": " << std::strerror(errno) << std::endl;
+            g_server_fd.store(-1);
             return false;
         }
         if (::listen(server_fd_, 16) < 0) {
@@ -240,6 +253,7 @@ public:
             }
             std::thread(&OrbbecBridge::handle_client, this, fd).detach();
         }
+        g_server_fd.store(-1);
         return true;
     }
 
@@ -689,6 +703,10 @@ private:
 
 void signal_handler(int) {
     g_running = false;
+    int fd = g_server_fd.exchange(-1);
+    if (fd >= 0) {
+        ::close(fd);
+    }
 }
 
 } // namespace
@@ -696,6 +714,7 @@ void signal_handler(int) {
 int main() {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
+    prepare_runtime_workdir();
     std::cerr << "[INFO] VisionOps Orbbec Gemini 336L SDK bridge starting" << std::endl;
     OrbbecBridge bridge;
     if (!bridge.start_camera()) {

@@ -5,7 +5,7 @@
 ## Collector Web 新增接口
 
 - `GET /api/settings/sdk_bridge/orbbec336l`
-  - 读取 `/opt/visionops_v3/edge/robot_gateway/orbbec336l_bridge/orbbec336l_bridge.env`
+  - 读取 `/opt/visionops_v3/edge/camera_bridge/orbbec336l_bridge/orbbec336l_bridge.env`
   - 查询 `visionops-orbbec336l-bridge.service` 状态
   - 优先从 Orbbec Bridge 的 `GET /stream/profiles` 动态枚举 SDK 支持的 RGB / Depth profile
   - 如果旧版 Bridge 不支持 `/stream/profiles`，回退显示当前 env 中的 profile
@@ -38,7 +38,7 @@
 新增源码目录：
 
 ```text
-edge/robot_gateway/orbbec336l_bridge/
+edge/camera_bridge/orbbec336l_bridge/
 ```
 
 新增/更新接口：
@@ -50,7 +50,7 @@ edge/robot_gateway/orbbec336l_bridge/
 更新 Bridge：
 
 ```bash
-cd /opt/visionops_v3/edge/robot_gateway/orbbec336l_bridge
+cd /opt/visionops_v3/edge/camera_bridge/orbbec336l_bridge
 sudo bash install_orbbec336l_bridge_service.sh
 sudo systemctl restart visionops-orbbec336l-bridge.service
 curl -s http://127.0.0.1:18182/stream/profiles | python3 -m json.tool
@@ -60,7 +60,7 @@ curl -s http://127.0.0.1:18182/stream/profiles | python3 -m json.tool
 
 Collector Web 要真实应用设置，需要具备：
 
-1. 写入 `/opt/visionops_v3/edge/robot_gateway/orbbec336l_bridge/orbbec336l_bridge.env` 的权限；
+1. 写入 `/opt/visionops_v3/edge/camera_bridge/orbbec336l_bridge/orbbec336l_bridge.env` 的权限；
 2. 执行 `systemctl restart visionops-orbbec336l-bridge.service` 的权限。
 
 如果 Collector 不是 root 运行，需要配置受限 sudo 权限，例如只允许重启这一个 service。

@@ -305,14 +305,14 @@ python3 tools/benchmark_runtime.py \
 - Collector Web 新增 `GET/POST /api/settings/sdk_bridge/orbbec336l`。
 - 相机设置页的 RGB / Depth profile 下拉框改为后端动态加载，不在前端写死。
 - 后端优先从 Orbbec Bridge `GET /stream/profiles` 读取 SDK 实际支持组合。
-- 保存设置会写入 `/opt/visionops_v3/edge/robot_gateway/orbbec336l_bridge/orbbec336l_bridge.env` 并重启 `visionops-orbbec336l-bridge.service`。
-- 新增 `edge/robot_gateway/orbbec336l_bridge/`，提供带 `/stream/profiles` 的 Orbbec Bridge 源码、CMakeLists、env 和安装脚本。
+- 保存设置会写入 `/opt/visionops_v3/edge/camera_bridge/orbbec336l_bridge/orbbec336l_bridge.env` 并重启 `visionops-orbbec336l-bridge.service`。
+- 新增 `edge/camera_bridge/orbbec336l_bridge/`，提供带 `/stream/profiles` 的 Orbbec Bridge 源码、CMakeLists、env 和安装脚本。
 - 当前真实设置应用优先支持 Orbbec Gemini 336L；HP60C 后续再接入。
 
 ## M14 Orbbec 设置 API 路径与耗时修正
 
-- Orbbec 336L 设置 API 默认 env 路径已改为 `/opt/visionops_v3/edge/robot_gateway/orbbec336l_bridge/orbbec336l_bridge.env`。
-- Orbbec Bridge install 脚本默认部署到 `/opt/visionops_v3/edge/robot_gateway/orbbec336l_bridge`，二进制安装到 `/opt/visionops_v3/bin`。
+- Orbbec 336L 设置 API 默认 env 路径已改为 `/opt/visionops_v3/edge/camera_bridge/orbbec336l_bridge/orbbec336l_bridge.env`。
+- Orbbec Bridge install 脚本默认部署到 `/opt/visionops_v3/edge/camera_bridge/orbbec336l_bridge`，二进制安装到 `/opt/visionops_v3/bin`。
 - 保存相机设置时不再生成 `orbbec336l_bridge.env.bak.*`。
 - POST 保存设置时不再重复访问 `/stream/profiles`；前端会把 GET 时已枚举的 `known_profiles` 提交给后端做校验，减少等待时间。
 - 保存 API 返回 `apply_timings_ms`，用于定位 read env、profile 校验、写 env、restart、health 检查等步骤的耗时。

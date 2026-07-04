@@ -283,7 +283,7 @@ function open() {
   const modal = element("settings-modal");
   modal.classList.add("active");
   modal.setAttribute("aria-hidden", "false");
-  setNotice("相机设置已接入 Orbbec 336L SDK Bridge API；保存会写入 v3 Orbbec Bridge env 并重启 visionops-orbbec336l-bridge.service。算法可视化仍保存到浏览器本地。");
+  setNotice("相机设置已接入 Orbbec 336L SDK Bridge API；保存会写入 v3 camera_bridge env。未检测到 env 变更时不会重启服务。");
   loadOrbbecSettings();
 }
 
@@ -333,11 +333,16 @@ async function saveSettings() {
       updateDepthMatchHint();
       const timings = result.apply_timings_ms || {};
       const totalMs = timings.total_apply_ms != null ? `，总耗时 ${timings.total_apply_ms}ms` : "";
-      showSaveStatus(`已写入 v3 Orbbec Bridge env 并重启服务${totalMs}`, "ok");
-      const restartMs = timings.restart_service_ms != null ? `restart=${timings.restart_service_ms}ms` : "restart=?";
-      const healthMs = timings.wait_health_ms != null ? `health=${timings.wait_health_ms}ms` : "health=?";
-      const profileMs = timings.profile_validation_ms != null ? `profile=${timings.profile_validation_ms}ms` : "profile=?";
-      setNotice(`设置已真实应用到 Orbbec 336L SDK Bridge；如果画面短暂中断，这是服务重启导致的正常现象。耗时：${profileMs}, ${restartMs}, ${healthMs}。`, "ok");
+      if (result.changed === false || result.skipped_restart) {
+        showSaveStatus(`设置未变化，已跳过写入和服务重启${totalMs}`, "ok");
+        setNotice("设置未变化：env 内容与当前界面一致，已跳过重启和健康检查。", "ok");
+      } else {
+        showSaveStatus(`已写入 v3 camera_bridge env 并重启服务${totalMs}`, "ok");
+        const restartMs = timings.restart_service_ms != null ? `restart=${timings.restart_service_ms}ms` : "restart=?";
+        const healthMs = timings.wait_health_ms != null ? `health=${timings.wait_health_ms}ms` : "health=?";
+        const profileMs = timings.profile_validation_ms != null ? `profile=${timings.profile_validation_ms}ms` : "profile=?";
+        setNotice(`设置已真实应用到 Orbbec 336L SDK Bridge；如果画面短暂中断，这是服务重启导致的正常现象。耗时：${profileMs}, ${restartMs}, ${healthMs}。`, "ok");
+      }
     } catch (error) {
       const detail = error instanceof ApiError && error.body?.error?.message ? error.body.error.message : error.message;
       showSaveStatus(`保存失败：${detail}`, "error");

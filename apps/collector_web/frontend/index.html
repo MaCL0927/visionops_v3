@@ -125,7 +125,7 @@
           <div>
             <div class="kicker">系统配置 / M14</div>
             <h2 id="settings-title">设置中心</h2>
-            <p>按现场使用习惯拆分为相机、视觉盒子、算法三个设置页面；相机设置已接入 Orbbec 336L SDK Bridge 设置 API；算法显示开关仍保存到浏览器本地。</p>
+            <p>按现场使用习惯拆分为相机、视觉盒子、算法三个设置页面；相机设置已接入 Orbbec 336L SDK Bridge 设置 API；未检测到变更时不会重启服务。</p>
           </div>
           <button id="close-settings" class="close-btn" aria-label="关闭设置">×</button>
         </div>
@@ -136,20 +136,20 @@
           <button class="settings-main-tab" data-settings-tab="algorithm-settings-panel" role="tab" aria-selected="false">算法设置</button>
         </div>
 
-        <p class="settings-notice">相机设置保存后会写入 Orbbec 336L SDK Bridge env 并重启服务；视觉盒子和算法可视化设置仍以本地保存为主。</p>
+        <p class="settings-notice">相机设置保存后会写入 v3 camera_bridge env；仅配置变化时才重启服务。</p>
 
         <div class="settings-body">
           <section id="camera-settings-panel" class="settings-panel active" role="tabpanel">
             <div class="settings-panel-head">
               <div>
                 <h3>相机设置</h3>
-                <p>统一管理 SDK Bridge 相机链路。HP60C 与 Orbbec Gemini 336L 都通过 SDK + HTTP Bridge 提供固定快照、MJPEG 与深度图接口。</p>
+                <p>统一管理 SDK Bridge 相机链路，当前优先接入 Orbbec Gemini 336L。</p>
               </div>
               <span class="settings-status-badge">SDK Bridge API</span>
             </div>
 
             <div class="settings-section cpp-settings-card">
-              <div class="settings-section-title"><b>相机与画面刷新</b><span>固定服务地址和快照路径由系统服务管理，Web 端不再展示。</span></div>
+              <div class="settings-section-title"><b>相机与画面刷新</b></div>
               <div class="settings-grid three">
                 <label class="setting-field">相机型号
                   <select id="setting-camera-model">
@@ -157,7 +157,6 @@
                     <option value="hp60c" disabled>HP60C / HP60CN（后续接入）</option>
                     <option value="auto">自动 / 当前按 Orbbec 处理</option>
                   </select>
-                  <small>当前真实应用优先接入 Orbbec Gemini 336L。</small>
                 </label>
                 <label class="setting-field">画面帧率 FPS
                   <select id="setting-display-fps">
@@ -169,7 +168,6 @@
                     <option value="20">20 FPS</option>
                     <option value="30">30 FPS</option>
                   </select>
-                  <small>同时控制预览刷新间隔和快照刷新间隔。</small>
                 </label>
                 <label class="setting-field readonly-setting-field">Bridge 固定接口
                   <div class="bridge-endpoint-list">
@@ -178,7 +176,6 @@
                     <span>stream.mjpeg</span>
                     <span>health/status</span>
                   </div>
-                  <small>端口、URL、路径后续由后端读取 systemd/env 展示。</small>
                 </label>
               </div>
               <div id="setting-bridge-service-status" class="profile-match-hint warn">等待读取 Bridge 服务状态</div>
@@ -186,13 +183,12 @@
             </div>
 
             <div class="settings-section reserved-setting-block">
-              <div class="settings-section-title"><b>RGB / 彩色图 profile</b><span>分辨率和帧率必须成组选择，避免用户随意输入不被相机支持的组合。</span></div>
+              <div class="settings-section-title"><b>RGB / 彩色图 profile</b></div>
               <div class="settings-grid three">
                 <label class="setting-field">RGB 分辨率 / 帧率
                   <select id="setting-rgb-profile">
                     <option value="">正在从 SDK Bridge 读取 RGB profile...</option>
                   </select>
-                  <small>由后端调用 Orbbec Bridge /stream/profiles 动态获取，不在前端写死。</small>
                 </label>
                 <label class="setting-field">JPEG 质量
                   <select id="setting-camera-jpeg-quality">
@@ -211,19 +207,17 @@
                     <option value="prefer_rgb">优先 RGB</option>
                     <option value="prefer_yuyv">优先 YUYV</option>
                   </select>
-                  <small>HP60C SDK Bridge 支持 MJPEG/RGB/YUYV 优先级；Orbbec 通常由 SDK profile 决定。</small>
                 </label>
               </div>
             </div>
 
             <div class="settings-section reserved-setting-block">
-              <div class="settings-section-title"><b>Depth / 深度图 profile</b><span>RGB 与 Depth profile 不匹配时可能导致同步、取帧或深度对齐异常。</span></div>
+              <div class="settings-section-title"><b>Depth / 深度图 profile</b></div>
               <div class="settings-grid three">
                 <label class="setting-field">Depth 分辨率 / 帧率
                   <select id="setting-depth-profile">
                     <option value="">正在从 SDK Bridge 读取 Depth profile...</option>
                   </select>
-                  <small>由 Orbbec SDK 支持的 Depth profile 枚举生成；保存前会校验 FPS 是否匹配。</small>
                 </label>
                 <label class="setting-field">深度单位
                   <select id="setting-depth-unit">
@@ -233,32 +227,27 @@
                 </label>
                 <label class="setting-field readonly-setting-field">RGB / Depth 匹配提示
                   <div id="setting-depth-match-hint" class="profile-match-hint">等待选择 profile</div>
-                  <small>保存时会写入 VISIONOPS_ORBBEC336L_COLOR/DEPTH_WIDTH/HEIGHT 和 FPS。</small>
                 </label>
               </div>
             </div>
 
             <div class="settings-section reserved-setting-block">
-              <div class="settings-section-title"><b>图像方向与设备选择</b><span>来自 HP60C / Orbbec SDK Bridge 当前可配置项。</span></div>
+              <div class="settings-section-title"><b>图像方向与设备选择</b></div>
               <div class="settings-grid three">
                 <label class="setting-field">垂直翻转
                   <select id="setting-flip-vertical"><option value="false">关闭</option><option value="true">开启</option></select>
-                  <small>HP60C 默认开启；Orbbec 默认关闭。</small>
                 </label>
                 <label class="setting-field">水平翻转
                   <select id="setting-flip-horizontal"><option value="false">关闭</option><option value="true">开启</option></select>
-                  <small>Orbbec Bridge 支持；HP60C 当前不使用该项。</small>
                 </label>
                 <label class="setting-field">RGB 通道顺序
                   <select id="setting-rgb-order"><option value="bgr">BGR</option><option value="rgb">RGB</option><option value="auto">自动</option></select>
-                  <small>HP60C rgbImg 默认按 BGR 兼容处理。</small>
                 </label>
                 <label class="setting-field">Orbbec 序列号
                   <input id="setting-orbbec-serial" placeholder="留空表示使用第一台设备">
-                  <small>对应 VISIONOPS_ORBBEC336L_SERIAL。</small>
                 </label>
               </div>
-              <div class="settings-inline-status">这些字段保存后会写入 /opt/visionops_v3/edge/robot_gateway/orbbec336l_bridge/orbbec336l_bridge.env，并重启 visionops-orbbec336l-bridge.service。</div>
+              <div class="settings-inline-status">这些字段变化时会写入 /opt/visionops_v3/edge/camera_bridge/orbbec336l_bridge/orbbec336l_bridge.env，并重启 visionops-orbbec336l-bridge.service。</div>
             </div>
           </section>
 

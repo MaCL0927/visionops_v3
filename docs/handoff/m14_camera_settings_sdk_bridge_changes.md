@@ -42,5 +42,5 @@ Orbbec 336L SDK Bridge 当前支持：
 本次仍然是前端临时设置，不写入 `/opt/visionops/edge/robot_gateway/*_bridge/*.env`，也不重启 systemd 服务。后续接入真实设置 API 后，可把这些字段映射到对应 env 并重启：
 
 - `/opt/visionops_v3/edge/robot_gateway/hp60c_sdk_bridge/hp60c_sdk_bridge.env`
-- `/opt/visionops_v3/edge/robot_gateway/orbbec336l_bridge/orbbec336l_bridge.env`
+- `/opt/visionops_v3/edge/camera_bridge/orbbec336l_bridge/orbbec336l_bridge.env`
 

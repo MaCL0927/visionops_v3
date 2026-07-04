@@ -3,7 +3,7 @@ set -euo pipefail
 
 SERVICE_NAME="visionops-orbbec336l-bridge.service"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DST_DIR="/opt/visionops_v3/edge/robot_gateway/orbbec336l_bridge"
+DST_DIR="/opt/visionops_v3/edge/camera_bridge/orbbec336l_bridge"
 BIN_DIR="/opt/visionops_v3/bin"
 ENV_FILE="$DST_DIR/orbbec336l_bridge.env"
 BIN_PATH="$BIN_DIR/visionops_orbbec336l_bridge"
@@ -18,7 +18,7 @@ log "DST_DIR=$DST_DIR"
 
 sudo mkdir -p "$DST_DIR" "$BIN_DIR"
 
-# Only copy files into this directory. Do not remove robot_gateway or other bridge folders.
+# Only copy files into this camera_bridge directory. Do not remove other bridge folders.
 # If installer is already running from DST_DIR, skip self-copy to avoid:
 # cp: source and destination are the same file
 if [[ "$SRC_DIR" != "$DST_DIR" ]]; then
@@ -131,16 +131,22 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=$DST_DIR
+RuntimeDirectory=visionops-orbbec336l-bridge
+WorkingDirectory=/run/visionops-orbbec336l-bridge
 EnvironmentFile=$ENV_FILE
 Environment=LD_LIBRARY_PATH=$LIB_DIR
+Environment=VISIONOPS_ORBBEC336L_RUNTIME_DIR=/run/visionops-orbbec336l-bridge
+Environment=OB_ENABLE_LOG_TO_FILE=0
+Environment=OB_LOG_TO_FILE=0
+ExecStartPre=/bin/rm -rf $DST_DIR/Log
 ExecStart=$BIN_PATH
 Restart=always
-RestartSec=3
+RestartSec=1
 StartLimitIntervalSec=60
 StartLimitBurst=10
 TimeoutStartSec=30
-TimeoutStopSec=10
+TimeoutStopSec=3
+KillSignal=SIGTERM
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=visionops-orbbec336l-bridge

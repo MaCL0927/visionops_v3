@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import time
@@ -14,7 +13,7 @@ from typing import Any
 from urllib.error import URLError, HTTPError
 from urllib.request import urlopen
 
-ORBBEC_ENV_DEFAULT = Path("/opt/visionops_v3/edge/robot_gateway/orbbec336l_bridge/orbbec336l_bridge.env")
+ORBBEC_ENV_DEFAULT = Path("/opt/visionops_v3/edge/camera_bridge/orbbec336l_bridge/orbbec336l_bridge.env")
 ORBBEC_SERVICE_NAME_DEFAULT = "visionops-orbbec336l-bridge.service"
 PROFILE_RE = re.compile(r"^orbbec:(\d+)x(\d+)@(\d+)$")
 
@@ -73,7 +72,7 @@ def write_env_file(path: Path, existing_lines: list[str], updates: dict[str, str
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             f.write(body)
         try:
-            shutil.copymode(path, tmp_name)
+            os.chmod(tmp_name, path.stat().st_mode & 0o777)
         except OSError:
             os.chmod(tmp_name, 0o644)
         os.replace(tmp_name, path)
@@ -310,6 +309,39 @@ def validate_profile_against(profile: dict[str, int], candidates: list[dict[str,
     return any(item.get("id") == wanted for item in candidates)
 
 
+BOOL_ENV_KEYS = {
+    "VISIONOPS_ORBBEC336L_FLIP_VERTICAL",
+    "VISIONOPS_ORBBEC336L_FLIP_HORIZONTAL",
+}
+INT_ENV_KEYS = {
+    "VISIONOPS_ORBBEC336L_COLOR_WIDTH",
+    "VISIONOPS_ORBBEC336L_COLOR_HEIGHT",
+    "VISIONOPS_ORBBEC336L_DEPTH_WIDTH",
+    "VISIONOPS_ORBBEC336L_DEPTH_HEIGHT",
+    "VISIONOPS_ORBBEC336L_FPS",
+    "VISIONOPS_ORBBEC336L_JPEG_QUALITY",
+    "VISIONOPS_ORBBEC336L_MJPEG_FPS",
+}
+
+
+def env_value_matches(values: dict[str, str], key: str, wanted: str) -> bool:
+    if key not in values:
+        return False
+    current = values.get(key, "")
+    if key in BOOL_ENV_KEYS:
+        return parse_bool(current) == parse_bool(wanted)
+    if key in INT_ENV_KEYS:
+        try:
+            return int(str(current).strip()) == int(str(wanted).strip())
+        except (TypeError, ValueError):
+            return str(current).strip() == str(wanted).strip()
+    return str(current).strip() == str(wanted).strip()
+
+
+def changed_env_keys(values: dict[str, str], updates: dict[str, str]) -> list[str]:
+    return [key for key, wanted in updates.items() if not env_value_matches(values, key, wanted)]
+
+
 def profiles_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Use profiles previously enumerated by GET /settings to avoid re-enumerating SDK during POST."""
     profiles = payload.get("known_profiles")
@@ -400,11 +432,41 @@ def apply_orbbec_settings(payload: dict[str, Any]) -> dict[str, Any]:
         "VISIONOPS_ORBBEC336L_SERIAL": str(payload.get("orbbec_serial") or "").strip(),
     }
 
+    changed_keys = changed_env_keys(values, updates)
+    merged_values = {**values, **updates}
+
+    if not changed_keys:
+        timings["write_env_ms"] = 0.0
+        timings["restart_service_ms"] = 0.0
+        timings["wait_health_ms"] = 0.0
+        step_started = time.monotonic()
+        service = systemd_status()
+        mark("systemd_status_ms", step_started)
+        timings["total_apply_ms"] = round((time.monotonic() - apply_started) * 1000, 3)
+        return {
+            "schema_version": "1.0",
+            "message_type": "sdk_bridge_settings_apply_result",
+            "status": "ok",
+            "camera_model": "orbbec336l",
+            "env_path": str(path),
+            "backup_path": None,
+            "backup_enabled": False,
+            "changed": False,
+            "changed_keys": [],
+            "skipped_restart": True,
+            "applied": updates,
+            "restart": {"ok": True, "skipped": True, "reason": "env unchanged"},
+            "health": {"ok": True, "skipped": True, "reason": "env unchanged"},
+            "service": service,
+            "settings": current_settings(merged_values),
+            "profiles": profiles,
+            "profile_refresh_skipped_after_apply": True,
+            "apply_timings_ms": timings,
+        }
+
     step_started = time.monotonic()
     write_env_file(path, lines, updates)
     mark("write_env_ms", step_started)
-
-    merged_values = {**values, **updates}
 
     step_started = time.monotonic()
     restart = restart_orbbec_service()
@@ -428,6 +490,9 @@ def apply_orbbec_settings(payload: dict[str, Any]) -> dict[str, Any]:
         "env_path": str(path),
         "backup_path": None,
         "backup_enabled": False,
+        "changed": True,
+        "changed_keys": changed_keys,
+        "skipped_restart": False,
         "applied": updates,
         "restart": restart,
         "health": health,
