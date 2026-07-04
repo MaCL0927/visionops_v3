@@ -60,6 +60,8 @@ class RknnRunner {
   virtual std::string last_error() const = 0;
   virtual std::uint32_t input_count() const = 0;
   virtual std::uint32_t output_count() const = 0;
+  virtual std::vector<TensorInfo> input_infos() const = 0;
+  virtual std::vector<TensorInfo> output_infos() const = 0;
 };
 
 std::unique_ptr<RknnRunner> create_rknn_runner(

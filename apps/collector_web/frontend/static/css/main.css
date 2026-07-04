@@ -199,3 +199,16 @@ pre { margin:0; max-height:390px; overflow:auto; padding:14px; border-radius:12p
 .settings-footer-note[data-kind="warn"] { color:#9a3412; }
 .settings-footer-note[data-kind="error"] { color:#b91c1c; }
 .settings-footer-note[data-kind="loading"] { color:#075985; }
+/* M15.1 算法设置：按任务类型分区启用 */
+.settings-grid.one { grid-template-columns:1fr; }
+.algorithm-common-card .setting-field,.algorithm-common-card .setting-check { background:rgba(37,99,235,.08); }
+.algorithm-task-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; align-items:start; }
+.algorithm-task-card { min-height:0; }
+.algorithm-task-card .settings-section-title { align-items:center; }
+.algorithm-task-card .settings-section-title b { font-size:22px; }
+.algorithm-task-card .settings-section-title span { padding:4px 8px; border-radius:999px; background:#eff6ff; color:#1d4ed8; }
+.algorithm-task-card.disabled { opacity:.48; filter:grayscale(.2); background:#f8fafc; }
+.algorithm-task-card.disabled .setting-field,.algorithm-task-card.disabled .setting-check { background:#eef2f7!important; cursor:not-allowed; }
+.algorithm-task-card.disabled input,.algorithm-task-card.disabled select { color:#94a3b8; background:#f1f5f9; cursor:not-allowed; }
+@media(max-width:1400px){ .algorithm-task-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:760px){ .algorithm-task-grid { grid-template-columns:1fr; } }

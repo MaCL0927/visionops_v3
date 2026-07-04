@@ -106,6 +106,8 @@ bool load_model_config_yaml(
   std::string line;
   int line_number = 0;
   bool collecting_class_names = false;
+  bool collecting_input_size = false;
+  std::vector<std::string> pending_input_size;
   while (std::getline(input, line)) {
     ++line_number;
     const auto comment = line.find('#');
@@ -115,6 +117,43 @@ bool load_model_config_yaml(
     line = trim(std::move(line));
     if (line.empty()) {
       continue;
+    }
+
+    if (collecting_input_size) {
+      if (starts_with_dash_item(line)) {
+        std::string item = unquote(trim(line.substr(1)));
+        if (!item.empty()) pending_input_size.push_back(std::move(item));
+        if (pending_input_size.size() >= 2) {
+          try {
+            config.input_width = std::stoi(pending_input_size[0]);
+            config.input_height = std::stoi(pending_input_size[1]);
+          } catch (const std::exception&) {
+            error_message = "模型配置 input_size 非法，行 " + std::to_string(line_number);
+            return false;
+          }
+          if (config.input_width <= 0 || config.input_height <= 0) {
+            error_message = "模型配置 input_size 非法，行 " + std::to_string(line_number);
+            return false;
+          }
+        }
+        continue;
+      }
+      if (pending_input_size.size() == 1) {
+        try {
+          const int size = std::stoi(pending_input_size[0]);
+          if (size <= 0) {
+            error_message = "模型配置 input_size 非法，行 " + std::to_string(line_number);
+            return false;
+          }
+          config.input_width = size;
+          config.input_height = size;
+        } catch (const std::exception&) {
+          error_message = "模型配置 input_size 非法，行 " + std::to_string(line_number);
+          return false;
+        }
+      }
+      collecting_input_size = false;
+      pending_input_size.clear();
     }
 
     if (collecting_class_names) {
@@ -146,7 +185,10 @@ bool load_model_config_yaml(
       } else if (key == "target_platform" || key == "platform") {
         config.target_platform = unquote(value);
       } else if (is_input_size_key(key)) {
-        if (!parse_input_size(value, config.input_width, config.input_height)) {
+        if (value.empty()) {
+          collecting_input_size = true;
+          pending_input_size.clear();
+        } else if (!parse_input_size(value, config.input_width, config.input_height)) {
           error_message = "模型配置 input_size 非法，行 " + std::to_string(line_number);
           return false;
         }
@@ -167,6 +209,34 @@ bool load_model_config_yaml(
     } catch (const std::exception&) {
       error_message = "模型配置字段解析失败，行 " + std::to_string(line_number);
       return false;
+    }
+  }
+  if (collecting_input_size) {
+    if (pending_input_size.size() == 1) {
+      try {
+        const int size = std::stoi(pending_input_size[0]);
+        if (size <= 0) {
+          error_message = "模型配置 input_size 非法";
+          return false;
+        }
+        config.input_width = size;
+        config.input_height = size;
+      } catch (const std::exception&) {
+        error_message = "模型配置 input_size 非法";
+        return false;
+      }
+    } else if (pending_input_size.size() >= 2) {
+      try {
+        config.input_width = std::stoi(pending_input_size[0]);
+        config.input_height = std::stoi(pending_input_size[1]);
+      } catch (const std::exception&) {
+        error_message = "模型配置 input_size 非法";
+        return false;
+      }
+      if (config.input_width <= 0 || config.input_height <= 0) {
+        error_message = "模型配置 input_size 非法";
+        return false;
+      }
     }
   }
   return true;

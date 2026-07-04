@@ -311,3 +311,16 @@ python3 tools/benchmark_runtime.py \
 - 保存相机设置时不再生成 `orbbec336l_bridge.env.bak.*`。
 - POST 保存设置时不再重复访问 `/stream/profiles`；前端会把 GET 时已枚举的 `known_profiles` 提交给后端做校验，减少等待时间。
 - 保存 API 返回 `apply_timings_ms`，用于定位 read env、profile 校验、写 env、restart、health 检查等步骤的耗时。
+
+## M15.1 OBB input_size mismatch fix
+
+- 修复 M15 模型包简化后旧 OBB 模型 `model.yaml` input_size 与 RKNN 实际输入尺寸不一致时，`rknn_inputs_set -5` 的问题。
+- Runtime 在 RKNN 加载后会读取 input tensor 维度，并在不一致时使用 RKNN 真实输入尺寸执行预处理。
+- 建议仍然将模型包 `model.yaml` 的 `input_size` 修正为和 `model.rknn` 一致，避免 Web 模型卡片显示误导。
+
+## M15.2 更新：Segmentation proto mask polygon
+
+- segmentation 后处理从 bbox polygon 升级为 `mask_coefficients × proto` 生成二值 mask，再转为较细致 polygon 输出。
+- Rockchip YOLOv8-seg 13 输出和 fused segmentation 输出均保留支持。
+- 若 proto mask 为空，会回退 bbox polygon，`mask.source` 标记为 `bbox_fallback`；正常真实 mask 标记为 `proto`。
+- 顺手修复 C++ Runtime 对 `input_size:` 缩进 list 写法的解析。

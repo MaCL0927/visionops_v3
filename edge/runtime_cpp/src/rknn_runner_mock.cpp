@@ -25,6 +25,18 @@ class RknnRunnerMock final : public RknnRunner {
 
   bool load_model(const std::string&, const RunnerModelConfig& config) override {
     task_type_ = config.task_type;
+    input_infos_.clear();
+    TensorInfo input_info;
+    input_info.name = "input";
+    input_info.data_type = "uint8";
+    input_info.layout = "NHWC";
+    input_info.dimensions = {1u,
+                             static_cast<std::uint32_t>(config.input_height),
+                             static_cast<std::uint32_t>(config.input_width),
+                             3u};
+    input_info.byte_size = static_cast<std::size_t>(config.input_width) *
+                           static_cast<std::size_t>(config.input_height) * 3u;
+    input_infos_.push_back(std::move(input_info));
     loaded_ = true;
     return true;
   }
@@ -49,10 +61,13 @@ class RknnRunnerMock final : public RknnRunner {
   std::string last_error() const override { return {}; }
   std::uint32_t input_count() const override { return 1; }
   std::uint32_t output_count() const override { return 1; }
+  std::vector<TensorInfo> input_infos() const override { return input_infos_; }
+  std::vector<TensorInfo> output_infos() const override { return {}; }
 
  private:
   std::string task_type_;
   bool loaded_{false};
+  std::vector<TensorInfo> input_infos_;
 };
 
 class RknnRunnerUnavailable final : public RknnRunner {
@@ -82,6 +97,8 @@ class RknnRunnerUnavailable final : public RknnRunner {
   std::string last_error() const override { return error_; }
   std::uint32_t input_count() const override { return 0; }
   std::uint32_t output_count() const override { return 0; }
+  std::vector<TensorInfo> input_infos() const override { return {}; }
+  std::vector<TensorInfo> output_infos() const override { return {}; }
 
  private:
   std::string task_type_;

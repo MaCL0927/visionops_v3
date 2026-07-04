@@ -107,6 +107,34 @@ void replace_token(std::string& target, const std::string& token, const std::str
   }
 }
 
+
+std::optional<std::pair<int, int>> infer_input_size_from_tensor_infos(
+    const std::vector<TensorInfo>& input_infos) {
+  if (input_infos.empty()) {
+    return std::nullopt;
+  }
+  const auto& dims = input_infos.front().dimensions;
+  if (dims.size() == 4) {
+    // RKNN 常见两类输入维度：NHWC=[1,H,W,3]，NCHW=[1,3,H,W]。
+    if ((dims[3] == 3 || dims[3] == 1) && dims[1] > 0 && dims[2] > 0) {
+      return std::make_pair(static_cast<int>(dims[2]), static_cast<int>(dims[1]));
+    }
+    if ((dims[1] == 3 || dims[1] == 1) && dims[2] > 0 && dims[3] > 0) {
+      return std::make_pair(static_cast<int>(dims[3]), static_cast<int>(dims[2]));
+    }
+  }
+  if (dims.size() == 3) {
+    // HWC=[H,W,C] 或 CHW=[C,H,W]，用于少数无 batch 维模型。
+    if ((dims[2] == 3 || dims[2] == 1) && dims[0] > 0 && dims[1] > 0) {
+      return std::make_pair(static_cast<int>(dims[1]), static_cast<int>(dims[0]));
+    }
+    if ((dims[0] == 3 || dims[0] == 1) && dims[1] > 0 && dims[2] > 0) {
+      return std::make_pair(static_cast<int>(dims[2]), static_cast<int>(dims[1]));
+    }
+  }
+  return std::nullopt;
+}
+
 PreparedModelRuntime prepare_model_runtime(const AppConfig& config) {
   PreparedModelRuntime prepared;
   prepared.model_info = load_model_package(config);
@@ -135,6 +163,17 @@ PreparedModelRuntime prepare_model_runtime(const AppConfig& config) {
       config.dump_rknn_io};
   if (!prepared.runner->load_model(prepared.model_info.rknn_path, runner_config)) {
     append_error(prepared.model_info.model_load_error, prepared.runner->last_error());
+  } else {
+    const auto actual_input_size = infer_input_size_from_tensor_infos(prepared.runner->input_infos());
+    if (actual_input_size.has_value() &&
+        actual_input_size->first > 0 && actual_input_size->second > 0 &&
+        (prepared.model_info.input_width != actual_input_size->first ||
+         prepared.model_info.input_height != actual_input_size->second)) {
+      // model.yaml 是模型包元信息来源，但 RKNN 输入 tensor 尺寸是实际推理的硬约束。
+      // 如果 YAML 里遗留了错误 input_size，优先使用 RKNN 真实输入尺寸，避免 rknn_inputs_set -5。
+      prepared.model_info.input_width = actual_input_size->first;
+      prepared.model_info.input_height = actual_input_size->second;
+    }
   }
   return prepared;
 }

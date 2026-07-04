@@ -12,13 +12,14 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from .config_loader import CollectorConfig, load_config
 from .model_catalog import find_scanned_model, scan_model_catalog
 from .response_utils import error_document, send_bytes, send_json, timestamp_ms
 from .runtime_client import RuntimeClient, RuntimeResponse, RuntimeUnavailable
 from .sdk_bridge_settings import apply_orbbec_settings, get_orbbec_settings_payload
+from .algorithm_settings import apply_algorithm_settings, get_algorithm_settings_payload
 
 
 FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
@@ -91,6 +92,9 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/settings/sdk_bridge/orbbec336l":
             self._send_orbbec_settings()
             return
+        if path == "/api/settings/algorithm":
+            self._send_algorithm_settings()
+            return
         if path in DOWNSTREAM_PATHS:
             name, target, status_endpoint = DOWNSTREAM_PATHS[path]
             self._proxy_downstream(name, target, status_endpoint)
@@ -113,6 +117,9 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/settings/sdk_bridge/orbbec336l":
             self._apply_orbbec_settings()
+            return
+        if path == "/api/settings/algorithm":
+            self._apply_algorithm_settings()
             return
         if path in PROXY_PATHS:
             self._proxy_runtime(path, expected_method=PROXY_PATHS[path])
@@ -172,6 +179,100 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             "status_refresh_interval_ms": config.status_refresh_interval_ms,
         })
 
+
+
+    def _current_runtime_model_for_settings(self) -> dict[str, Any] | None:
+        try:
+            response = self.server.runtime_client.request("GET", "/api/runtime/status")
+            payload = self._decode_runtime_json(response)
+        except (RuntimeUnavailable, ValueError, json.JSONDecodeError):
+            return None
+        loaded = payload.get("loaded_model")
+        return loaded if isinstance(loaded, dict) else None
+
+    def _send_algorithm_settings(self) -> None:
+        query = parse_qs(urlsplit(self.path).query)
+        model_id = (query.get("model_id") or [""])[0].strip() or None
+        package_dir = (query.get("package_dir") or [""])[0].strip() or None
+        try:
+            payload = get_algorithm_settings_payload(
+                Path(self.server.config.models_root),
+                current_model=self._current_runtime_model_for_settings(),
+                model_id=model_id,
+                package_dir=package_dir,
+            )
+        except Exception as error:  # noqa: BLE001 - expose local settings diagnostics
+            self._send_collector_error(
+                500,
+                "ALGORITHM_SETTINGS_READ_FAILED",
+                "读取算法设置失败",
+                True,
+                detail=str(error),
+            )
+            return
+        send_json(self, 200, payload)
+
+    def _apply_algorithm_settings(self) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        current_model = self._current_runtime_model_for_settings()
+        try:
+            result = apply_algorithm_settings(
+                Path(self.server.config.models_root),
+                payload,
+                current_model=current_model,
+            )
+        except ValueError as error:
+            self._send_collector_error(
+                400,
+                "ALGORITHM_SETTINGS_INVALID",
+                str(error),
+                True,
+            )
+            return
+        except PermissionError as error:
+            self._send_collector_error(
+                403,
+                "ALGORITHM_SETTINGS_PERMISSION_DENIED",
+                "写入模型 model.yaml 权限不足",
+                True,
+                detail=str(error),
+            )
+            return
+        except Exception as error:  # noqa: BLE001 - expose local apply diagnostics
+            self._send_collector_error(
+                500,
+                "ALGORITHM_SETTINGS_APPLY_FAILED",
+                "应用算法设置失败",
+                True,
+                detail=str(error),
+            )
+            return
+
+        if result.get("reload_runtime") and payload.get("reload_runtime", True):
+            selected = result.get("selected_model") or {}
+            body = json.dumps(
+                {"model_dir": selected.get("package_path")},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            try:
+                response = self.server.runtime_client.request("POST", "/api/runtime/switch_model", body=body)
+                result["runtime_reload"] = {
+                    "attempted": True,
+                    "ok": response.status_code == 200,
+                    "status_code": response.status_code,
+                }
+            except RuntimeUnavailable as error:
+                result["runtime_reload"] = {
+                    "attempted": True,
+                    "ok": False,
+                    "error": str(error),
+                }
+        else:
+            result["runtime_reload"] = {"attempted": False, "ok": None}
+        send_json(self, 200, result)
 
     def _send_orbbec_settings(self) -> None:
         try:

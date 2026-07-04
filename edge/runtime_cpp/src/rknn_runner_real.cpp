@@ -213,6 +213,8 @@ class RknnRunnerReal final : public RknnRunner {
   std::string last_error() const override { return last_error_; }
   std::uint32_t input_count() const override { return input_count_; }
   std::uint32_t output_count() const override { return output_count_; }
+  std::vector<TensorInfo> input_infos() const override { return input_infos_; }
+  std::vector<TensorInfo> output_infos() const override { return output_infos_; }
 
  private:
   void release() {

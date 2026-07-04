@@ -290,40 +290,93 @@
             <div class="settings-panel-head">
               <div>
                 <h3>算法设置</h3>
-                <p>管理模型验证刷新、预处理后端和前端可视化开关。OBB 外接水平框、旋转框、分割 mask/box 均可在这里调整。</p>
+                <p>按当前模型任务类型启用对应参数；置信度与 NMS 阈值会写入该模型的 model.yaml。</p>
               </div>
-              <span class="settings-status-badge cpp-implemented-badge">前端已生效</span>
+              <span id="algorithm-model-task-badge" class="settings-status-badge cpp-implemented-badge">读取模型中</span>
             </div>
 
-            <div class="settings-section cpp-settings-card">
-              <div class="settings-section-title"><b>推理与预处理</b><span>Runtime 真实参数仍由启动命令决定；这里先保存前端偏好。</span></div>
+            <div class="settings-section algorithm-common-card">
+              <div class="settings-section-title"><b>公共参数</b><span>四类任务通用</span></div>
               <div class="settings-grid three">
-                <label class="setting-field">自动推理间隔 ms<input id="setting-inference-interval" type="number" min="100" step="100"></label>
-                <label class="setting-field">预处理后端偏好
-                  <select id="setting-preprocess-backend"><option value="auto">auto</option><option value="rga">rga</option><option value="cpu">cpu</option></select>
-                  <small>仅作为显示偏好；Runtime 需启动时指定。</small>
+                <label class="setting-field">当前模型
+                  <select id="setting-algorithm-model"><option value="">读取模型列表中...</option></select>
                 </label>
-                <label class="setting-field">模型任务类型偏好
-                  <select id="setting-task-view"><option value="auto">自动识别</option><option value="detection">Detection</option><option value="obb">OBB</option><option value="segmentation">Segmentation</option><option value="classification">Classification</option></select>
+                <label class="setting-field readonly-setting-field">任务类型
+                  <input id="setting-algorithm-task" readonly>
                 </label>
+                <label class="setting-field readonly-setting-field">输入尺寸
+                  <input id="setting-algorithm-input-size" readonly>
+                </label>
+                <label class="setting-field">推理 FPS
+                  <select id="setting-inference-fps">
+                    <option value="1">1 FPS</option>
+                    <option value="2">2 FPS</option>
+                    <option value="5">5 FPS</option>
+                    <option value="10">10 FPS</option>
+                    <option value="15">15 FPS</option>
+                    <option value="20">20 FPS</option>
+                    <option value="30">30 FPS</option>
+                  </select>
+                </label>
+                <label class="setting-check"><input id="setting-overlay-show-labels" type="checkbox"><span><b>显示类别与置信度</b></span></label>
+                <label class="setting-check"><input id="setting-overlay-show-centers" type="checkbox"><span><b>显示中心点</b></span></label>
               </div>
+              <div id="setting-algorithm-status" class="settings-inline-status">等待读取模型算法设置</div>
             </div>
 
-            <div class="settings-section implemented-setting-block">
-              <div class="settings-section-title"><b>可视化显示</b><span>保存后立即影响模型验证页 overlay 绘制。</span></div>
-              <div class="settings-grid two visual-settings-grid">
-                <label class="setting-check"><input id="setting-overlay-show-labels" type="checkbox"><span><b>显示标签和置信度</b><em>类别名、score 文本</em></span></label>
-                <label class="setting-check"><input id="setting-overlay-show-centers" type="checkbox"><span><b>显示中心点</b><em>bbox / OBB 中心点</em></span></label>
-                <label class="setting-check"><input id="setting-overlay-show-detection-bbox" type="checkbox"><span><b>Detection 显示水平框</b><em>普通检测任务 bbox_xyxy</em></span></label>
-                <label class="setting-check"><input id="setting-overlay-show-obb-rotated" type="checkbox"><span><b>OBB 显示旋转框</b><em>obb.points 四点连线</em></span></label>
-                <label class="setting-check"><input id="setting-overlay-show-obb-bbox" type="checkbox"><span><b>OBB 显示外接水平框</b><em>关闭后只显示旋转矩形框</em></span></label>
-                <label class="setting-check"><input id="setting-overlay-show-seg-bbox" type="checkbox"><span><b>Seg 显示检测框</b><em>分割结果 bbox_xyxy</em></span></label>
-                <label class="setting-check"><input id="setting-overlay-show-seg-mask" type="checkbox"><span><b>Seg 显示 mask polygon</b><em>当前 Runtime 输出 polygon；真实 mask 栅格化后沿用此开关</em></span></label>
-                <label class="setting-field">Mask 透明度
-                  <input id="setting-overlay-mask-opacity" type="number" min="0" max="1" step="0.05">
-                </label>
+            <div class="algorithm-task-grid">
+              <div class="settings-section algorithm-task-card" data-algorithm-task="classification">
+                <div class="settings-section-title"><b>分类 Classification</b><span>仅分类模型可修改</span></div>
+                <div class="settings-grid one">
+                  <label class="setting-field">置信度阈值
+                    <input id="setting-classification-score-threshold" type="number" min="0" max="1" step="0.01">
+                  </label>
+                </div>
               </div>
-              <div class="settings-inline-status">说明：当前 segmentation 后处理输出的是 bbox polygon 简化 mask；后续实现 proto 栅格化后，Web 端会继续使用同一 mask 开关显示真实分割区域。</div>
+
+              <div class="settings-section algorithm-task-card" data-algorithm-task="detection">
+                <div class="settings-section-title"><b>检测 Detection</b><span>仅检测模型可修改</span></div>
+                <div class="settings-grid one">
+                  <label class="setting-field">置信度阈值
+                    <input id="setting-detection-score-threshold" type="number" min="0" max="1" step="0.01">
+                  </label>
+                  <label class="setting-field">NMS 阈值
+                    <input id="setting-detection-nms-threshold" type="number" min="0" max="1" step="0.01">
+                  </label>
+                  <label class="setting-check"><input id="setting-overlay-show-detection-bbox" type="checkbox"><span><b>显示水平框</b></span></label>
+                </div>
+              </div>
+
+              <div class="settings-section algorithm-task-card" data-algorithm-task="obb">
+                <div class="settings-section-title"><b>旋转框 OBB</b><span>仅 OBB 模型可修改</span></div>
+                <div class="settings-grid one">
+                  <label class="setting-field">OBB 置信度
+                    <input id="setting-obb-score-threshold" type="number" min="0" max="1" step="0.01">
+                  </label>
+                  <label class="setting-field">OBB NMS 阈值
+                    <input id="setting-obb-nms-threshold" type="number" min="0" max="1" step="0.01">
+                  </label>
+                  <label class="setting-check"><input id="setting-overlay-show-obb-rotated" type="checkbox"><span><b>显示旋转框</b></span></label>
+                  <label class="setting-check"><input id="setting-overlay-show-obb-bbox" type="checkbox"><span><b>显示外接水平框</b></span></label>
+                </div>
+              </div>
+
+              <div class="settings-section algorithm-task-card" data-algorithm-task="segmentation">
+                <div class="settings-section-title"><b>分割 Segmentation</b><span>仅分割模型可修改</span></div>
+                <div class="settings-grid one">
+                  <label class="setting-field">分割置信度
+                    <input id="setting-seg-score-threshold" type="number" min="0" max="1" step="0.01">
+                  </label>
+                  <label class="setting-field">分割 NMS 阈值
+                    <input id="setting-seg-nms-threshold" type="number" min="0" max="1" step="0.01">
+                  </label>
+                  <label class="setting-check"><input id="setting-overlay-show-seg-bbox" type="checkbox"><span><b>显示检测框</b></span></label>
+                  <label class="setting-check"><input id="setting-overlay-show-seg-mask" type="checkbox"><span><b>显示 Mask 区域</b></span></label>
+                  <label class="setting-field">Mask 透明度
+                    <input id="setting-overlay-mask-opacity" type="number" min="0" max="1" step="0.05">
+                  </label>
+                </div>
+              </div>
             </div>
           </section>
         </div>

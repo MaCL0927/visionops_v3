@@ -197,6 +197,10 @@ def _load_yaml_meta(path: Path) -> dict[str, Any]:
     result["task_type"] = str(document.get("task_type") or document.get("task") or "")
     result["target_platform"] = str(document.get("target_platform") or document.get("platform") or "")
 
+    dataset_section = document.get("dataset")
+    if isinstance(dataset_section, dict) and not result["target_platform"]:
+        result["target_platform"] = str(dataset_section.get("device_id") or "")
+
     # 兼容部署 YAML 中常见的嵌套 model.name/display_name，仅作为展示名补充。
     model_section = document.get("model")
     if isinstance(model_section, dict):

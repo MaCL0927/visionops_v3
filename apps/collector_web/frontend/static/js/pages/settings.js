@@ -6,9 +6,8 @@ const fields = {
   gateway_url: "setting-gateway-url",
   business_app_url: "setting-business-app-url",
   device_id: "setting-device-id",
-  display_fps: "setting-display-fps",
-  inference_interval_ms: "setting-inference-interval",
   status_refresh_interval_ms: "setting-status-interval",
+  display_fps: "setting-display-fps",
   camera_model: "setting-camera-model",
   rgb_profile: "setting-rgb-profile",
   depth_profile: "setting-depth-profile",
@@ -26,8 +25,10 @@ const fields = {
   disk_warning_percent: "setting-disk-warning",
   runtime_port: "setting-runtime-port",
   collector_port: "setting-collector-port",
-  preprocess_backend_preference: "setting-preprocess-backend",
-  task_view_preference: "setting-task-view",
+  inference_fps: "setting-inference-fps",
+  algorithm_model: "setting-algorithm-model",
+  algorithm_task: "setting-algorithm-task",
+  algorithm_input_size: "setting-algorithm-input-size",
 };
 
 const overlayFields = {
@@ -41,8 +42,29 @@ const overlayFields = {
   mask_opacity: "setting-overlay-mask-opacity",
 };
 
+const taskThresholdFields = {
+  classification: {
+    score: "setting-classification-score-threshold",
+    nms: null,
+  },
+  detection: {
+    score: "setting-detection-score-threshold",
+    nms: "setting-detection-nms-threshold",
+  },
+  obb: {
+    score: "setting-obb-score-threshold",
+    nms: "setting-obb-nms-threshold",
+  },
+  segmentation: {
+    score: "setting-seg-score-threshold",
+    nms: "setting-seg-nms-threshold",
+  },
+};
+
 let latestBridgeSettings = null;
 let bridgeSettingsLoading = false;
+let latestAlgorithmSettings = null;
+let algorithmSettingsLoading = false;
 
 function element(id) { return document.getElementById(id); }
 
@@ -79,6 +101,12 @@ function intervalMsToFps(ms, fallback = 5) {
   const value = Number(ms);
   if (!Number.isFinite(value) || value <= 0) return fallback;
   return Math.max(1, Math.min(30, Math.round(1000 / value)));
+}
+
+function fpsToIntervalMs(fps, fallbackMs = 500) {
+  const value = Number(fps);
+  if (!Number.isFinite(value) || value <= 0) return fallbackMs;
+  return Math.max(100, Math.round(1000 / value));
 }
 
 function parseProfile(profile, fallback = { resolution: "1280x720", fps: 30 }) {
@@ -216,10 +244,104 @@ async function loadOrbbecSettings() {
   }
 }
 
+function populateAlgorithmModelSelect(settings) {
+  const node = element(fields.algorithm_model);
+  if (!node) return;
+  const selectedModel = settings?.selected_model || null;
+  const currentValue = selectedModel?.model_id || node.value;
+  node.innerHTML = "";
+  const models = Array.isArray(settings?.models) ? settings.models.filter((item) => item.valid) : [];
+  if (!models.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "没有可用模型";
+    node.appendChild(option);
+    return;
+  }
+  for (const model of models) {
+    const option = document.createElement("option");
+    option.value = model.model_id;
+    option.textContent = `${model.model_name || model.package_dir} / ${model.task_type || "unknown"} / ${model.input_size?.join?.("×") || "--"}`;
+    node.appendChild(option);
+  }
+  if (currentValue && Array.from(node.options).some((option) => option.value === currentValue)) {
+    node.value = currentValue;
+  } else {
+    node.value = node.options[0]?.value || "";
+  }
+}
+
+function setTaskCardEnabled(card, enabled) {
+  card.classList.toggle("disabled", !enabled);
+  card.querySelectorAll("input, select").forEach((input) => {
+    input.disabled = !enabled;
+  });
+}
+
+function updateAlgorithmTaskState(taskType) {
+  const task = String(taskType || "").toLowerCase();
+  document.querySelectorAll(".algorithm-task-card").forEach((card) => {
+    setTaskCardEnabled(card, card.dataset.algorithmTask === task);
+  });
+  const badge = element("algorithm-model-task-badge");
+  if (badge) badge.textContent = task ? `${task} 参数` : "未选择模型";
+}
+
+function fillTaskThresholds(settings) {
+  const task = String(settings?.settings?.task_type || "").toLowerCase();
+  const score = settings?.settings?.score_threshold ?? 0.5;
+  const nms = settings?.settings?.nms_threshold ?? 0.45;
+  for (const [name, ids] of Object.entries(taskThresholdFields)) {
+    setValue(ids.score, name === task ? score : "");
+    if (ids.nms) setValue(ids.nms, name === task ? nms : "");
+  }
+}
+
+function renderAlgorithmSettings(settings) {
+  latestAlgorithmSettings = settings;
+  populateAlgorithmModelSelect(settings);
+  const selected = settings?.selected_model || {};
+  const alg = settings?.settings || {};
+  const task = String(alg.task_type || selected.task_type || "").toLowerCase();
+  setValue(fields.algorithm_task, task || "--");
+  setValue(fields.algorithm_input_size, Array.isArray(alg.input_size) ? alg.input_size.join(" × ") : (Array.isArray(selected.input_size) ? selected.input_size.join(" × ") : "--"));
+  fillTaskThresholds(settings);
+  updateAlgorithmTaskState(task);
+  const status = element("setting-algorithm-status");
+  if (status) {
+    const activeText = alg.active ? "当前 Runtime 正在使用该模型" : "当前选择模型未必是 Runtime 正在使用的模型";
+    status.textContent = `${selected.model_name || selected.package_dir || "未选择模型"}: ${activeText}；阈值来源 ${alg.yaml_path || "model.yaml"}`;
+    status.className = "settings-inline-status";
+  }
+}
+
+async function loadAlgorithmSettings(modelId = "") {
+  if (algorithmSettingsLoading) return;
+  algorithmSettingsLoading = true;
+  const suffix = modelId ? `?model_id=${encodeURIComponent(modelId)}` : "";
+  try {
+    const settings = await requestJson(`${endpoints.algorithmSettings}${suffix}`);
+    renderAlgorithmSettings(settings);
+  } catch (error) {
+    latestAlgorithmSettings = null;
+    updateAlgorithmTaskState("");
+    const status = element("setting-algorithm-status");
+    if (status) {
+      const detail = error instanceof ApiError && error.body?.error?.message ? error.body.error.message : error.message;
+      status.textContent = `读取算法设置失败：${detail}`;
+      status.className = "settings-inline-status warn";
+    }
+  } finally {
+    algorithmSettingsLoading = false;
+  }
+}
+
 function fill(config) {
   const displayFps = config.display_fps ?? intervalMsToFps(config.preview_refresh_interval_ms, 5);
+  const inferenceFps = intervalMsToFps(config.inference_interval_ms, 2);
   for (const [key, id] of Object.entries(fields)) {
     if (key === "display_fps") setValue(id, displayFps);
+    else if (key === "inference_fps") setValue(id, inferenceFps);
     else setValue(id, config[key]);
   }
   const overlay = config.overlay || {};
@@ -234,6 +356,8 @@ function readConfigFromForm() {
   const current = getState().config;
   const displayFps = getNumber(fields.display_fps, 5);
   const previewIntervalMs = Math.max(100, Math.round(1000 / Math.max(1, displayFps)));
+  const inferenceFps = getNumber(fields.inference_fps, intervalMsToFps(current.inference_interval_ms, 2));
+  const inferenceIntervalMs = fpsToIntervalMs(inferenceFps, current.inference_interval_ms || 500);
   const rgbProfile = getValue(fields.rgb_profile, current.rgb_profile || "orbbec:1280x720@30");
   const rgbParsed = parseProfile(rgbProfile, { resolution: current.camera_resolution || "1280x720", fps: current.camera_read_fps || 30 });
   return normalizeConfig({
@@ -243,7 +367,7 @@ function readConfigFromForm() {
     display_fps: displayFps,
     preview_refresh_interval_ms: previewIntervalMs,
     snapshot_refresh_interval_ms: previewIntervalMs,
-    inference_interval_ms: getNumber(fields.inference_interval_ms, 500),
+    inference_interval_ms: inferenceIntervalMs,
     status_refresh_interval_ms: getNumber(fields.status_refresh_interval_ms, 2000),
     rgb_profile: rgbProfile,
     depth_profile: getValue(fields.depth_profile, current.depth_profile || "orbbec:1280x720@30"),
@@ -263,8 +387,8 @@ function readConfigFromForm() {
     disk_warning_percent: getNumber(fields.disk_warning_percent, 85),
     runtime_port: getNumber(fields.runtime_port, 28081),
     collector_port: getNumber(fields.collector_port, 18091),
-    preprocess_backend_preference: getValue(fields.preprocess_backend_preference, "auto"),
-    task_view_preference: getValue(fields.task_view_preference, "auto"),
+    preprocess_backend_preference: "rga",
+    task_view_preference: "auto",
     overlay: {
       show_labels: getChecked(overlayFields.show_labels, true),
       show_centers: getChecked(overlayFields.show_centers, true),
@@ -277,32 +401,6 @@ function readConfigFromForm() {
     },
   });
 }
-
-function open() {
-  fill(getState().config);
-  const modal = element("settings-modal");
-  modal.classList.add("active");
-  modal.setAttribute("aria-hidden", "false");
-  setNotice("相机设置已接入 Orbbec 336L SDK Bridge API；保存会写入 v3 camera_bridge env。未检测到 env 变更时不会重启服务。");
-  loadOrbbecSettings();
-}
-
-function close() {
-  const modal = element("settings-modal");
-  modal.classList.remove("active");
-  modal.setAttribute("aria-hidden", "true");
-}
-
-function activateSettingsTab(panelId) {
-  document.querySelectorAll(".settings-main-tab").forEach((tab) => {
-    const active = tab.dataset.settingsTab === panelId;
-    tab.classList.toggle("active", active);
-    tab.setAttribute("aria-selected", active ? "true" : "false");
-  });
-  document.querySelectorAll(".settings-panel").forEach((panel) => panel.classList.toggle("active", panel.id === panelId));
-}
-
-function markUnsaved() { showSaveStatus("有未保存的修改"); }
 
 function buildOrbbecPayload(config) {
   return {
@@ -319,10 +417,64 @@ function buildOrbbecPayload(config) {
   };
 }
 
+function currentAlgorithmTask() {
+  return String(latestAlgorithmSettings?.settings?.task_type || "").toLowerCase();
+}
+
+function buildAlgorithmPayload() {
+  const task = currentAlgorithmTask();
+  const ids = taskThresholdFields[task] || {};
+  return {
+    model_id: getValue(fields.algorithm_model, latestAlgorithmSettings?.selected_model?.model_id || ""),
+    score_threshold: ids.score ? getNumber(ids.score, latestAlgorithmSettings?.settings?.score_threshold ?? 0.5) : null,
+    nms_threshold: ids.nms ? getNumber(ids.nms, latestAlgorithmSettings?.settings?.nms_threshold ?? 0.45) : null,
+    reload_runtime: true,
+  };
+}
+
+async function saveAlgorithmSettings() {
+  if (!latestAlgorithmSettings?.selected_model) return { skipped: true, message: "未选择模型" };
+  const result = await postJson(endpoints.algorithmSettings, buildAlgorithmPayload());
+  renderAlgorithmSettings(result);
+  if (result.changed === false) return { skipped: true, message: "算法阈值未变化" };
+  const reloaded = result.runtime_reload?.attempted ? (result.runtime_reload?.ok ? "，当前模型已重新加载" : "，但 Runtime 重新加载失败") : "";
+  return { skipped: false, message: `算法阈值已写入 model.yaml${reloaded}` };
+}
+
+function open() {
+  fill(getState().config);
+  const modal = element("settings-modal");
+  modal.classList.add("active");
+  modal.setAttribute("aria-hidden", "false");
+  setNotice("相机设置已接入 Orbbec 336L SDK Bridge API；算法设置会按模型任务类型写入对应 model.yaml。", "");
+  loadOrbbecSettings();
+  loadAlgorithmSettings();
+}
+
+function close() {
+  const modal = element("settings-modal");
+  modal.classList.remove("active");
+  modal.setAttribute("aria-hidden", "true");
+}
+
+function activateSettingsTab(panelId) {
+  document.querySelectorAll(".settings-main-tab").forEach((tab) => {
+    const active = tab.dataset.settingsTab === panelId;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  document.querySelectorAll(".settings-panel").forEach((panel) => panel.classList.toggle("active", panel.id === panelId));
+  if (panelId === "algorithm-settings-panel") loadAlgorithmSettings(getValue(fields.algorithm_model, ""));
+}
+
+function markUnsaved() { showSaveStatus("有未保存的修改"); }
+
 async function saveSettings() {
   const config = readConfigFromForm();
   const cameraModel = config.camera_model || "orbbec336l";
   showSaveStatus("正在保存设置...", "loading");
+  const messages = [];
+
   if (cameraModel === "orbbec336l" || cameraModel === "auto") {
     try {
       const result = await postJson(endpoints.orbbecSettings, buildOrbbecPayload(config));
@@ -332,16 +484,11 @@ async function saveSettings() {
       populateProfileSelect(fields.depth_profile, result.profiles?.depth || [], result.settings?.depth_profile || config.depth_profile, "未读取到 Depth profile");
       updateDepthMatchHint();
       const timings = result.apply_timings_ms || {};
-      const totalMs = timings.total_apply_ms != null ? `，总耗时 ${timings.total_apply_ms}ms` : "";
       if (result.changed === false || result.skipped_restart) {
-        showSaveStatus(`设置未变化，已跳过写入和服务重启${totalMs}`, "ok");
-        setNotice("设置未变化：env 内容与当前界面一致，已跳过重启和健康检查。", "ok");
+        messages.push("相机设置未变化");
       } else {
-        showSaveStatus(`已写入 v3 camera_bridge env 并重启服务${totalMs}`, "ok");
-        const restartMs = timings.restart_service_ms != null ? `restart=${timings.restart_service_ms}ms` : "restart=?";
-        const healthMs = timings.wait_health_ms != null ? `health=${timings.wait_health_ms}ms` : "health=?";
-        const profileMs = timings.profile_validation_ms != null ? `profile=${timings.profile_validation_ms}ms` : "profile=?";
-        setNotice(`设置已真实应用到 Orbbec 336L SDK Bridge；如果画面短暂中断，这是服务重启导致的正常现象。耗时：${profileMs}, ${restartMs}, ${healthMs}。`, "ok");
+        const totalMs = timings.total_apply_ms != null ? `(${timings.total_apply_ms}ms)` : "";
+        messages.push(`相机设置已应用${totalMs}`);
       }
     } catch (error) {
       const detail = error instanceof ApiError && error.body?.error?.message ? error.body.error.message : error.message;
@@ -349,14 +496,23 @@ async function saveSettings() {
       setNotice(`Orbbec 设置未生效：${detail}`, "error");
       return;
     }
-  } else {
-    showSaveStatus("当前只接入 Orbbec 336L 设置 API，HP60C 暂未真实应用", "warn");
+  }
+
+  try {
+    const alg = await saveAlgorithmSettings();
+    messages.push(alg.message);
+  } catch (error) {
+    const detail = error instanceof ApiError && error.body?.error?.message ? error.body.error.message : error.message;
+    showSaveStatus(`算法设置保存失败：${detail}`, "error");
+    setNotice(`算法设置未生效：${detail}`, "error");
+    return;
   }
 
   persistConfig(config);
   updateState({ config });
   window.dispatchEvent(new CustomEvent("visionops:settings-saved", { detail: { config } }));
-  // 不自动关闭，保留 apply 结果给现场人员确认。
+  showSaveStatus(messages.join("；"), "ok");
+  setNotice(messages.join("；"), "ok");
 }
 
 export function initSettings() {
@@ -369,12 +525,18 @@ export function initSettings() {
     const node = element(id);
     if (node) node.addEventListener("change", updateDepthMatchHint);
   });
+  const algorithmModel = element(fields.algorithm_model);
+  if (algorithmModel) algorithmModel.addEventListener("change", () => loadAlgorithmSettings(algorithmModel.value));
   const refreshProfiles = element("settings-refresh-profiles");
-  if (refreshProfiles) refreshProfiles.addEventListener("click", loadOrbbecSettings);
+  if (refreshProfiles) refreshProfiles.addEventListener("click", () => {
+    loadOrbbecSettings();
+    loadAlgorithmSettings(getValue(fields.algorithm_model, ""));
+  });
   element("settings-reset").addEventListener("click", () => {
     fill(getState().savedConfig || getState().config);
     loadOrbbecSettings();
-    showSaveStatus("已恢复到 Collector 默认或当前 Bridge 配置，尚未保存");
+    loadAlgorithmSettings();
+    showSaveStatus("已恢复到 Collector 默认、当前 Bridge 与当前模型配置，尚未保存");
   });
   element("settings-save").addEventListener("click", saveSettings);
 }
