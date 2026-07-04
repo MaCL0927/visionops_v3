@@ -28,28 +28,12 @@ def _free_port() -> int:
 def _write_model_package(root: Path, name: str, *, task_type: str = "obb") -> Path:
     package = root / name
     package.mkdir(parents=True)
-    manifest = {
-        "package_id": f"{name}-id",
-        "model_name": name,
-        "model_version": "0.1.0",
-        "task_type": task_type,
-        "target_platform": "rk3576",
-        "files": {
-            "rknn": "model.rknn",
-            "yaml": "model.yaml",
-            "labels": "labels.txt",
-        },
-        "input": {"size": [640, 640]},
-    }
-    (package / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
     (package / "model.yaml").write_text(
-        f"model_name: {name}\nmodel_version: 0.1.0\ntask_type: {task_type}\ninput_size: [640, 640]\nclass_names: [tube, defect]\n",
+        f"model_id: {name}-id\nmodel_name: {name}\nmodel_version: 0.1.0\ntask: {task_type}\ntarget_platform: rk3576\ninput_size: [640, 640]\nclass_names: [tube, defect]\n",
         encoding="utf-8",
     )
-    (package / "labels.txt").write_text("tube\ndefect\n", encoding="utf-8")
     (package / "model.rknn").write_bytes(b"mock-rknn")
     return package
-
 
 def _request_json(url: str, method: str = "GET", body: dict | None = None) -> tuple[int, dict]:
     data = json.dumps(body or {}).encode("utf-8") if method == "POST" else None

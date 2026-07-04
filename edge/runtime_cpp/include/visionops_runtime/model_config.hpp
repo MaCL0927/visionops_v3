@@ -6,9 +6,11 @@
 namespace visionops::runtime {
 
 struct ModelConfigData {
+  std::string model_id;
   std::string model_name;
   std::string model_version;
   std::string task_type;
+  std::string target_platform;
   int input_width{0};
   int input_height{0};
   std::vector<std::string> class_names;

@@ -25,7 +25,7 @@ Camera Bridge / HP60C Bridge
 - 统一配置骨架与配置校验工具。
 - 标准接口 schema、example 与协议文档。
 - C++ Runtime HTTP 服务与模块化拆分。
-- 模型包读取：`manifest.json`、`model.yaml`、`labels.txt`。
+- 模型包读取：M15 后固定为 `model.rknn + model.yaml`，`model.yaml` 是唯一元信息来源。
 - `RknnRunnerMock`、`RknnRunnerReal`、`RknnRunnerUnavailable`。
 - detection / OBB / segmentation 基础后处理。
 - `v4l2` 与 `hp60c_bridge` 帧源。
@@ -61,8 +61,6 @@ cmake --build build-rknn -j4
   --hp60c-url http://127.0.0.1:18182 \
   --hp60c-snapshot-path /stream/snapshot.jpg \
   --hp60c-health-path /health \
-  --model-manifest "$MODEL_DIR/manifest.json" \
-  --model-config "$MODEL_DIR/model.yaml" \
   --model-dir "$MODEL_DIR" \
   --host 0.0.0.0 \
   --port 28081 \
@@ -93,22 +91,18 @@ python3 -m apps.collector_web.backend.main \
 ```text
 /opt/visionops_v3/models/
 ├── carton_tube_check/
-│   ├── manifest.json
-│   ├── model.yaml
-│   ├── labels.txt
-│   └── model.rknn
+│   ├── model.rknn
+│   └── model.yaml
 └── test_rknn_model/
-    ├── manifest.json
-    ├── model.yaml
-    ├── labels.txt
-    └── model.rknn
+    ├── model.rknn
+    └── model.yaml
 ```
 
 Collector Web 只扫描 `models_root` 下的一级子目录。只有满足以下条件的目录才会被视为标准模型包：
 
-- 目录内存在 `manifest.json`
-- `manifest.json` 中 `files.rknn / files.yaml / files.labels` 都存在
-- 这些文件路径解析后仍位于模型包目录内部
+- 目录内存在 `model.rknn` 和 `model.yaml`
+- `model.yaml` 是唯一元信息来源
+- 不再读取 `manifest.json` / `labels.txt`
 
 当前不会把同目录下额外的 `model2.rknn` 自动识别为第二个模型。
 

@@ -14,7 +14,7 @@ cat <<EOF
 cd ${ROOT}
 MODEL_DIR=${TUBE_MODEL_DIR} ./build-rknn/edge/runtime_cpp/visionops_runtime_mock \\
   --backend rknn --frame-source hp60c_bridge --hp60c-url ${HP60C_URL} \\
-  --model-manifest \"\$MODEL_DIR/manifest.json\" --model-config \"\$MODEL_DIR/model.yaml\" --model-dir \"\$MODEL_DIR\" \\
+  --model-dir \"\$MODEL_DIR\" \\
   --host 0.0.0.0 --port 18081 --device-id ${DEVICE_ID}
 
 # 纸筒 Collector，端口 8091
@@ -33,7 +33,7 @@ python3 -m edge.gateway_adapter.apps.carton_tube_check.service \\
 cd ${ROOT}
 MODEL_DIR=${PARTITION_MODEL_DIR} ./build-rknn/edge/runtime_cpp/visionops_runtime_mock \\
   --backend rknn --frame-source hp60c_bridge --hp60c-url ${HP60C_URL} \\
-  --model-manifest \"\$MODEL_DIR/manifest.json\" --model-config \"\$MODEL_DIR/model.yaml\" --model-dir \"\$MODEL_DIR\" \\
+  --model-dir \"\$MODEL_DIR\" \\
   --host 0.0.0.0 --port 18082 --device-id ${DEVICE_ID}
 
 # 隔板 Collector，端口 8092

@@ -42,7 +42,7 @@ Camera Bridge / HP60C Bridge
 - Collector Web 前端基本页面。
 - Collector Web 前端已调整为参考 v2 的现场大屏 / 触屏友好风格，但接口和架构保持 v3。
 - Runtime 模块化拆分。
-- 模型包读取 `manifest.json / model.yaml / labels.txt`。
+- 模型包读取已在 M15 简化为 `model.rknn + model.yaml`，`model.yaml` 是唯一元信息来源。
 - `RknnRunnerReal / RknnRunnerMock / RknnRunnerUnavailable`。
 - detection / OBB / segmentation 后处理基础。
 - `v4l2` 和 `hp60c_bridge` 帧源。
@@ -68,21 +68,18 @@ Camera Bridge / HP60C Bridge
 ```text
 /opt/visionops_v3/models/
 ├── carton_tube_check/
-│   ├── manifest.json
-│   ├── model.yaml
-│   ├── labels.txt
-│   └── model.rknn
+│   ├── model.rknn
+│   └── model.yaml
 └── test_rknn_model/
-    ├── manifest.json
-    ├── model.yaml
-    ├── labels.txt
-    └── model.rknn
+    ├── model.rknn
+    └── model.yaml
 ```
 
 Collector 只扫描 `models_root` 下的一级子目录，且当前仅把以下目录识别为标准模型包：
 
-- 存在 `manifest.json`
-- `manifest.json` 指向的 `rknn / yaml / labels` 都存在
+- 存在 `model.rknn` 和 `model.yaml`
+- `model.yaml` 是唯一元信息来源
+- 不再读取 `manifest.json` / `labels.txt`
 - 文件路径解析后仍位于模型包目录内部
 
 当前不会把同目录中的额外 `model2.rknn` 自动识别为第二个模型。
@@ -102,8 +99,6 @@ MODEL_DIR=/opt/visionops_v3/models/test_rknn_model
   --hp60c-url http://127.0.0.1:18182 \
   --hp60c-snapshot-path /stream/snapshot.jpg \
   --hp60c-health-path /health \
-  --model-manifest "$MODEL_DIR/manifest.json" \
-  --model-config "$MODEL_DIR/model.yaml" \
   --model-dir "$MODEL_DIR" \
   --host 0.0.0.0 \
   --port 28081 \

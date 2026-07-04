@@ -484,8 +484,6 @@ RuntimeApiResult RuntimeApp::switch_model(const std::string& request_body) {
   std::lock_guard<std::recursive_mutex> lock(model_mutex_);
   AppConfig next_config = config_;
   next_config.model_dir = *model_dir_value;
-  next_config.model_manifest.clear();
-  next_config.model_config.clear();
   const std::filesystem::path package_dir = std::filesystem::path(next_config.model_dir).lexically_normal();
   if (!std::filesystem::exists(package_dir) || !std::filesystem::is_directory(package_dir)) {
     return {
@@ -498,14 +496,15 @@ RuntimeApiResult RuntimeApp::switch_model(const std::string& request_body) {
             true),
     };
   }
-  if (!std::filesystem::exists(package_dir / "manifest.json")) {
+  if (!std::filesystem::exists(package_dir / "model.rknn") ||
+      !std::filesystem::exists(package_dir / "model.yaml")) {
     return {
         500,
         make_error_json(
             config_.device_id,
             config_.component,
             "MODEL_SWITCH_FAILED",
-            "模型目录缺少 manifest.json: " + package_dir.string(),
+            "模型目录必须包含 model.rknn 和 model.yaml: " + package_dir.string(),
             true),
     };
   }
@@ -540,24 +539,20 @@ RuntimeApiResult RuntimeApp::switch_model(const std::string& request_body) {
     };
   }
   if (prepared.model_info.rknn_path.empty() || prepared.model_info.config_path.empty() ||
-      prepared.model_info.labels_path.empty() ||
       !std::filesystem::exists(prepared.model_info.rknn_path) ||
-      !std::filesystem::exists(prepared.model_info.config_path) ||
-      !std::filesystem::exists(prepared.model_info.labels_path)) {
+      !std::filesystem::exists(prepared.model_info.config_path)) {
     return {
         500,
         make_error_json(
             config_.device_id,
             config_.component,
             "MODEL_SWITCH_FAILED",
-            "新模型包不是标准模型目录，缺少 manifest 指向的 rknn/yaml/labels 文件",
+            "新模型包不是 M15 标准模型目录，必须包含 model.rknn 和 model.yaml",
             true),
     };
   }
 
   config_.model_dir = next_config.model_dir;
-  config_.model_manifest.clear();
-  config_.model_config.clear();
   model_info_ = std::move(prepared.model_info);
   rknn_runner_ = std::move(prepared.runner);
   return {200, status_json()};

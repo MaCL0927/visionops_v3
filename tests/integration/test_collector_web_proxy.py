@@ -75,27 +75,11 @@ def _wait_for_health(process: subprocess.Popen, url: str) -> None:
 def _write_model_package(root: Path, name: str) -> Path:
     package = root / name
     package.mkdir(parents=True)
-    manifest = {
-        "package_id": f"{name}-id",
-        "model_name": name,
-        "model_version": "0.1.0",
-        "task_type": "obb",
-        "target_platform": "rk3576",
-        "files": {
-            "rknn": "model.rknn",
-            "yaml": "model.yaml",
-            "labels": "labels.txt",
-        },
-        "input": {"size": [640, 640]},
-        "postprocess": {"score_threshold": 0.5, "nms_threshold": 0.45},
-    }
-    (package / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
     (package / "model.yaml").write_text(
-        "model_name: %s\nmodel_version: 0.1.0\ntask_type: obb\ninput_size: [640, 640]\nclass_names: [tube, defect]\n"
-        % name,
+        "model_id: %s-id\nmodel_name: %s\nmodel_version: 0.1.0\ntask: obb\ntarget_platform: rk3576\ninput_size: [640, 640]\nclass_names: [tube, defect]\n"
+        % (name, name),
         encoding="utf-8",
     )
-    (package / "labels.txt").write_text("tube\ndefect\n", encoding="utf-8")
     (package / "model.rknn").write_bytes(b"mock-rknn")
     return package
 
@@ -361,21 +345,10 @@ def test_collector_lists_models_and_rejects_arbitrary_switch_path(
     models_root = tmp_path / "models"
     _write_model_package(models_root, "carton_tube_check")
     (models_root / "broken_model").mkdir(parents=True)
-    (models_root / "broken_model" / "manifest.json").write_text(
-        json.dumps(
-            {
-                "package_id": "broken-id",
-                "model_name": "broken",
-                "model_version": "0.0.1",
-                "task_type": "detection",
-                "files": {"rknn": "missing.rknn", "yaml": "model.yaml", "labels": "labels.txt"},
-            },
-            ensure_ascii=False,
-        ),
+    (models_root / "broken_model" / "model.yaml").write_text(
+        "model_id: broken-id\nmodel_name: broken\ntask: detection\ninput_size: [640, 640]\nclass_names: [object]\n",
         encoding="utf-8",
     )
-    (models_root / "broken_model" / "model.yaml").write_text("model_name: broken\n", encoding="utf-8")
-    (models_root / "broken_model" / "labels.txt").write_text("object\n", encoding="utf-8")
 
     runtime_port = _free_port()
     collector_port = _free_port()

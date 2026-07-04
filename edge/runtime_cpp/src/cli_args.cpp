@@ -37,10 +37,6 @@ CliArgs parse_cli_args(int argc, char* argv[]) {
       args.config.mock_task_type = require_value(argc, argv, index);
     } else if (argument == "--backend") {
       args.config.backend = require_value(argc, argv, index);
-    } else if (argument == "--model-manifest") {
-      args.config.model_manifest = require_value(argc, argv, index);
-    } else if (argument == "--model-config") {
-      args.config.model_config = require_value(argc, argv, index);
     } else if (argument == "--model-dir") {
       args.config.model_dir = require_value(argc, argv, index);
     } else if (argument == "--test-image") {
@@ -105,9 +101,7 @@ std::string cli_help_text(const std::string& program) {
          "  --mock-task-type <类型>   detection、obb、segmentation、"
          "roi_classification 或 classification\n"
          "  --backend <类型>          mock 或 rknn，默认 mock\n"
-         "  --model-manifest <路径>  模型包 manifest JSON\n"
-         "  --model-config <路径>    模型 YAML 配置\n"
-         "  --model-dir <路径>       模型包目录及相对路径基准\n"
+         "  --model-dir <路径>       M15 标准模型目录，必须包含 model.rknn 和 model.yaml\n"
          "  --test-image <路径>      本地 P6 PPM 测试图片（无 OpenCV 默认构建）\n"
          "  --save-debug-output <目录> 预留轻量调试输出目录\n"
          "  --preprocess-backend <cpu|rga|auto> 预处理后端，默认 cpu；启用 RGA 构建后可设为 rga\n"

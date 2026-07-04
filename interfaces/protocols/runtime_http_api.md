@@ -279,7 +279,7 @@ JSON 请求体：
 ```
 
 - `model_dir`：必需，表示一个标准模型包目录。
-- Runtime 需要在该目录内读取 `manifest.json`，并根据 manifest 指向的 `rknn / yaml / labels` 完成加载。
+- Runtime 需要在该目录内读取固定文件 `model.rknn` 和 `model.yaml`；`model.yaml` 是唯一模型元信息来源。
 - 不需要 `frame_id`；`trace_id` 可由请求头传入。
 
 ### 成功响应

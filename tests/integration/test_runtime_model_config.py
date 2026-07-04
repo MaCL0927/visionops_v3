@@ -111,7 +111,7 @@ def test_runtime_uses_default_mock_model_without_config(
         assert model["model_load_error"] is None
 
 
-def test_runtime_reads_manifest_yaml_and_labels(
+def test_runtime_reads_m15_model_dir(
     model_config_runtime_binary: Path,
 ) -> None:
     with _running_runtime(
@@ -119,10 +119,6 @@ def test_runtime_reads_manifest_yaml_and_labels(
         [
             "--model-dir",
             str(EXAMPLE_PACKAGE),
-            "--model-manifest",
-            "manifest.json",
-            "--model-config",
-            "model.yaml",
         ],
     ) as base_url:
         status = _request_json(f"{base_url}/api/runtime/status")
@@ -151,22 +147,22 @@ def test_runtime_reads_manifest_yaml_and_labels(
 def test_missing_model_files_degrade_without_stopping_runtime(
     model_config_runtime_binary: Path, tmp_path: Path
 ) -> None:
+    broken = tmp_path / "broken_model"
+    broken.mkdir()
     with _running_runtime(
         model_config_runtime_binary,
         [
-            "--model-manifest",
-            str(tmp_path / "missing-manifest.json"),
-            "--model-config",
-            str(tmp_path / "missing-model.yaml"),
+            "--model-dir",
+            str(broken),
         ],
     ) as base_url:
         health = _request_json(f"{base_url}/health")
         status = _request_json(f"{base_url}/api/runtime/status")
         assert health["health"] == "degraded"
         assert status["health"] == "degraded"
-        assert "无法读取模型 manifest" in status["loaded_model"]["model_load_error"]
-        assert "无法读取模型配置" in status["loaded_model"]["model_load_error"]
+        assert "缺少 model.rknn" in status["loaded_model"]["model_load_error"]
+        assert "缺少 model.yaml" in status["loaded_model"]["model_load_error"]
 
         result = _request_json(f"{base_url}/api/runtime/infer_once", method="POST")
         assert result["message_type"] == "inference_result"
-        assert result["model"]["model_name"] == "visionops-runtime-mock"
+        assert result["model"]["model_name"] == "broken_model"

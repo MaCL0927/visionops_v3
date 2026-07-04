@@ -122,9 +122,9 @@ Collector 本身不加载 `.rknn`。它只负责：
 当前标准模型包规则：
 
 - 一个目录只表示一个模型包
-- 必须包含 `manifest.json`
-- `manifest.json` 中 `files.rknn / files.yaml / files.labels` 必须都存在
-- 文件路径不能通过 `../` 跳出模型包目录
+- 必须包含 `model.rknn` 和 `model.yaml`
+- `model.yaml` 是唯一元信息来源
+- 不再读取 `manifest.json` / `labels.txt`
 - 当前不自动识别同目录中的额外 `model2.rknn`
 
 ## Collector API

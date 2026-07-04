@@ -35,8 +35,6 @@ MODEL_DIR=/opt/visionops_v3/models/tube_model
   --backend rknn \
   --frame-source hp60c_bridge \
   --hp60c-url http://127.0.0.1:18181 \
-  --model-manifest "$MODEL_DIR/manifest.json" \
-  --model-config "$MODEL_DIR/model.yaml" \
   --model-dir "$MODEL_DIR" \
   --host 0.0.0.0 --port 18081 --device-id lb3576-dev
 
@@ -61,8 +59,6 @@ MODEL_DIR=/opt/visionops_v3/models/partition_model
   --backend rknn \
   --frame-source hp60c_bridge \
   --hp60c-url http://127.0.0.1:18181 \
-  --model-manifest "$MODEL_DIR/manifest.json" \
-  --model-config "$MODEL_DIR/model.yaml" \
   --model-dir "$MODEL_DIR" \
   --host 0.0.0.0 --port 18082 --device-id lb3576-dev
 

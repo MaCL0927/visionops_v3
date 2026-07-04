@@ -127,8 +127,6 @@ MODEL_DIR=/opt/visionops_v3/models/test_rknn_model
   --hp60c-url http://127.0.0.1:18182 \
   --hp60c-snapshot-path /stream/snapshot.jpg \
   --hp60c-health-path /health \
-  --model-manifest "$MODEL_DIR/manifest.json" \
-  --model-config "$MODEL_DIR/model.yaml" \
   --model-dir "$MODEL_DIR" \
   --host 0.0.0.0 \
   --port 28081 \
@@ -145,9 +143,7 @@ MODEL_DIR=/opt/visionops_v3/models/test_rknn_model
 
 支持读取：
 
-- `--model-manifest <path>`
-- `--model-config <path>`
-- `--model-dir <path>`
+- `--model-dir <path>`：M15 标准模型目录，目录内必须包含 `model.rknn` 和 `model.yaml`。
 
 `loaded_model` 与 `inference_result.model` 会优先使用模型包中的：
 
@@ -170,17 +166,16 @@ MODEL_DIR=/opt/visionops_v3/models/test_rknn_model
 ```text
 models/
 └── carton_tube_check/
-    ├── manifest.json
-    ├── model.yaml
-    ├── labels.txt
-    └── model.rknn
+    ├── model.rknn
+    └── model.yaml
 ```
 
 要求：
 
 - 一个目录只表示一个模型包
-- `manifest.json` 必须存在
-- `manifest.json` 指向的 `rknn / yaml / labels` 必须都存在
+- 必须包含 `model.rknn` 和 `model.yaml`
+- `model.yaml` 是模型元信息唯一来源
+- 不再读取 `manifest.json` / `labels.txt`
 - 当前不自动识别同目录中的额外 `model2.rknn`
 
 

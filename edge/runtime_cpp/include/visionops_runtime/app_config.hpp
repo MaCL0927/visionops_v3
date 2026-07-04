@@ -12,8 +12,6 @@ struct AppConfig {
   std::string component{"rknn_runtime"};
   std::string mock_task_type{"detection"};
   std::string backend{"mock"};
-  std::string model_manifest;
-  std::string model_config;
   std::string model_dir;
   std::string test_image;
   std::string save_debug_output;

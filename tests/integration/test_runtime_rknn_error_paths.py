@@ -80,17 +80,18 @@ def test_rknn_not_compiled_returns_stable_error(rknn_error_binary: Path) -> None
 def test_missing_rknn_path_is_reported(
     rknn_error_binary: Path, tmp_path: Path
 ) -> None:
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text(
-        '{"package_id":"missing-model","task_type":"detection",'
-        '"files":{"rknn":"missing.rknn"}}',
+    package = tmp_path / "missing_model"
+    package.mkdir()
+    (package / "model.yaml").write_text(
+        "model_id: missing-model\ntask: detection\ninput_size: [640, 640]\nclass_names: [object]\n",
         encoding="utf-8",
     )
     with _runtime(
         rknn_error_binary,
-        ["--backend", "rknn", "--model-manifest", str(manifest)],
+        ["--backend", "rknn", "--model-dir", str(package)],
     ) as base_url:
         status = _json(f"{base_url}/api/runtime/status")
         error = status["loaded_model"]["model_load_error"]
+        assert "缺少 model.rknn" in error
         assert "RKNN 模型文件不存在" in error
-        assert status["loaded_model"]["rknn_path"].endswith("missing.rknn")
+        assert status["loaded_model"]["rknn_path"].endswith("model.rknn")

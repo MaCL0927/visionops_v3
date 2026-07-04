@@ -4,6 +4,7 @@
 #include <cctype>
 #include <fstream>
 #include <sstream>
+#include <string>
 #include <vector>
 
 namespace visionops::runtime {
@@ -86,6 +87,10 @@ bool is_input_size_key(const std::string& key) {
          key == "input_shape" || key == "model_input_size";
 }
 
+bool starts_with_dash_item(const std::string& line) {
+  return !line.empty() && line.front() == '-';
+}
+
 }  // namespace
 
 bool load_model_config_yaml(
@@ -100,6 +105,7 @@ bool load_model_config_yaml(
 
   std::string line;
   int line_number = 0;
+  bool collecting_class_names = false;
   while (std::getline(input, line)) {
     ++line_number;
     const auto comment = line.find('#');
@@ -110,6 +116,18 @@ bool load_model_config_yaml(
     if (line.empty()) {
       continue;
     }
+
+    if (collecting_class_names) {
+      if (starts_with_dash_item(line)) {
+        std::string item = unquote(trim(line.substr(1)));
+        if (!item.empty()) {
+          config.class_names.push_back(std::move(item));
+        }
+        continue;
+      }
+      collecting_class_names = false;
+    }
+
     const auto separator = line.find(':');
     if (separator == std::string::npos) {
       continue;
@@ -117,22 +135,33 @@ bool load_model_config_yaml(
     const std::string key = trim(line.substr(0, separator));
     const std::string value = trim(line.substr(separator + 1));
     try {
-      if (key == "model_name") {
+      if (key == "model_id" || key == "package_id") {
+        config.model_id = unquote(value);
+      } else if (key == "model_name" || key == "display_name") {
         config.model_name = unquote(value);
-      } else if (key == "model_version") {
+      } else if (key == "model_version" || key == "version") {
         config.model_version = unquote(value);
-      } else if (key == "task_type") {
+      } else if (key == "task_type" || key == "task") {
         config.task_type = unquote(value);
+      } else if (key == "target_platform" || key == "platform") {
+        config.target_platform = unquote(value);
       } else if (is_input_size_key(key)) {
         if (!parse_input_size(value, config.input_width, config.input_height)) {
           error_message = "模型配置 input_size 非法，行 " + std::to_string(line_number);
           return false;
         }
-      } else if (key == "class_names") {
-        config.class_names = parse_list(value);
-      } else if (key == "score_threshold") {
+      } else if (key == "class_names" || key == "names") {
+        auto items = parse_list(value);
+        if (!items.empty()) {
+          config.class_names = std::move(items);
+        } else if (value.empty()) {
+          config.class_names.clear();
+          collecting_class_names = true;
+        }
+      } else if (key == "score_threshold" || key == "conf_threshold" ||
+                 key == "confidence_threshold") {
         config.score_threshold = std::stod(value);
-      } else if (key == "nms_threshold") {
+      } else if (key == "nms_threshold" || key == "iou_threshold") {
         config.nms_threshold = std::stod(value);
       }
     } catch (const std::exception&) {

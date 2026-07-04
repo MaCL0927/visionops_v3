@@ -1,8 +1,12 @@
-# 仅用于模型配置解析测试，不对应真实模型。
+# 仅用于模型配置解析测试，不对应真实 RKNN 模型。
+model_id: package-mock-tube-detector-2.1.0-rk3588
 model_name: "mock-tube-detector-yaml"
 model_version: "2.1.1"
-task_type: detection
+task: detection
+target_platform: rk3588
 input_size: [768, 768]
-class_names: ["tube", "cell"]
+class_names:
+  - tube
+  - cell
 score_threshold: 0.55
 nms_threshold: 0.42

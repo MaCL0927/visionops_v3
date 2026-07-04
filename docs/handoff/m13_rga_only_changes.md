@@ -44,8 +44,6 @@ cmake --build build-rknn-rga-release -j4
   --hp60c-url http://127.0.0.1:18182 \
   --hp60c-snapshot-path /stream/snapshot.jpg \
   --hp60c-health-path /health \
-  --model-manifest "$MODEL_DIR/manifest.json" \
-  --model-config "$MODEL_DIR/model.yaml" \
   --model-dir "$MODEL_DIR" \
   --host 0.0.0.0 \
   --port 28081 \

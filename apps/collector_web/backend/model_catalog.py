@@ -1,8 +1,16 @@
-"""Collector Web 模型目录扫描与受控选择。"""
+"""Collector Web 模型目录扫描与受控选择。
+
+M15 模型包规则固定为：
+
+    models/<model_dir>/model.rknn
+    models/<model_dir>/model.yaml
+
+不再读取 manifest.json / labels.txt，也不扫描平铺 rknn/yaml。
+model.yaml 是模型列表和 Runtime 切换的唯一元信息来源。
+"""
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -44,6 +52,7 @@ class ModelCatalogItem:
             "input_size": self.input_size,
             "rknn_file": self.rknn_file,
             "yaml_file": self.yaml_file,
+            # M15 后不再要求 labels.txt；保留字段是为了前端/旧测试不会因缺字段报错。
             "labels_file": self.labels_file,
             "rknn_size_bytes": self.rknn_size_bytes,
             "labels_count": self.labels_count,
@@ -66,7 +75,7 @@ def default_models_root(project_root: Path) -> Path:
 
 
 def scan_model_catalog(models_root: Path, current_model: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """扫描 models_root 下的一级模型包目录。"""
+    """扫描 models_root 下的一级标准模型包目录。"""
 
     root = Path(models_root)
     if not root.exists() or not root.is_dir():
@@ -105,54 +114,34 @@ def _scan_package_dir(
     current_model_id: str,
     current_rknn: str | None,
 ) -> ModelCatalogItem | None:
-    manifest_path = package_dir / "manifest.json"
-    if not manifest_path.is_file():
+    rknn_file = package_dir / "model.rknn"
+    yaml_file = package_dir / "model.yaml"
+
+    # 非标准目录直接忽略，避免把 Log、临时目录等展示成无效模型。
+    if not rknn_file.exists() and not yaml_file.exists():
         return None
 
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        return _invalid_model(package_dir, f"manifest.json 解析失败: {error}")
-    if not isinstance(manifest, dict):
-        return _invalid_model(package_dir, "manifest.json 顶层必须是对象")
-
-    files = manifest.get("files")
-    if not isinstance(files, dict):
-        return _invalid_model(package_dir, "manifest.json 缺少 files 对象")
-
-    rknn_file = _safe_manifest_file(package_dir, files.get("rknn"))
-    yaml_file = _safe_manifest_file(package_dir, files.get("yaml"))
-    labels_file = _safe_manifest_file(package_dir, files.get("labels"))
-    missing = []
-    for name, value in (("rknn", rknn_file), ("yaml", yaml_file), ("labels", labels_file)):
-        if value is None:
-            missing.append(name)
-    if missing:
-        return _invalid_model(package_dir, f"manifest.json 缺少或越界文件字段: {', '.join(missing)}")
-
+    yaml_meta = _load_yaml_meta(yaml_file) if yaml_file.is_file() else _default_yaml_meta()
     file_errors = []
-    for label, path in (("rknn", rknn_file), ("yaml", yaml_file), ("labels", labels_file)):
-        if not path.is_file():
-            file_errors.append(f"{label} 文件不存在: {path.name}")
-    if file_errors:
-        return _invalid_model(package_dir, "; ".join(file_errors), rknn_file.name, yaml_file.name, labels_file.name)
+    if not rknn_file.is_file():
+        file_errors.append("缺少 model.rknn")
+    if not yaml_file.is_file():
+        file_errors.append("缺少 model.yaml")
+    if yaml_meta.get("error"):
+        file_errors.append(str(yaml_meta["error"]))
 
-    yaml_meta = _load_yaml_meta(yaml_file)
-    manifest_input_size = _manifest_input_size(manifest)
-    input_size = manifest_input_size or yaml_meta["input_size"] or [640, 640]
-    labels_count = _count_labels(labels_file) or yaml_meta["labels_count"]
     package_path = str(package_dir.resolve())
+    rknn_path = _normalized_path(str(rknn_file.resolve())) if rknn_file.exists() else None
+    model_id = str(yaml_meta.get("model_id") or package_dir.name)
     active = False
-    rknn_path = _normalized_path(str(rknn_file.resolve()))
-    model_id = str(manifest.get("package_id") or yaml_meta["model_name"] or package_dir.name)
     if current_model_id and model_id == current_model_id:
         active = True
-    elif current_rknn and current_rknn == rknn_path:
+    elif current_rknn and rknn_path and current_rknn == rknn_path:
         active = True
 
     try:
-        rknn_size_bytes = rknn_file.stat().st_size
-        mtime_ms = int(rknn_file.stat().st_mtime * 1000)
+        rknn_size_bytes = rknn_file.stat().st_size if rknn_file.is_file() else 0
+        mtime_ms = int(rknn_file.stat().st_mtime * 1000) if rknn_file.is_file() else None
     except OSError:
         rknn_size_bytes = 0
         mtime_ms = None
@@ -161,121 +150,105 @@ def _scan_package_dir(
         model_id=model_id,
         package_dir=package_dir.name,
         package_path=package_path,
-        model_name=str(manifest.get("model_name") or yaml_meta["model_name"] or package_dir.name),
-        model_version=str(manifest.get("model_version") or yaml_meta["model_version"] or "unknown"),
-        task_type=str(manifest.get("task_type") or yaml_meta["task_type"] or "detection"),
-        target_platform=str(manifest.get("target_platform") or "unknown"),
-        input_size=input_size,
-        rknn_file=rknn_file.name,
-        yaml_file=yaml_file.name,
-        labels_file=labels_file.name,
+        model_name=str(yaml_meta.get("model_name") or package_dir.name),
+        model_version=str(yaml_meta.get("model_version") or "unknown"),
+        task_type=str(yaml_meta.get("task_type") or "unknown"),
+        target_platform=str(yaml_meta.get("target_platform") or "unknown"),
+        input_size=yaml_meta.get("input_size") or [640, 640],
+        rknn_file="model.rknn",
+        yaml_file="model.yaml",
+        labels_file="",
         rknn_size_bytes=rknn_size_bytes,
-        labels_count=labels_count,
-        valid=True,
+        labels_count=int(yaml_meta.get("labels_count") or 0),
+        valid=not file_errors,
         active=active,
         mtime_ms=mtime_ms,
+        error="; ".join(file_errors) if file_errors else None,
     )
 
 
-def _invalid_model(
-    package_dir: Path,
-    error: str,
-    rknn_file: str = "",
-    yaml_file: str = "",
-    labels_file: str = "",
-) -> ModelCatalogItem:
-    return ModelCatalogItem(
-        model_id=package_dir.name,
-        package_dir=package_dir.name,
-        package_path=str(package_dir.resolve()),
-        model_name=package_dir.name,
-        model_version="unknown",
-        task_type="unknown",
-        target_platform="unknown",
-        input_size=[640, 640],
-        rknn_file=rknn_file,
-        yaml_file=yaml_file,
-        labels_file=labels_file,
-        rknn_size_bytes=0,
-        labels_count=0,
-        valid=False,
-        active=False,
-        mtime_ms=None,
-        error=error,
-    )
-
-
-def _safe_manifest_file(package_dir: Path, value: Any) -> Path | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    candidate = (package_dir / value).resolve()
-    package_root = package_dir.resolve()
-    try:
-        if candidate.relative_to(package_root):
-            return candidate
-    except ValueError:
-        return None
-    return candidate
-
-
-def _manifest_input_size(manifest: dict[str, Any]) -> list[int] | None:
-    input_config = manifest.get("input")
-    if not isinstance(input_config, dict):
-        return None
-    raw = input_config.get("size", input_config.get("input_size"))
-    if isinstance(raw, list) and len(raw) >= 2:
-        try:
-            width = int(raw[0])
-            height = int(raw[1])
-        except (TypeError, ValueError):
-            return None
-        if width > 0 and height > 0:
-            return [width, height]
-    width = input_config.get("width")
-    height = input_config.get("height")
-    try:
-        if int(width) > 0 and int(height) > 0:
-            return [int(width), int(height)]
-    except (TypeError, ValueError):
-        return None
-    return None
-
-
-def _load_yaml_meta(path: Path) -> dict[str, Any]:
-    defaults = {
+def _default_yaml_meta() -> dict[str, Any]:
+    return {
+        "model_id": "",
         "model_name": "",
         "model_version": "",
         "task_type": "",
+        "target_platform": "",
         "input_size": None,
         "labels_count": 0,
+        "error": None,
     }
+
+
+def _load_yaml_meta(path: Path) -> dict[str, Any]:
+    result = _default_yaml_meta()
     try:
         document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError):
-        return defaults
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as error:
+        result["error"] = f"model.yaml 解析失败: {error}"
+        return result
     if not isinstance(document, dict):
-        return defaults
-    result = dict(defaults)
-    result["model_name"] = str(document.get("model_name") or "")
-    result["model_version"] = str(document.get("model_version") or "")
-    result["task_type"] = str(document.get("task_type") or "")
-    input_size = document.get("input_size")
-    if isinstance(input_size, list) and len(input_size) >= 2:
-        try:
-            result["input_size"] = [int(input_size[0]), int(input_size[1])]
-        except (TypeError, ValueError):
-            result["input_size"] = None
-    class_names = document.get("class_names")
-    if isinstance(class_names, list):
-        result["labels_count"] = len([item for item in class_names if str(item).strip()])
+        result["error"] = "model.yaml 顶层必须是对象"
+        return result
+
+    result["model_id"] = str(document.get("model_id") or document.get("package_id") or "")
+    result["model_name"] = str(document.get("model_name") or document.get("display_name") or "")
+    result["model_version"] = str(document.get("model_version") or document.get("version") or "")
+    result["task_type"] = str(document.get("task_type") or document.get("task") or "")
+    result["target_platform"] = str(document.get("target_platform") or document.get("platform") or "")
+
+    # 兼容部署 YAML 中常见的嵌套 model.name/display_name，仅作为展示名补充。
+    model_section = document.get("model")
+    if isinstance(model_section, dict):
+        if not result["model_name"]:
+            result["model_name"] = str(model_section.get("display_name") or model_section.get("name") or "")
+        if not result["model_id"]:
+            result["model_id"] = str(model_section.get("id") or "")
+
+    input_size = (
+        document.get("input_size")
+        or document.get("imgsz")
+        or document.get("image_size")
+        or document.get("model_input_size")
+    )
+    parsed_input = _parse_input_size(input_size)
+    if parsed_input:
+        result["input_size"] = parsed_input
+
+    class_names = document.get("class_names", document.get("names"))
+    if isinstance(class_names, dict):
+        labels = [str(class_names[key]).strip() for key in sorted(class_names) if str(class_names[key]).strip()]
+    elif isinstance(class_names, list):
+        labels = [str(item).strip() for item in class_names if str(item).strip()]
+    else:
+        labels = []
+    result["labels_count"] = len(labels)
     return result
 
 
-def _count_labels(path: Path) -> int:
+def _parse_input_size(raw: Any) -> list[int] | None:
     try:
-        return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
-    except (OSError, UnicodeDecodeError):
-        return 0
+        if isinstance(raw, int):
+            return [raw, raw] if raw > 0 else None
+        if isinstance(raw, str):
+            value = raw.strip().strip("[]")
+            parts = [part.strip() for part in value.replace(",", " ").split() if part.strip()]
+            if len(parts) == 1:
+                size = int(parts[0])
+                return [size, size] if size > 0 else None
+            if len(parts) >= 2:
+                width, height = int(parts[0]), int(parts[1])
+                return [width, height] if width > 0 and height > 0 else None
+        if isinstance(raw, list):
+            if len(raw) == 1:
+                size = int(raw[0])
+                return [size, size] if size > 0 else None
+            if len(raw) >= 2:
+                width, height = int(raw[0]), int(raw[1])
+                return [width, height] if width > 0 and height > 0 else None
+    except (TypeError, ValueError):
+        return None
+    return None
 
 
 def _normalized_path(value: str | None) -> str | None:
