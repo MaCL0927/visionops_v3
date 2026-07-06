@@ -20,6 +20,16 @@ from .response_utils import error_document, send_bytes, send_json, timestamp_ms
 from .runtime_client import RuntimeClient, RuntimeResponse, RuntimeUnavailable
 from .sdk_bridge_settings import apply_orbbec_settings, get_orbbec_settings_payload
 from .algorithm_settings import apply_algorithm_settings, get_algorithm_settings_payload
+from .vision_box_settings import apply_vision_box_settings, get_vision_box_settings_payload, load_vision_box_settings
+from .dataset_manager import (
+    create_and_upload_dataset,
+    create_dataset_package,
+    delete_image,
+    get_image_file,
+    list_images,
+    list_packages,
+    save_runtime_snapshot,
+)
 
 
 FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
@@ -95,6 +105,18 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/settings/algorithm":
             self._send_algorithm_settings()
             return
+        if path == "/api/settings/vision_box":
+            self._send_vision_box_settings()
+            return
+        if path == "/api/dataset/images":
+            self._send_dataset_images()
+            return
+        if path == "/api/dataset/packages":
+            self._send_dataset_packages()
+            return
+        if path.startswith("/api/dataset/images/") and path.endswith("/content"):
+            self._send_dataset_image_content(path)
+            return
         if path in DOWNSTREAM_PATHS:
             name, target, status_endpoint = DOWNSTREAM_PATHS[path]
             self._proxy_downstream(name, target, status_endpoint)
@@ -121,8 +143,28 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/settings/algorithm":
             self._apply_algorithm_settings()
             return
+        if path == "/api/settings/vision_box":
+            self._apply_vision_box_settings()
+            return
+        if path == "/api/dataset/images/capture":
+            self._capture_dataset_image()
+            return
+        if path == "/api/dataset/packages/create":
+            self._create_dataset_package()
+            return
+        if path == "/api/dataset/upload":
+            self._upload_dataset_package()
+            return
         if path in PROXY_PATHS:
             self._proxy_runtime(path, expected_method=PROXY_PATHS[path])
+            return
+        self._send_collector_error(404, "ROUTE_NOT_FOUND", "接口不存在", True)
+
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        path = urlsplit(self.path).path
+        if path.startswith("/api/dataset/images/"):
+            self._delete_dataset_image(path)
             return
         self._send_collector_error(404, "ROUTE_NOT_FOUND", "接口不存在", True)
 
@@ -167,6 +209,12 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
 
     def _send_frontend_config(self) -> None:
         config = self.server.config
+        try:
+            board = load_vision_box_settings(config)
+            board_path = get_vision_box_settings_payload(config).get("config_path")
+        except Exception:
+            board = {"default_mode": "factory", "disk_warning_percent": 85}
+            board_path = None
         send_json(self, 200, {
             "schema_version": "1.0",
             "message_type": "collector_frontend_config",
@@ -176,9 +224,138 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             "models_root": config.models_root,
             "device_id": config.device_id,
             "snapshot_refresh_interval_ms": config.snapshot_refresh_interval_ms,
-            "status_refresh_interval_ms": config.status_refresh_interval_ms,
+            "status_refresh_interval_ms": board.get("status_refresh_interval_ms", config.status_refresh_interval_ms),
+            "default_mode": board.get("default_mode", "factory"),
+            "disk_warning_percent": board.get("disk_warning_percent", 85),
+            "vision_box_settings_path": board_path,
         })
 
+    def _send_vision_box_settings(self) -> None:
+        try:
+            payload = get_vision_box_settings_payload(self.server.config)
+        except Exception as error:  # noqa: BLE001 - expose local settings diagnostics
+            self._send_collector_error(
+                500,
+                "VISION_BOX_SETTINGS_READ_FAILED",
+                "读取视觉盒子设置失败",
+                True,
+                detail=str(error),
+            )
+            return
+        send_json(self, 200, payload)
+
+    def _apply_vision_box_settings(self) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        try:
+            result = apply_vision_box_settings(self.server.config, payload)
+        except ValueError as error:
+            self._send_collector_error(400, "VISION_BOX_SETTINGS_INVALID", str(error), True)
+            return
+        except PermissionError as error:
+            self._send_collector_error(403, "VISION_BOX_SETTINGS_PERMISSION_DENIED", "写入视觉盒子配置权限不足", True, detail=str(error))
+            return
+        except Exception as error:  # noqa: BLE001 - expose local apply diagnostics
+            self._send_collector_error(500, "VISION_BOX_SETTINGS_APPLY_FAILED", "应用视觉盒子设置失败", True, detail=str(error))
+            return
+        send_json(self, 200, result)
+
+    def _send_dataset_images(self) -> None:
+        query = parse_qs(urlsplit(self.path).query)
+        try:
+            offset = int((query.get("offset") or ["0"])[0])
+            limit = int((query.get("limit") or ["24"])[0])
+            payload = list_images(offset=offset, limit=limit)
+        except Exception as error:  # noqa: BLE001 - local dataset diagnostics
+            self._send_collector_error(500, "DATASET_LIST_FAILED", "读取采集图片列表失败", True, detail=str(error))
+            return
+        send_json(self, 200, payload)
+
+    def _send_dataset_packages(self) -> None:
+        query = parse_qs(urlsplit(self.path).query)
+        try:
+            limit = int((query.get("limit") or ["20"])[0])
+            payload = list_packages(limit=limit)
+        except Exception as error:  # noqa: BLE001
+            self._send_collector_error(500, "DATASET_PACKAGE_LIST_FAILED", "读取上传包列表失败", True, detail=str(error))
+            return
+        send_json(self, 200, payload)
+
+    def _send_dataset_image_content(self, path: str) -> None:
+        try:
+            filename = path[len("/api/dataset/images/"):-len("/content")]
+            file_path, content_type = get_image_file(filename)
+            send_bytes(self, 200, file_path.read_bytes(), content_type, {"Cache-Control": "no-cache"})
+        except FileNotFoundError:
+            self._send_collector_error(404, "DATASET_IMAGE_NOT_FOUND", "采集图片不存在", True)
+        except ValueError as error:
+            self._send_collector_error(400, "DATASET_IMAGE_INVALID", str(error), True)
+        except OSError as error:
+            self._send_collector_error(500, "DATASET_IMAGE_READ_FAILED", "读取采集图片失败", True, detail=str(error))
+
+    def _delete_dataset_image(self, path: str) -> None:
+        try:
+            filename = path[len("/api/dataset/images/"):]
+            payload = delete_image(filename)
+        except FileNotFoundError:
+            self._send_collector_error(404, "DATASET_IMAGE_NOT_FOUND", "采集图片不存在", True)
+            return
+        except ValueError as error:
+            self._send_collector_error(400, "DATASET_IMAGE_INVALID", str(error), True)
+            return
+        except OSError as error:
+            self._send_collector_error(500, "DATASET_IMAGE_DELETE_FAILED", "删除采集图片失败", True, detail=str(error))
+            return
+        send_json(self, 200, payload)
+
+    def _capture_dataset_image(self) -> None:
+        try:
+            payload = save_runtime_snapshot(self.server.runtime_client)
+        except RuntimeUnavailable as error:
+            self._send_collector_error(502, "RUNTIME_SNAPSHOT_UNREACHABLE", "无法从 Runtime 获取快照", True, detail=str(error))
+            return
+        except PermissionError as error:
+            self._send_collector_error(403, "DATASET_IMAGE_PERMISSION_DENIED", "保存采集图片权限不足", True, detail=str(error))
+            return
+        except Exception as error:  # noqa: BLE001
+            self._send_collector_error(500, "DATASET_CAPTURE_FAILED", "保存采集图片失败", True, detail=str(error))
+            return
+        send_json(self, 200, payload)
+
+    def _create_dataset_package(self) -> None:
+        payload_body = self._read_json_body()
+        if payload_body is None:
+            return
+        try:
+            payload = create_dataset_package(payload_body)
+        except ValueError as error:
+            self._send_collector_error(400, "DATASET_PACKAGE_EMPTY", str(error), True)
+            return
+        except PermissionError as error:
+            self._send_collector_error(403, "DATASET_PACKAGE_PERMISSION_DENIED", "创建采集包权限不足", True, detail=str(error))
+            return
+        except Exception as error:  # noqa: BLE001
+            self._send_collector_error(500, "DATASET_PACKAGE_FAILED", "创建采集包失败", True, detail=str(error))
+            return
+        send_json(self, 200, payload)
+
+    def _upload_dataset_package(self) -> None:
+        payload_body = self._read_json_body()
+        if payload_body is None:
+            return
+        try:
+            payload = create_and_upload_dataset(self.server.config, payload_body)
+        except ValueError as error:
+            self._send_collector_error(400, "DATASET_UPLOAD_INVALID", str(error), True)
+            return
+        except PermissionError as error:
+            self._send_collector_error(403, "DATASET_UPLOAD_PERMISSION_DENIED", "打包或上传权限不足", True, detail=str(error))
+            return
+        except Exception as error:  # noqa: BLE001
+            self._send_collector_error(500, "DATASET_UPLOAD_FAILED", "打包上传失败", True, detail=str(error))
+            return
+        send_json(self, 200, payload)
 
 
     def _current_runtime_model_for_settings(self) -> dict[str, Any] | None:

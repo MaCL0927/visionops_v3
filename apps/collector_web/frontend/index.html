@@ -54,18 +54,19 @@
         <section id="page-capture" class="page">
           <div class="two-col-layout">
             <aside class="left-steps">
-              <button class="step-btn active" data-capture-step="shoot"><span class="step-num">1</span><span><b>拍照采集</b><em>实时预览并暂存图片</em></span></button>
-              <button class="step-btn" data-capture-step="upload"><span class="step-num">2</span><span><b>确认上传</b><em>查看记录与导出入口</em></span></button>
-              <div class="tip-card"><b>数据说明</b><p>本阶段采集记录只保存在浏览器临时状态，刷新页面后清空，不上传服务器。</p></div>
+              <button class="step-btn active" data-capture-step="shoot"><span class="step-num">1</span><span><b>拍照采集</b><em>保存到边缘端数据集</em></span></button>
+              <button class="step-btn" data-capture-step="upload"><span class="step-num">2</span><span><b>确认上传</b><em>分页预览、打包与上传</em></span></button>
+              <div class="tip-card"><b>数据说明</b><p>采集图片保存到 /opt/visionops_v3/data/images；打包文件保存到 /opt/visionops_v3/data/upload_packages。</p></div>
             </aside>
             <section class="content-card">
               <section id="capture-shoot" class="subscreen active">
-                <div class="screen-head"><div><div class="kicker">采集上传 / 第 1 步</div><h1>拍照采集</h1><p>使用 Runtime 当前快照进行预览、下载或加入临时采集记录。</p></div><div class="head-actions"><button id="capture-refresh">刷新快照</button><button id="capture-shoot-btn" class="primary">拍照采集</button><button id="capture-download">本地下载</button></div></div>
+                <div class="screen-head"><div><div class="kicker">采集上传 / 第 1 步</div><h1>拍照采集</h1><p>使用 Runtime 当前快照进行预览、下载或保存到边缘端数据集。</p></div><div class="head-actions"><button id="capture-refresh">刷新快照</button><button id="capture-shoot-btn" class="primary">拍照采集并保存</button><button id="capture-download">本地下载</button></div></div>
                 <div class="camera-stage capture-stage"><img id="capture-image" class="stage-image" alt="采集快照"><div id="capture-empty" class="stage-empty">等待 Runtime snapshot</div><div class="camera-label"><b>实时预览 / 当前快照</b><span id="capture-message">尚未刷新</span></div></div>
               </section>
               <section id="capture-upload" class="subscreen">
-                <div class="screen-head"><div><div class="kicker">采集上传 / 第 2 步</div><h1>采集记录与上传</h1><p>确认临时采集记录；真实采集包和上传服务将在后续阶段接入。</p></div><div class="head-actions"><button id="capture-clear">清空记录</button><button id="capture-export" disabled>导出采集包</button><button id="capture-upload-server" disabled class="primary">上传服务器</button></div></div>
-                <div class="folder-card-strip"><div class="folder-card active"><b>本次采集</b><em><span id="capture-count">0</span> 张</em></div><div class="folder-card"><b>导出状态</b><em>待接入</em></div><div class="folder-card"><b>上传状态</b><em>待接入</em></div></div>
+                <div class="screen-head"><div><div class="kicker">采集上传 / 第 2 步</div><h1>采集记录与上传</h1><p>分页读取边缘端已保存图片，避免图片过多导致 Web 卡顿。</p></div><div class="head-actions"><button id="capture-refresh-list">刷新列表</button><button id="capture-clear">删除当前页</button><button id="capture-upload-server" class="primary">上传服务器</button></div></div>
+                <div class="folder-card-strip"><div class="folder-card active"><b>已保存图片</b><em><span id="capture-count">0</span> 张</em></div><div class="folder-card"><b>导出状态</b><em id="capture-export-status">等待打包</em></div><div class="folder-card"><b>上传状态</b><em id="capture-upload-status">等待上传</em></div></div>
+                <div class="capture-list-toolbar"><span id="capture-page-info">0-0 / 0</span><div><button id="capture-prev-page">上一页</button><button id="capture-next-page">下一页</button></div></div>
                 <div id="capture-records" class="preview-grid"><div class="empty-copy">暂无采集记录</div></div>
               </section>
             </section>
@@ -118,6 +119,57 @@
         <div class="register-grid"><article class="register-card"><h3>Gateway Registers</h3><div id="gateway-registers" class="register-table empty-copy">服务未连接</div></article><article class="register-card"><h3>Business App Registers</h3><div id="app-registers" class="register-table empty-copy">服务未连接</div></article></div>
       </section>
     </main>
+
+
+
+    <div id="capture-preview-modal" class="modal-mask capture-modal-mask" aria-hidden="true">
+      <section class="capture-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="capture-preview-title">
+        <div class="dialog-head">
+          <div><h2 id="capture-preview-title">图片预览</h2><p id="capture-preview-meta">--</p></div>
+          <button id="capture-preview-close" class="close-btn" aria-label="关闭">×</button>
+        </div>
+        <div class="capture-preview-body">
+          <img id="capture-preview-image" alt="采集图片预览">
+        </div>
+        <div class="dialog-actions">
+          <button id="capture-preview-delete" class="danger-soft">删除这张图片</button>
+          <button id="capture-preview-done" class="primary">关闭</button>
+        </div>
+      </section>
+    </div>
+
+    <div id="capture-upload-modal" class="modal-mask capture-modal-mask" aria-hidden="true">
+      <section class="capture-upload-dialog" role="dialog" aria-modal="true" aria-labelledby="capture-upload-title">
+        <div class="dialog-head">
+          <div><h2 id="capture-upload-title">上传确认</h2><p>确认后将先在边缘端打包本地图片，再上传到视觉盒子设置中配置的服务端目录。</p></div>
+          <button id="capture-upload-close" class="close-btn" aria-label="关闭">×</button>
+        </div>
+        <div class="upload-form-grid">
+          <label class="setting-field">设备 ID *<input id="upload-device-id" required></label>
+          <label class="setting-field">客户 ID *<input id="upload-customer-id" required></label>
+          <label class="setting-field">联系方式（选填）<input id="upload-contact-info" placeholder="手机号、微信或邮箱"></label>
+          <label class="setting-field">备注（选填）<textarea id="upload-remark" rows="3" placeholder="可留空"></textarea></label>
+        </div>
+        <div id="capture-upload-confirm-message" class="settings-inline-status">请确认设备 ID 与客户 ID，上传失败时本地压缩包也会保留。</div>
+        <div class="dialog-actions">
+          <button id="capture-upload-cancel">取消</button>
+          <button id="capture-upload-confirm" class="primary">确认上传</button>
+        </div>
+      </section>
+    </div>
+
+    <div id="capture-result-modal" class="modal-mask capture-modal-mask" aria-hidden="true">
+      <section class="capture-result-dialog" role="dialog" aria-modal="true" aria-labelledby="capture-result-title">
+        <div class="dialog-head">
+          <div><h2 id="capture-result-title">上传结果</h2><p id="capture-result-subtitle">--</p></div>
+          <button id="capture-result-close" class="close-btn" aria-label="关闭">×</button>
+        </div>
+        <div id="capture-result-body" class="capture-result-body"></div>
+        <div class="dialog-actions">
+          <button id="capture-result-done" class="primary">知道了</button>
+        </div>
+      </section>
+    </div>
 
     <div id="settings-modal" class="modal-mask" aria-hidden="true">
       <section class="settings-dialog m14-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -255,34 +307,68 @@
             <div class="settings-panel-head">
               <div>
                 <h3>视觉盒子设置</h3>
-                <p>集中展示边缘端设备身份、服务地址、端口和运行目录。当前多数字段只读，后续接入真实配置接口。</p>
+                <p>展示服务地址、端口与运行目录；可配置默认启动模式、状态刷新 FPS、磁盘告警阈值和服务端上传参数。</p>
               </div>
-              <span class="settings-status-badge">边缘端</span>
+              <span id="vision-box-settings-badge" class="settings-status-badge">边缘端设置 API</span>
+            </div>
+
+            <div class="settings-section implemented-setting-block">
+              <div class="settings-section-title"><b>双网口配置</b><span>预留配置区，下一步接入真实网卡设置。</span></div>
+              <div class="settings-grid two">
+                <label class="setting-field readonly-setting-field">上位机 / 工厂网口
+                  <input id="setting-nic-factory" readonly value="待接入：如 eth0 / 192.168.1.x">
+                </label>
+                <label class="setting-field readonly-setting-field">相机 / 设备网口
+                  <input id="setting-nic-camera" readonly value="待接入：如 eth1 / 192.168.2.x">
+                </label>
+              </div>
+              <div class="settings-inline-status warn">这里只先放置双网口配置入口；真实 IP、网关、路由和重启网络服务逻辑后续 M16.x 再接入。</div>
             </div>
 
             <div class="settings-section">
-              <div class="settings-section-title"><b>服务地址</b><span>Collector 代理 Runtime、Gateway 和 Business App。</span></div>
+              <div class="settings-section-title"><b>服务地址</b><span>启动服务时固定，Web 端只展示。</span></div>
               <div class="settings-grid three">
                 <label class="setting-field readonly-setting-field">Runtime URL<input id="setting-runtime-url" readonly></label>
                 <label class="setting-field readonly-setting-field">Gateway URL<input id="setting-gateway-url" readonly></label>
                 <label class="setting-field readonly-setting-field">Business App URL<input id="setting-business-app-url" readonly></label>
                 <label class="setting-field readonly-setting-field">Device ID<input id="setting-device-id" readonly></label>
-                <label class="setting-field">状态刷新间隔 ms<input id="setting-status-interval" type="number" min="100" step="100"></label>
+                <label class="setting-field">状态刷新 FPS
+                  <select id="setting-status-fps">
+                    <option value="0.5">0.5 FPS</option>
+                    <option value="1">1 FPS</option>
+                    <option value="2">2 FPS</option>
+                    <option value="5">5 FPS</option>
+                    <option value="10">10 FPS</option>
+                  </select>
+                </label>
                 <label class="setting-field">默认启动模式<select id="setting-default-mode"><option value="factory">工厂模式</option><option value="production">生产模式</option></select></label>
               </div>
             </div>
 
             <div class="settings-section reserved-setting-block">
-              <div class="settings-section-title"><b>运行目录与存储</b><span>仅作为现场配置入口展示，暂不写入系统。</span></div>
+              <div class="settings-section-title"><b>运行目录与存储</b><span>目录和端口固定展示；磁盘告警阈值可保存生效。</span></div>
               <div class="settings-grid three">
-                <label class="setting-field">模型目录<input id="setting-models-root" value="/opt/visionops_v3/models"></label>
-                <label class="setting-field">采集数据目录<input id="setting-data-root" value="/opt/visionops_v3/data"></label>
-                <label class="setting-field">日志目录<input id="setting-log-root" value="/opt/visionops_v3/logs"></label>
+                <label class="setting-field readonly-setting-field">模型目录<input id="setting-models-root" readonly value="/opt/visionops_v3/models"></label>
+                <label class="setting-field readonly-setting-field">采集数据目录<input id="setting-data-root" readonly value="/opt/visionops_v3/data"></label>
+                <label class="setting-field readonly-setting-field">日志目录<input id="setting-log-root" readonly value="/opt/visionops_v3/logs"></label>
                 <label class="setting-field">磁盘告警阈值 %<input id="setting-disk-warning" type="number" min="50" max="99" value="85"></label>
-                <label class="setting-field">Runtime 端口<input id="setting-runtime-port" type="number" value="28081"></label>
-                <label class="setting-field">Collector Web 端口<input id="setting-collector-port" type="number" value="18091"></label>
+                <label class="setting-field readonly-setting-field">Runtime 端口<input id="setting-runtime-port" readonly value="28081"></label>
+                <label class="setting-field readonly-setting-field">Collector Web 端口<input id="setting-collector-port" readonly value="18091"></label>
               </div>
-              <div class="settings-inline-status warn">后续 M15/M16 可把这些字段接入后端设置 API、systemd env 或部署脚本。</div>
+              <div id="setting-storage-status" class="settings-inline-status">等待读取磁盘状态</div>
+            </div>
+
+            <div class="settings-section implemented-setting-block">
+              <div class="settings-section-title"><b>服务端上传配置</b><span>供“采集上传 / 确认上传”后续使用。</span></div>
+              <div class="settings-grid three">
+                <label class="setting-field">数据同步服务端 IP<input id="setting-upload-server-ip" placeholder="例如 192.168.1.100"></label>
+                <label class="setting-field">SSH 用户<input id="setting-upload-ssh-user" placeholder="例如 pc / ubuntu"></label>
+                <label class="setting-field">SSH 密码<input id="setting-upload-ssh-password" type="password" autocomplete="new-password" placeholder="保存到本机配置文件"></label>
+                <label class="setting-field">SSH 端口<input id="setting-upload-ssh-port" type="number" min="1" max="65535" value="22"></label>
+                <label class="setting-field">服务端接收目录<input id="setting-upload-remote-dir" placeholder="/opt/visionops_uploads"></label>
+                <label class="setting-field">上传超时时间 s<input id="setting-upload-timeout" type="number" min="5" max="3600" value="60"></label>
+              </div>
+              <div class="settings-inline-status">配置保存到 /opt/visionops_v3/config/vision_box_settings.json；后续采集上传确认页会读取这些参数执行同步。</div>
             </div>
           </section>
 

@@ -324,3 +324,29 @@ python3 tools/benchmark_runtime.py \
 - Rockchip YOLOv8-seg 13 输出和 fused segmentation 输出均保留支持。
 - 若 proto mask 为空，会回退 bbox polygon，`mask.source` 标记为 `bbox_fallback`；正常真实 mask 标记为 `proto`。
 - 顺手修复 C++ Runtime 对 `input_size:` 缩进 list 写法的解析。
+
+## M16 视觉盒子设置更新
+
+- 新增 `/api/settings/vision_box` 读取/保存视觉盒子配置。
+- 配置文件默认保存到 `/opt/visionops_v3/config/vision_box_settings.json`。
+- 视觉盒子设置页增加双网口预留区、服务地址只读展示、状态刷新 FPS、默认启动模式、磁盘告警阈值、运行目录只读展示和服务端上传配置。
+- 默认启动模式现在会在 Web 加载后生效。
+
+## M16.1 数据集采集上传
+
+- 采集图片保存到 `/opt/visionops_v3/data/images`。
+- 采集包保存到 `/opt/visionops_v3/data/upload_packages`。
+- Web 采集上传页改为服务端持久化记录，支持分页预览、删除、打包、上传。
+- 上传配置读取 `/opt/visionops_v3/config/vision_box_settings.json` 的 `upload` 字段。
+- 上传失败时保留本地 tar.gz，便于后续重试或手动拷贝。
+- 图片列表分页读取，默认每页 24 张，避免一次性加载大量图片导致 Web 卡顿。
+
+## M16.2 数据集上传确认与包命名
+
+- 采集图片目录：`/opt/visionops_v3/data/images`。
+- 上传包目录统一为：`/opt/visionops_v3/data/upload_packages`。
+- 图片列表保持分页读取和 lazy loading，点击缩略图/预览按钮会弹出放大预览弹窗，弹窗内可删除当前图片。
+- “上传服务器”按钮会弹出确认界面，必填设备 ID 和客户 ID，可选联系方式、备注。
+- 上传前自动打包，包名格式：`设备ID_客户ID_创建时间.tar.gz`。
+- 压缩包内 manifest.json 包含 device_id、customer_id、contact_info、remark、created_at、counts.all、package_name。
+- 上传失败时本地压缩包仍保留在 upload_packages 目录，并在 Web 结果弹窗中展示本地包路径和错误信息。

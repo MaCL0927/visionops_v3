@@ -6,7 +6,7 @@ const fields = {
   gateway_url: "setting-gateway-url",
   business_app_url: "setting-business-app-url",
   device_id: "setting-device-id",
-  status_refresh_interval_ms: "setting-status-interval",
+  status_refresh_fps: "setting-status-fps",
   display_fps: "setting-display-fps",
   camera_model: "setting-camera-model",
   rgb_profile: "setting-rgb-profile",
@@ -25,6 +25,12 @@ const fields = {
   disk_warning_percent: "setting-disk-warning",
   runtime_port: "setting-runtime-port",
   collector_port: "setting-collector-port",
+  upload_server_ip: "setting-upload-server-ip",
+  upload_ssh_user: "setting-upload-ssh-user",
+  upload_ssh_password: "setting-upload-ssh-password",
+  upload_ssh_port: "setting-upload-ssh-port",
+  upload_remote_dir: "setting-upload-remote-dir",
+  upload_timeout: "setting-upload-timeout",
   inference_fps: "setting-inference-fps",
   algorithm_model: "setting-algorithm-model",
   algorithm_task: "setting-algorithm-task",
@@ -65,6 +71,8 @@ let latestBridgeSettings = null;
 let bridgeSettingsLoading = false;
 let latestAlgorithmSettings = null;
 let algorithmSettingsLoading = false;
+let latestVisionBoxSettings = null;
+let visionBoxSettingsLoading = false;
 
 function element(id) { return document.getElementById(id); }
 
@@ -210,6 +218,93 @@ function updateBridgeStatus(settings) {
   }
 }
 
+
+function updateVisionBoxStatus(payload) {
+  const badge = element("vision-box-settings-badge");
+  if (badge) badge.textContent = payload?.config_path ? "配置已接入" : "边缘端设置 API";
+  const storageNode = element("setting-storage-status");
+  if (storageNode) {
+    const storage = payload?.storage?.project_root || null;
+    if (storage && storage.used_percent != null) {
+      storageNode.textContent = `磁盘使用率 ${storage.used_percent}% / 告警阈值 ${storage.warning_percent}%（${storage.path}）`;
+      storageNode.className = storage.warning ? "settings-inline-status warn" : "settings-inline-status";
+    } else {
+      storageNode.textContent = "未读取到磁盘状态";
+      storageNode.className = "settings-inline-status warn";
+    }
+  }
+}
+
+function fillVisionBoxSettings(payload) {
+  const settings = payload?.settings || {};
+  const services = payload?.services || {};
+  const paths = payload?.paths || {};
+  const upload = settings.upload || {};
+  setValue(fields.runtime_url, services.runtime_url ?? getState().config.runtime_url);
+  setValue(fields.gateway_url, services.gateway_url ?? getState().config.gateway_url);
+  setValue(fields.business_app_url, services.business_app_url ?? getState().config.business_app_url);
+  setValue(fields.device_id, services.device_id ?? getState().config.device_id);
+  setValue(fields.status_refresh_fps, settings.status_refresh_fps ?? intervalMsToFps(getState().config.status_refresh_interval_ms, 0.5));
+  setValue(fields.default_mode, settings.default_mode ?? getState().config.default_mode ?? "factory");
+  setValue(fields.models_root, paths.models_root ?? getState().config.models_root);
+  setValue(fields.data_root, paths.data_root ?? getState().config.data_root);
+  setValue(fields.log_root, paths.log_root ?? getState().config.log_root);
+  setValue(fields.disk_warning_percent, settings.disk_warning_percent ?? getState().config.disk_warning_percent);
+  setValue(fields.runtime_port, services.runtime_port ?? getState().config.runtime_port);
+  setValue(fields.collector_port, services.collector_port ?? getState().config.collector_port);
+  setValue(fields.upload_server_ip, upload.server_ip ?? "");
+  setValue(fields.upload_ssh_user, upload.ssh_user ?? "");
+  setValue(fields.upload_ssh_password, upload.ssh_password ?? "");
+  setValue(fields.upload_ssh_port, upload.ssh_port ?? 22);
+  setValue(fields.upload_remote_dir, upload.remote_dir ?? "/opt/visionops_uploads");
+  setValue(fields.upload_timeout, upload.timeout_s ?? 60);
+  updateVisionBoxStatus(payload);
+}
+
+async function loadVisionBoxSettings() {
+  if (visionBoxSettingsLoading) return;
+  visionBoxSettingsLoading = true;
+  try {
+    const payload = await requestJson(endpoints.visionBoxSettings);
+    latestVisionBoxSettings = payload;
+    fillVisionBoxSettings(payload);
+  } catch (error) {
+    latestVisionBoxSettings = null;
+    const storageNode = element("setting-storage-status");
+    if (storageNode) {
+      const detail = error instanceof ApiError && error.body?.error?.message ? error.body.error.message : error.message;
+      storageNode.textContent = `读取视觉盒子设置失败：${detail}`;
+      storageNode.className = "settings-inline-status warn";
+    }
+  } finally {
+    visionBoxSettingsLoading = false;
+  }
+}
+
+function buildVisionBoxPayload(config) {
+  return {
+    default_mode: config.default_mode,
+    status_refresh_fps: getNumber(fields.status_refresh_fps, intervalMsToFps(config.status_refresh_interval_ms, 0.5)),
+    disk_warning_percent: config.disk_warning_percent,
+    upload: {
+      server_ip: getValue(fields.upload_server_ip, ""),
+      ssh_user: getValue(fields.upload_ssh_user, ""),
+      ssh_password: getValue(fields.upload_ssh_password, ""),
+      ssh_port: getNumber(fields.upload_ssh_port, 22),
+      remote_dir: getValue(fields.upload_remote_dir, "/opt/visionops_uploads"),
+      timeout_s: getNumber(fields.upload_timeout, 60),
+    },
+  };
+}
+
+async function saveVisionBoxSettings(config) {
+  const result = await postJson(endpoints.visionBoxSettings, buildVisionBoxPayload(config));
+  latestVisionBoxSettings = result;
+  fillVisionBoxSettings(result);
+  if (result.changed === false) return { skipped: true, message: "视觉盒子设置未变化" };
+  return { skipped: false, message: "视觉盒子设置已保存" };
+}
+
 async function loadOrbbecSettings() {
   if (bridgeSettingsLoading) return;
   bridgeSettingsLoading = true;
@@ -341,6 +436,7 @@ function fill(config) {
   const inferenceFps = intervalMsToFps(config.inference_interval_ms, 2);
   for (const [key, id] of Object.entries(fields)) {
     if (key === "display_fps") setValue(id, displayFps);
+    else if (key === "status_refresh_fps") setValue(id, intervalMsToFps(config.status_refresh_interval_ms, 0.5));
     else if (key === "inference_fps") setValue(id, inferenceFps);
     else setValue(id, config[key]);
   }
@@ -368,7 +464,7 @@ function readConfigFromForm() {
     preview_refresh_interval_ms: previewIntervalMs,
     snapshot_refresh_interval_ms: previewIntervalMs,
     inference_interval_ms: inferenceIntervalMs,
-    status_refresh_interval_ms: getNumber(fields.status_refresh_interval_ms, 2000),
+    status_refresh_interval_ms: fpsToIntervalMs(getNumber(fields.status_refresh_fps, intervalMsToFps(current.status_refresh_interval_ms, 0.5)), current.status_refresh_interval_ms || 2000),
     rgb_profile: rgbProfile,
     depth_profile: getValue(fields.depth_profile, current.depth_profile || "orbbec:1280x720@30"),
     depth_unit: getValue(fields.depth_unit, "mm"),
@@ -448,6 +544,7 @@ function open() {
   modal.setAttribute("aria-hidden", "false");
   setNotice("相机设置已接入 Orbbec 336L SDK Bridge API；算法设置会按模型任务类型写入对应 model.yaml。", "");
   loadOrbbecSettings();
+  loadVisionBoxSettings();
   loadAlgorithmSettings();
 }
 
@@ -465,6 +562,8 @@ function activateSettingsTab(panelId) {
   });
   document.querySelectorAll(".settings-panel").forEach((panel) => panel.classList.toggle("active", panel.id === panelId));
   if (panelId === "algorithm-settings-panel") loadAlgorithmSettings(getValue(fields.algorithm_model, ""));
+  if (panelId === "board-settings-panel") loadVisionBoxSettings();
+  if (panelId === "camera-settings-panel") loadOrbbecSettings();
 }
 
 function markUnsaved() { showSaveStatus("有未保存的修改"); }
@@ -496,6 +595,16 @@ async function saveSettings() {
       setNotice(`Orbbec 设置未生效：${detail}`, "error");
       return;
     }
+  }
+
+  try {
+    const board = await saveVisionBoxSettings(config);
+    messages.push(board.message);
+  } catch (error) {
+    const detail = error instanceof ApiError && error.body?.error?.message ? error.body.error.message : error.message;
+    showSaveStatus(`视觉盒子设置保存失败：${detail}`, "error");
+    setNotice(`视觉盒子设置未生效：${detail}`, "error");
+    return;
   }
 
   try {
@@ -535,6 +644,7 @@ export function initSettings() {
   element("settings-reset").addEventListener("click", () => {
     fill(getState().savedConfig || getState().config);
     loadOrbbecSettings();
+    loadVisionBoxSettings();
     loadAlgorithmSettings();
     showSaveStatus("已恢复到 Collector 默认、当前 Bridge 与当前模型配置，尚未保存");
   });

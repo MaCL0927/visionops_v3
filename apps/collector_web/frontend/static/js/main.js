@@ -17,13 +17,16 @@ function activateFactoryPage(name) {
   if (name === "capture") refreshCapture();
 }
 
-function toggleProduction() {
-  const entering = !getState().productionMode;
+function setProductionMode(entering) {
   updateState({ productionMode: entering });
   document.getElementById("factory-mode").classList.toggle("active", !entering);
   document.getElementById("production-mode").classList.toggle("active", entering);
   document.getElementById("mode-toggle").textContent = entering ? "返回工厂模式" : "切换生产模式";
   if (entering) refreshProduction();
+}
+
+function toggleProduction() {
+  setProductionMode(!getState().productionMode);
 }
 
 async function loadConfig() {
@@ -79,7 +82,14 @@ async function main() {
 
   document.querySelectorAll(".top-tab").forEach((tab) => tab.addEventListener("click", () => activateFactoryPage(tab.dataset.page)));
   document.getElementById("mode-toggle").addEventListener("click", toggleProduction);
-  await checkCollector(); await refreshCalibration("position");
+  window.addEventListener("visionops:settings-saved", (event) => {
+    const mode = event.detail?.config?.default_mode;
+    if (mode === "production") setProductionMode(true);
+    if (mode === "factory") setProductionMode(false);
+  });
+  if (getState().config.default_mode === "production") setProductionMode(true);
+  await checkCollector();
+  if (!getState().productionMode) await refreshCalibration("position");
   scheduleSnapshotRefresh();
   scheduleStatusRefresh();
 }

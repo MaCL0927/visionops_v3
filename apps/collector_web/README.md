@@ -210,3 +210,26 @@ curl -s -X POST http://127.0.0.1:18091/api/settings/sdk_bridge/orbbec336l \
 ```
 
 该接口会写入 Orbbec Bridge env 并重启 `visionops-orbbec336l-bridge.service`。如果 Collector 不是 root 运行，需要配置受限 sudo 权限。
+
+## M16 视觉盒子设置
+
+Collector Web 增加视觉盒子设置 API：
+
+```bash
+curl -s http://127.0.0.1:18091/api/settings/vision_box | python3 -m json.tool
+```
+
+配置默认保存到 `/opt/visionops_v3/config/vision_box_settings.json`，可通过 `VISIONOPS_VISION_BOX_SETTINGS_FILE` 覆盖。Runtime/Gateway/Business App URL、Device ID、目录和端口为启动参数/部署固定值，页面只展示；可写字段包括默认启动模式、状态刷新 FPS、磁盘告警阈值和服务端上传配置。
+
+## M16.1 采集上传 API
+
+Collector Web 提供边缘端数据集采集、打包与上传接口：
+
+- `POST /api/dataset/images/capture`：保存当前 Runtime 快照到 `/opt/visionops_v3/data/images`。
+- `GET /api/dataset/images?offset=0&limit=24`：分页读取图片。
+- `GET /api/dataset/images/<filename>/content`：预览图片。
+- `DELETE /api/dataset/images/<filename>`：删除图片。
+- `POST /api/dataset/packages/create`：打包为 `/opt/visionops_v3/data/upload_packages/*.tar.gz`。
+- `POST /api/dataset/upload`：使用视觉盒子设置里的 SSH 配置打包并上传。
+
+使用 SSH 密码上传时，运行环境需要安装 `paramiko` 或系统 `sshpass`。
