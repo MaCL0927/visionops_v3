@@ -31,6 +31,12 @@ const fields = {
   upload_ssh_port: "setting-upload-ssh-port",
   upload_remote_dir: "setting-upload-remote-dir",
   upload_timeout: "setting-upload-timeout",
+  eth0_ip: "setting-eth0-ip",
+  eth0_netmask: "setting-eth0-netmask",
+  eth0_gateway: "setting-eth0-gateway",
+  eth1_ip: "setting-eth1-ip",
+  eth1_netmask: "setting-eth1-netmask",
+  eth1_gateway: "setting-eth1-gateway",
   inference_fps: "setting-inference-fps",
   algorithm_model: "setting-algorithm-model",
   algorithm_task: "setting-algorithm-task",
@@ -219,6 +225,37 @@ function updateBridgeStatus(settings) {
 }
 
 
+function updateNetworkStatus(payload) {
+  const network = payload?.network || {};
+  const interfaces = network.interfaces || {};
+  for (const iface of ["eth0", "eth1"]) {
+    const item = interfaces[iface] || {};
+    const stateNode = element(`setting-${iface}-state`);
+    if (stateNode) {
+      if (item.exists) {
+        const ip = item.ip || "未配置 IP";
+        const gateway = item.gateway ? `，网关 ${item.gateway}` : "";
+        stateNode.textContent = `${item.state || "unknown"}，${ip}/${item.prefix ?? ""}${gateway}`;
+        stateNode.className = item.ip ? "profile-match-hint ok" : "profile-match-hint warn";
+      } else {
+        stateNode.textContent = item.error ? `未检测到：${item.error}` : "未检测到该网口";
+        stateNode.className = "profile-match-hint warn";
+      }
+    }
+  }
+  const status = element("setting-network-status");
+  if (status) {
+    const apply = payload?.network_apply || null;
+    if (apply?.attempted) {
+      status.textContent = apply.ok ? `双网口配置已应用，耗时 ${apply.duration_ms ?? 0} ms。` : `双网口配置应用失败：${JSON.stringify(apply.errors || [])}`;
+      status.className = apply.ok ? "settings-inline-status" : "settings-inline-status warn";
+    } else {
+      status.textContent = "已读取 eth0 / eth1 当前状态；修改后点击保存会立即执行 ip 命令应用。";
+      status.className = "settings-inline-status warn";
+    }
+  }
+}
+
 function updateVisionBoxStatus(payload) {
   const badge = element("vision-box-settings-badge");
   if (badge) badge.textContent = payload?.config_path ? "配置已接入" : "边缘端设置 API";
@@ -258,7 +295,18 @@ function fillVisionBoxSettings(payload) {
   setValue(fields.upload_ssh_port, upload.ssh_port ?? 22);
   setValue(fields.upload_remote_dir, upload.remote_dir ?? "/opt/visionops_uploads");
   setValue(fields.upload_timeout, upload.timeout_s ?? 60);
+  const configuredNetwork = payload?.settings?.network || {};
+  const liveNetwork = payload?.network?.interfaces || {};
+  const eth0 = configuredNetwork.eth0 || liveNetwork.eth0 || {};
+  const eth1 = configuredNetwork.eth1 || liveNetwork.eth1 || {};
+  setValue(fields.eth0_ip, eth0.ip ?? "");
+  setValue(fields.eth0_netmask, eth0.netmask ?? "");
+  setValue(fields.eth0_gateway, eth0.gateway ?? "");
+  setValue(fields.eth1_ip, eth1.ip ?? "");
+  setValue(fields.eth1_netmask, eth1.netmask ?? "");
+  setValue(fields.eth1_gateway, eth1.gateway ?? "");
   updateVisionBoxStatus(payload);
+  updateNetworkStatus(payload);
 }
 
 async function loadVisionBoxSettings() {
@@ -294,6 +342,20 @@ function buildVisionBoxPayload(config) {
       remote_dir: getValue(fields.upload_remote_dir, "/opt/visionops_uploads"),
       timeout_s: getNumber(fields.upload_timeout, 60),
     },
+    network: {
+      interfaces: {
+        eth0: {
+          ip: getValue(fields.eth0_ip, ""),
+          netmask: getValue(fields.eth0_netmask, ""),
+          gateway: getValue(fields.eth0_gateway, ""),
+        },
+        eth1: {
+          ip: getValue(fields.eth1_ip, ""),
+          netmask: getValue(fields.eth1_netmask, ""),
+          gateway: getValue(fields.eth1_gateway, ""),
+        },
+      },
+    },
   };
 }
 
@@ -302,6 +364,8 @@ async function saveVisionBoxSettings(config) {
   latestVisionBoxSettings = result;
   fillVisionBoxSettings(result);
   if (result.changed === false) return { skipped: true, message: "视觉盒子设置未变化" };
+  const net = result.network_apply || {};
+  if (net.attempted) return { skipped: false, message: net.ok ? "视觉盒子设置已保存，双网口配置已应用" : "视觉盒子设置已保存，但双网口配置应用失败" };
   return { skipped: false, message: "视觉盒子设置已保存" };
 }
 

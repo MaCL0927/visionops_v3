@@ -350,3 +350,14 @@ python3 tools/benchmark_runtime.py \
 - 上传前自动打包，包名格式：`设备ID_客户ID_创建时间.tar.gz`。
 - 压缩包内 manifest.json 包含 device_id、customer_id、contact_info、remark、created_at、counts.all、package_name。
 - 上传失败时本地压缩包仍保留在 upload_packages 目录，并在 Web 结果弹窗中展示本地包路径和错误信息。
+
+
+## M16.3 双网口设置
+
+视觉盒子设置页已接入 eth0 / eth1 双网口配置。Collector 后端通过 `ip -j addr` 和 `ip -j route` 读取当前 IP、子网掩码、网关；保存时写入 `/opt/visionops_v3/config/vision_box_settings.json`，并在配置变化时调用 `ip` 命令立即应用。默认 eth0 metric=100、eth1 metric=200。详见 `docs/handoff/m16_3_dual_nic_settings.md`。
+
+## M16.4 Production Mode Live View
+
+- Production mode default view is now a full-screen realtime inference visualization, sharing Runtime, active model, overlay drawing, and inference interval with the model validation realtime function.
+- The previous Collector/Runtime/Gateway/Business App JSON status dashboard is moved to a secondary production status view, toggled by the `消息状态` / `生产画面` button.
+- Returning from production mode to factory mode requires fixed admin credentials: `admin` / `admin`.

@@ -108,15 +108,46 @@
       </section>
 
       <section id="production-mode" class="mode-page">
-        <div class="production-head"><div><div class="kicker">生产模式</div><h1>生产运行监控</h1><p>集中显示 Runtime、Gateway、Business App 和业务结果，依赖离线时保持页面可用。</p></div><div class="head-actions"><span class="status-pill">生产监控</span><button id="production-app-evaluate">执行业务判断</button><button id="production-refresh" class="primary">手动刷新</button></div></div>
-        <div class="status-grid">
-          <article class="status-card"><div class="card-title"><h3>Collector</h3><span id="collector-badge" class="badge">unknown</span></div><pre id="collector-status">加载中</pre></article>
-          <article class="status-card"><div class="card-title"><h3>Runtime</h3><span id="runtime-badge" class="badge">unknown</span></div><pre id="runtime-status">加载中</pre></article>
-          <article class="status-card"><div class="card-title"><h3>Gateway</h3><span id="gateway-badge" class="badge">unknown</span></div><pre id="gateway-status">加载中</pre></article>
-          <article class="status-card"><div class="card-title"><h3>Business App</h3><span id="app-badge" class="badge">unknown</span></div><pre id="app-status">加载中</pre></article>
+        <div class="production-shell">
+          <div class="production-head production-live-head">
+            <div>
+              <div class="kicker">生产模式</div>
+              <h1 id="production-title">生产实时检测</h1>
+              <p id="production-subtitle">默认调用模型验证页同一个 Runtime 和当前模型，对当前摄像头画面进行实时推理和可视化显示。</p>
+            </div>
+            <div class="head-actions">
+              <span id="production-live-status" class="status-pill">实时检测准备中</span>
+              <button id="production-view-toggle">消息状态</button>
+              <button id="production-app-evaluate">执行业务判断</button>
+              <button id="production-refresh" class="primary">手动刷新</button>
+            </div>
+          </div>
+
+          <section id="production-live-view" class="production-view active">
+            <div class="production-live-stage camera-stage overlay-stage">
+              <img id="production-image" class="stage-image" alt="生产模式实时画面">
+              <canvas id="production-overlay"></canvas>
+              <div id="production-empty" class="stage-empty">正在启动生产实时检测</div>
+              <div class="production-live-info">
+                <div><span>当前模型</span><b id="production-current-model">--</b></div>
+                <div><span>任务 / 目标</span><b id="production-result-brief">--</b></div>
+                <div><span>总耗时</span><b id="production-timing-total">--</b></div>
+                <div><span>推理 FPS</span><b id="production-fps">--</b></div>
+              </div>
+            </div>
+          </section>
+
+          <section id="production-status-view" class="production-view">
+            <div class="status-grid">
+              <article class="status-card"><div class="card-title"><h3>Collector</h3><span id="collector-badge" class="badge">unknown</span></div><pre id="collector-status">加载中</pre></article>
+              <article class="status-card"><div class="card-title"><h3>Runtime</h3><span id="runtime-badge" class="badge">unknown</span></div><pre id="runtime-status">加载中</pre></article>
+              <article class="status-card"><div class="card-title"><h3>Gateway</h3><span id="gateway-badge" class="badge">unknown</span></div><pre id="gateway-status">加载中</pre></article>
+              <article class="status-card"><div class="card-title"><h3>Business App</h3><span id="app-badge" class="badge">unknown</span></div><pre id="app-status">加载中</pre></article>
+            </div>
+            <div class="summary-grid"><article><h3>Latest Result 摘要</h3><pre id="production-result-summary">尚无结果</pre></article><article><h3>Latest Gateway Message</h3><pre id="production-gateway-summary">尚无消息</pre></article><article><h3>Latest App Decision</h3><pre id="production-app-summary">尚无决策</pre></article></div>
+            <div class="register-grid"><article class="register-card"><h3>Gateway Registers</h3><div id="gateway-registers" class="register-table empty-copy">服务未连接</div></article><article class="register-card"><h3>Business App Registers</h3><div id="app-registers" class="register-table empty-copy">服务未连接</div></article></div>
+          </section>
         </div>
-        <div class="summary-grid"><article><h3>Latest Result 摘要</h3><pre id="production-result-summary">尚无结果</pre></article><article><h3>Latest Gateway Message</h3><pre id="production-gateway-summary">尚无消息</pre></article><article><h3>Latest App Decision</h3><pre id="production-app-summary">尚无决策</pre></article></div>
-        <div class="register-grid"><article class="register-card"><h3>Gateway Registers</h3><div id="gateway-registers" class="register-table empty-copy">服务未连接</div></article><article class="register-card"><h3>Business App Registers</h3><div id="app-registers" class="register-table empty-copy">服务未连接</div></article></div>
       </section>
     </main>
 
@@ -167,6 +198,25 @@
         <div id="capture-result-body" class="capture-result-body"></div>
         <div class="dialog-actions">
           <button id="capture-result-done" class="primary">知道了</button>
+        </div>
+      </section>
+    </div>
+
+
+    <div id="admin-auth-modal" class="modal-mask admin-auth-mask" aria-hidden="true">
+      <section class="admin-auth-dialog" role="dialog" aria-modal="true" aria-labelledby="admin-auth-title">
+        <div class="dialog-head">
+          <div><h2 id="admin-auth-title">管理员验证</h2><p>返回工厂模式需要管理员账号和密码。</p></div>
+          <button id="admin-auth-close" class="close-btn" aria-label="关闭">×</button>
+        </div>
+        <div class="admin-auth-body">
+          <label class="setting-field">管理员账号<input id="admin-auth-user" value="admin" autocomplete="username"></label>
+          <label class="setting-field">管理员密码<input id="admin-auth-password" type="password" autocomplete="current-password" placeholder="请输入密码"></label>
+          <div id="admin-auth-message" class="settings-inline-status warn">当前测试账号：admin，密码：admin。</div>
+        </div>
+        <div class="dialog-actions">
+          <button id="admin-auth-cancel">取消</button>
+          <button id="admin-auth-confirm" class="primary">确认返回工厂模式</button>
         </div>
       </section>
     </div>
@@ -313,16 +363,28 @@
             </div>
 
             <div class="settings-section implemented-setting-block">
-              <div class="settings-section-title"><b>双网口配置</b><span>预留配置区，下一步接入真实网卡设置。</span></div>
-              <div class="settings-grid two">
-                <label class="setting-field readonly-setting-field">上位机 / 工厂网口
-                  <input id="setting-nic-factory" readonly value="待接入：如 eth0 / 192.168.1.x">
-                </label>
-                <label class="setting-field readonly-setting-field">相机 / 设备网口
-                  <input id="setting-nic-camera" readonly value="待接入：如 eth1 / 192.168.2.x">
-                </label>
+              <div class="settings-section-title"><b>双网口配置</b><span>读取 eth0 / eth1 当前网络状态，保存后立即应用。</span></div>
+              <div class="dual-nic-grid">
+                <div class="dual-nic-card">
+                  <div class="dual-nic-card-title"><b>eth0</b><span>上位机 / 工厂网</span></div>
+                  <div id="setting-eth0-state" class="profile-match-hint">读取中</div>
+                  <div class="settings-grid three">
+                    <label class="setting-field">IP 地址<input id="setting-eth0-ip" placeholder="例如 192.168.1.121"></label>
+                    <label class="setting-field">子网掩码<input id="setting-eth0-netmask" placeholder="例如 255.255.255.0"></label>
+                    <label class="setting-field">网关<input id="setting-eth0-gateway" placeholder="可留空"></label>
+                  </div>
+                </div>
+                <div class="dual-nic-card">
+                  <div class="dual-nic-card-title"><b>eth1</b><span>相机 / 设备网</span></div>
+                  <div id="setting-eth1-state" class="profile-match-hint">读取中</div>
+                  <div class="settings-grid three">
+                    <label class="setting-field">IP 地址<input id="setting-eth1-ip" placeholder="例如 192.168.2.121"></label>
+                    <label class="setting-field">子网掩码<input id="setting-eth1-netmask" placeholder="例如 255.255.255.0"></label>
+                    <label class="setting-field">网关<input id="setting-eth1-gateway" placeholder="通常可留空"></label>
+                  </div>
+                </div>
               </div>
-              <div class="settings-inline-status warn">这里只先放置双网口配置入口；真实 IP、网关、路由和重启网络服务逻辑后续 M16.x 再接入。</div>
+              <div id="setting-network-status" class="settings-inline-status warn">修改网口参数可能导致当前 Web 连接短暂中断；建议 eth0 作为上位机/工厂网，eth1 作为相机/设备网。</div>
             </div>
 
             <div class="settings-section">

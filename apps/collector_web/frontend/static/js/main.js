@@ -1,27 +1,80 @@
-import { endpoints, requestJson, postJson } from "./api.js";
+import { endpoints, postJson, requestJson } from "./api.js";
 import { getState, loadPersistedConfig, normalizeConfig, updateState } from "./state.js";
 import { initCalibration, refreshCalibration } from "./pages/calibration.js";
 import { initCapture, refreshCapture } from "./pages/capture.js";
 import { initValidate } from "./pages/validate.js";
 import { initSettings } from "./pages/settings.js";
-import { initProduction, refreshProduction } from "./pages/production.js";
+import { initProduction, refreshProduction, setProductionActive } from "./pages/production.js";
 
-function activateFactoryPage(name) {
+let pendingFactoryPage = null;
+
+function showAdminAuth(targetPage = null) {
+  pendingFactoryPage = targetPage;
+  const modal = document.getElementById("admin-auth-modal");
+  const user = document.getElementById("admin-auth-user");
+  const password = document.getElementById("admin-auth-password");
+  const message = document.getElementById("admin-auth-message");
+  if (user) user.value = "admin";
+  if (password) password.value = "";
+  if (message) {
+    message.textContent = "请输入管理员账号和密码。";
+    message.className = "settings-inline-status warn";
+  }
+  modal.classList.add("active");
+  modal.setAttribute("aria-hidden", "false");
+  setTimeout(() => password?.focus(), 50);
+}
+
+function hideAdminAuth() {
+  const modal = document.getElementById("admin-auth-modal");
+  modal.classList.remove("active");
+  modal.setAttribute("aria-hidden", "true");
+}
+
+function confirmAdminAuth() {
+  const user = document.getElementById("admin-auth-user")?.value?.trim();
+  const password = document.getElementById("admin-auth-password")?.value ?? "";
+  const message = document.getElementById("admin-auth-message");
+  if (user === "admin" && password === "admin") {
+    const target = pendingFactoryPage || getState().activePage || "calibration";
+    pendingFactoryPage = null;
+    hideAdminAuth();
+    setProductionMode(false, { authenticated: true });
+    activateFactoryPage(target, { authenticated: true });
+    return;
+  }
+  if (message) {
+    message.textContent = "账号或密码错误。当前测试账号：admin，密码：admin。";
+    message.className = "settings-inline-status error";
+  }
+}
+
+function activateFactoryPage(name, options = {}) {
+  if (getState().productionMode && !options.authenticated) {
+    showAdminAuth(name);
+    return;
+  }
   document.querySelectorAll(".top-tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.page === name));
   document.querySelectorAll("#factory-mode .page").forEach((page) => page.classList.toggle("active", page.id === `page-${name}`));
   updateState({ activePage: name, productionMode: false });
   document.getElementById("factory-mode").classList.add("active");
   document.getElementById("production-mode").classList.remove("active");
   document.getElementById("mode-toggle").textContent = "切换生产模式";
+  setProductionActive(false);
   if (name === "calibration") refreshCalibration("position");
   if (name === "capture") refreshCapture();
 }
 
-function setProductionMode(entering) {
+function setProductionMode(entering, options = {}) {
+  if (!entering && getState().productionMode && !options.authenticated) {
+    showAdminAuth(getState().activePage || "calibration");
+    return;
+  }
   updateState({ productionMode: entering });
   document.getElementById("factory-mode").classList.toggle("active", !entering);
   document.getElementById("production-mode").classList.toggle("active", entering);
   document.getElementById("mode-toggle").textContent = entering ? "返回工厂模式" : "切换生产模式";
+  setProductionActive(entering);
   if (entering) refreshProduction();
 }
 
@@ -82,6 +135,12 @@ async function main() {
 
   document.querySelectorAll(".top-tab").forEach((tab) => tab.addEventListener("click", () => activateFactoryPage(tab.dataset.page)));
   document.getElementById("mode-toggle").addEventListener("click", toggleProduction);
+  document.getElementById("admin-auth-confirm")?.addEventListener("click", confirmAdminAuth);
+  document.getElementById("admin-auth-cancel")?.addEventListener("click", hideAdminAuth);
+  document.getElementById("admin-auth-close")?.addEventListener("click", hideAdminAuth);
+  document.getElementById("admin-auth-password")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") confirmAdminAuth();
+  });
   window.addEventListener("visionops:settings-saved", (event) => {
     const mode = event.detail?.config?.default_mode;
     if (mode === "production") setProductionMode(true);
