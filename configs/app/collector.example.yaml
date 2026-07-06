@@ -13,7 +13,7 @@ collector:
     gateway_url: http://127.0.0.1:19090
     business_app_url: http://127.0.0.1:19110
   models:
-    models_root: ./models
+    models_root: /opt/visionops_v3/models
   refresh:
     snapshot_refresh_interval_ms: 1000
     status_refresh_interval_ms: 2000

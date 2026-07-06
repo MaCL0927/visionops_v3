@@ -1,5 +1,7 @@
 # VisionOps C++ Runtime
 
+> 总体项目入口请优先阅读仓库根目录 `README.md`。本文档聚焦 Runtime 的构建、启动、模型包与 HTTP API。
+
 本目录已经不只是早期 M3 的 HTTP Mock。当前 Runtime 已进入 `RK3576 / LB3576` 真机联调阶段，支持：
 
 - `mock` backend：用于 x86 开发、接口契约验证和无硬件环境调试。
@@ -54,9 +56,13 @@ cmake --build build-rknn -j4
 - `VISIONOPS_ENABLE_RKNN=ON` 时才编译真实 RKNN Runner。
 - `VISIONOPS_ENABLE_OPENCV=ON` 后，HP60C JPEG 可解码为 `RGB888` 进入 RKNN 推理。
 
-## RGA 预处理加速（可选）
+## RGA 预处理与 M13.1 优化
 
-本版本只加入 RGA 预处理入口，不包含 RKNN input/output buffer 深度复用，也不包含 HP60C raw 原始帧入口。
+当前 Runtime 已接入：
+
+- 可选 `RGA` 预处理入口
+- 更深一层的 RKNN input / output buffer 复用
+- HP60C Bridge 可选原始帧入口
 
 RGA 真机构建示例：
 
@@ -80,12 +86,24 @@ cmake --build build-rknn-rga-release -j4
 --preprocess-backend cpu   # 默认 CPU letterbox
 --preprocess-backend rga   # 强制使用 RGA resize + CPU letterbox paste
 --preprocess-backend auto  # RGA 可用时优先使用，失败时回退 CPU
---rga-mode resize_rgb      # 当前唯一支持模式
+--rga-mode resize_rgb      # 当前推荐模式
 ```
 
-`/api/runtime/status` 会展示 `preprocess.backend_requested / backend_active / rga_available`，`infer_once` 的 `debug` 字段会展示 `preprocess_backend_requested / preprocess_backend_active / rga_used`，用于确认是否真正走到 RGA。
+`/api/runtime/status` 会展示 `frame_source`、`loaded_model` 和当前运行状态；`infer_once` 的耗时字段可用于确认预处理与推理路径是否变化。
 
-注意：HP60C Bridge 当前仍使用 `/stream/snapshot.jpg` JPEG 路径；没有加入 `--hp60c-raw-path` 等 raw 原始帧参数。
+如果 HP60C Bridge 提供原始帧入口，当前还支持：
+
+```bash
+--hp60c-raw-path /stream/frame.rgb
+--hp60c-raw-width 1280
+--hp60c-raw-height 720
+--hp60c-raw-pixel-format RGB888
+```
+
+当前支持：
+
+- `application/octet-stream` 的 `RGB888 / BGR888`
+- `image/bmp`
 
 ## 常用启动方式
 

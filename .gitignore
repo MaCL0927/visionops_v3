@@ -66,8 +66,12 @@ logs/
 diagnostics/
 
 # 生成的运行时配置
+config/
 configs/runtime/*.env
 configs/runtime/generated/
+*.env.bak*
+*.bak
+Log/
 
 # 编辑器与系统文件
 .idea/

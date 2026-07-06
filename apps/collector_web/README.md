@@ -1,5 +1,7 @@
 # VisionOps Collector Web
 
+> 总体项目入口请优先阅读仓库根目录 `README.md`。本文档只补充 Collector Web 的局部职责、接口和设置说明。
+
 Collector Web 是边缘端的管理、展示和代理入口，当前已经用于 `3576` 真机联调，但它不是生产推理进程。
 
 在当前主链路中：
@@ -160,8 +162,10 @@ GET  /api/app/registers
 
 - Collector 不做生产推理。
 - Collector 不直接保存真实模型或现场私密配置。
-- 设置页当前以代理配置与前端临时配置为主，不写 `.env`。
-- M13 起，预览刷新与自动推理间隔会持久化到浏览器本地存储。
+- 浏览器侧刷新间隔、部分页面状态仍保存在 `localStorage`。
+- Orbbec Bridge 设置会写入对应 bridge env 并触发服务重启。
+- 视觉盒子设置会写入 `/opt/visionops_v3/config/vision_box_settings.json`。
+- 算法阈值会写回当前模型目录下的 `model.yaml`。
 - 真实采集保存、采集包导出和上传仍是后续工作。
 
 ## 验证
