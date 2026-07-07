@@ -1,97 +1,1546 @@
+
 <!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>VisionOps v3 标注界面</title>
-  <link rel="stylesheet" href="/static/css/main.css" />
+  <title>VisionOps 标注器</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; background:#eef2f7; color:#111827; overflow:hidden; }
+    .top { height:52px; display:flex; align-items:center; gap:12px; padding:0 14px; background:#fff; border-bottom:1px solid #dbe3ef; }
+    .title { font-weight:800; font-size:17px; }
+    .badge { background:#eef2ff; color:#3730a3; border-radius:999px; padding:5px 9px; font-size:12px; white-space:nowrap; }
+    .badge.warn { background:#fff7ed; color:#c2410c; }
+    .layout { display:grid; grid-template-columns:220px minmax(0,1fr) 300px; height:calc(100vh - 52px); }
+    .side { background:#fff; border-right:1px solid #dbe3ef; overflow:auto; padding:10px; }
+    .right { background:#fff; border-left:1px solid #dbe3ef; overflow:auto; padding:14px; }
+    .center { overflow:hidden; position:relative; background:#e9eef6; }
+    canvas { width:100%; height:100%; display:block; cursor:default; }
+    canvas.draw-ready { cursor:crosshair; }
+    button, select, input { border:0; border-radius:9px; padding:9px 11px; font-weight:700; }
+    button { background:#2563eb; color:#fff; cursor:pointer; }
+    button.dark { background:#111827; }
+    button.green { background:#059669; }
+    button.orange { background:#d97706; }
+    button.gray { background:#e5e7eb; color:#111827; }
+    button.big { width:100%; padding:14px 14px; font-size:16px; border-radius:12px; }
+    select, input { background:#f3f4f6; color:#111827; width:100%; }
+    .row { display:flex; gap:7px; flex-wrap:wrap; margin:9px 0; }
+    .imgitem { padding:7px 9px; border-radius:8px; cursor:pointer; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .imgitem.active { background:#2563eb; color:#fff; }
+    .imgitem.auto { border-left:4px solid #f97316; }
+    .imgitem.manual { border-left:4px solid #059669; }
+    .muted { color:#64748b; font-size:13px; line-height:1.55; }
+    .section-title { margin:16px 0 7px; font-size:15px; font-weight:800; }
+    .boxlist { font-size:13px; margin-top:10px; }
+    .boxitem { padding:7px; border:1px solid #e5e7eb; border-radius:8px; margin-bottom:6px; cursor:pointer; }
+    .boxitem.active { border-color:#2563eb; background:#eff6ff; }
+    .hint { background:#f8fafc; border:1px solid #e5e7eb; padding:10px; border-radius:10px; font-size:12px; line-height:1.6; }
+    .auto-notice { display:none; background:#fff7ed; border:1px solid #fdba74; color:#9a3412; border-radius:12px; padding:10px; font-size:13px; line-height:1.5; margin:10px 0; }
+    .canvas-auto-warning {
+      display:none; position:absolute; top:18px; right:22px; z-index:4;
+      pointer-events:none; user-select:none;
+      background:rgba(220,38,38,.18); color:rgba(185,28,28,.92);
+      border:2px solid rgba(220,38,38,.45); border-radius:16px;
+      padding:14px 20px; font-size:30px; font-weight:900; letter-spacing:1px;
+      text-shadow:0 1px 2px rgba(255,255,255,.85);
+    }
+    .assist-panel { margin-top:18px; padding-top:14px; border-top:1px solid #e5e7eb; }
+    .roi-launch-panel { margin-top:18px; padding-top:14px; border-top:1px solid #e5e7eb; }
+    .roi-modal { width:min(1500px, 98vw); max-height:96vh; overflow:hidden; padding:0; display:flex; flex-direction:column; }
+    .roi-modal-header { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:20px 24px; border-bottom:1px solid #e5e7eb; }
+    .roi-modal-header h2 { margin:0; font-size:26px; }
+    .roi-modal-header .muted { font-size:15px; }
+    .roi-modal-body { display:grid; grid-template-columns:390px minmax(0,1fr); gap:0; min-height:0; overflow:hidden; }
+    .roi-modal-left { padding:22px; border-right:1px solid #e5e7eb; overflow:auto; max-height:calc(96vh - 84px); }
+    .roi-modal-main { padding:22px 24px; overflow:auto; max-height:calc(96vh - 84px); }
+    .roi-modal h3, .roi-modal .section-title { font-size:19px; }
+    .roi-modal .muted, .roi-modal .hint, .roi-modal .quick-msg, .roi-modal .roi-small { font-size:15px; }
+    .roi-modal button, .roi-modal select, .roi-modal input { font-size:16px; padding:11px 13px; }
+    .roi-preview { width:100%; max-height:360px; object-fit:contain; background:#f8fafc; border:1px solid #e5e7eb; border-radius:12px; margin:8px 0; }
+    .roi-crop { max-width:100%; max-height:360px; width:auto; height:auto; object-fit:contain; background:#111827; border-radius:12px; margin:0; display:block; }
+    .roi-crop-wrap { display:inline-block; position:relative; max-width:100%; background:#111827; border-radius:12px; margin:8px 0; overflow:hidden; vertical-align:top; }
+    .fine-roi-panel { margin:0; padding:12px 14px; border:1px solid #e5e7eb; border-radius:12px; background:#f8fafc; min-height:100%; }
+    .fine-roi-toolbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:0 0 6px; }
+    .fine-roi-toolbar label { display:inline-flex; align-items:center; gap:6px; font-size:15px; font-weight:800; color:#111827; }
+    .fine-roi-toolbar input[type="checkbox"] { width:auto; }
+    .fine-roi-msg { color:#64748b; font-size:14px; line-height:1.45; }
+    .roi-review-top { display:grid; grid-template-columns:minmax(0,1.08fr) minmax(360px,.92fr); gap:18px; align-items:start; margin:6px 0 12px; }
+    .roi-info-card { border:1px solid #e5e7eb; border-radius:12px; background:#fff; padding:12px 14px; }
+    .roi-info-head { display:flex; flex-wrap:wrap; gap:10px 14px; align-items:center; margin-bottom:8px; font-size:15px; color:#111827; }
+    .roi-info-head strong { font-size:17px; }
+    .roi-info-chip { display:inline-flex; align-items:center; padding:4px 10px; border-radius:999px; background:#eef2ff; color:#3730a3; font-weight:700; font-size:13px; }
+    .roi-info-lines { display:grid; gap:5px; }
+    .roi-info-line { font-size:14px; color:#475569; line-height:1.45; }
+    .roi-info-line b { color:#111827; }
+    .roi-info-file { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .fine-roi-box { display:none; position:absolute; border:3px solid #f59e0b; background:rgba(245,158,11,.16); box-shadow:0 0 0 9999px rgba(15,23,42,.16); cursor:move; z-index:5; }
+    .fine-roi-handle { position:absolute; width:14px; height:14px; background:#f59e0b; border:2px solid #fff; border-radius:999px; z-index:6; }
+    .fine-roi-handle.nw { left:-8px; top:-8px; cursor:nwse-resize; }
+    .fine-roi-handle.ne { right:-8px; top:-8px; cursor:nesw-resize; }
+    .fine-roi-handle.sw { left:-8px; bottom:-8px; cursor:nesw-resize; }
+    .fine-roi-handle.se { right:-8px; bottom:-8px; cursor:nwse-resize; }
+    .roi-class-buttons { display:flex; flex-wrap:wrap; gap:10px; margin:10px 0; }
+    .roi-class-buttons button { background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; padding:10px 12px; }
+    .roi-small { font-size:15px; color:#475569; line-height:1.6; white-space:pre-wrap; }
+    .roi-nav { display:flex; gap:10px; margin:10px 0; }
+    .roi-modal-grid { display:grid; grid-template-columns:minmax(420px, 1.05fr) minmax(320px, .95fr); gap:18px; align-items:start; }
+    .roi-image-col { display:flex; flex-direction:column; align-items:flex-start; }
+    .roi-image-col.crop-col { align-items:center; }
+    .roi-image-col .muted { width:100%; }
+    .roi-crop-stage { width:100%; display:flex; justify-content:center; align-items:flex-start; }
+    .roi-field-label { margin:12px 0 6px; font-size:15px; font-weight:800; color:#111827; }
+    .roi-param-note { margin:6px 0 0; color:#64748b; font-size:13px; line-height:1.45; }
+    .roi-class-card { background:#f8fafc; border:1px solid #e5e7eb; border-radius:14px; padding:14px; margin-bottom:14px; }
+    .progress { height:14px; background:#e5e7eb; border-radius:999px; overflow:hidden; margin-top:10px; }
+    .progress-inner { height:100%; width:0%; background:#2563eb; transition:width .3s ease; }
+    .quick-msg { margin-top:8px; font-size:12px; color:#475569; line-height:1.45; }
+    .modal-mask { display:none; position:fixed; inset:0; background:rgba(15,23,42,.45); z-index:10; align-items:center; justify-content:center; }
+    .modal { width:420px; background:#fff; border-radius:16px; padding:18px; box-shadow:0 20px 60px rgba(15,23,42,.3); }
+
+    /* ROI 分类数据制作弹窗必须覆盖通用 .modal 的 420px 宽度。
+       上一版 .modal 写在 .roi-modal 后面，导致 .roi-modal 被压回 420px，
+       右侧审核区只剩很窄一条。这里用更高优先级的 .modal.roi-modal 修正。 */
+    .modal.roi-modal {
+      width:min(1500px, 98vw); height:min(1050px, 96vh); max-height:96vh;
+      padding:0; display:flex; flex-direction:column; overflow:hidden;
+    }
+    .modal.roi-modal .roi-modal-body {
+      flex:1; min-height:0; display:grid;
+      grid-template-columns:minmax(380px, 420px) minmax(760px, 1fr);
+      overflow:hidden;
+    }
+    .modal.roi-modal .roi-modal-left,
+    .modal.roi-modal .roi-modal-main {
+      max-height:none; min-height:0; overflow:auto;
+    }
+    .modal.roi-modal .roi-preview { max-height:360px; }
+    .modal.roi-modal .roi-crop { max-height:360px; }
+    @media (max-width: 1180px) {
+      .modal.roi-modal { width:98vw; height:96vh; }
+      .modal.roi-modal .roi-modal-body { grid-template-columns:360px minmax(0,1fr); }
+      .roi-review-top, .roi-modal-grid { grid-template-columns:1fr; }
+    }
+    @media (max-width: 880px) {
+      .modal.roi-modal .roi-modal-body { grid-template-columns:1fr; overflow:auto; }
+      .modal.roi-modal .roi-modal-left,
+      .modal.roi-modal .roi-modal-main { overflow:visible; max-height:none; }
+    }
+
+    .class-grid { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+    .class-chip { background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; }
+
+    .review-done-float { position:fixed; right:22px; bottom:22px; z-index:25; width:260px; }
+    .review-done-float button { width:100%; padding:15px 16px; border-radius:14px; font-size:16px; box-shadow:0 14px 32px rgba(217,119,6,.32); }
+    .review-job-msg { margin-top:8px; background:rgba(255,255,255,.96); border:1px solid #fed7aa; color:#9a3412; border-radius:12px; padding:9px 10px; font-size:12px; line-height:1.45; box-shadow:0 10px 26px rgba(15,23,42,.12); display:none; white-space:pre-wrap; }
+  </style>
 </head>
-<body class="annotator-page">
-  <header class="topbar">
-    <div>
-      <h1>VisionOps v3 标注界面</h1>
-      <p>当前版本先完成从数据文件夹跳转到独立标注界面的入口，后续再接入 v2 标注器或新的标注组件。</p>
-    </div>
-    <div class="top-actions">
-      <a class="button secondary" href="/">返回服务端控制台</a>
-    </div>
-  </header>
+<body>
+  <div class="top">
+    <div class="title">VisionOps 标注器</div>
+    <div id="batch" class="badge">batch: -</div>
+    <div id="progress" class="badge">0 / 0</div>
+    <div id="labelSource" class="badge">标注来源: -</div>
+    <div id="saveStatus" class="badge">未保存</div>
+    <div id="zoomStatus" class="badge">zoom: 100%</div>
+  </div>
 
-  <main class="annotator-shell">
-    <section class="card">
-      <div class="section-head">
-        <div>
-          <div class="label">当前 batch</div>
-          <h2 id="batchTitle">加载中...</h2>
-        </div>
-        <span id="batchBadge" class="badge muted">未加载</span>
+  <div class="layout">
+    <div class="side">
+      <div class="row">
+        <button onclick="prevImage()">A 上一张</button>
+        <button onclick="nextImage()">D 下一张</button>
       </div>
-      <div class="annotator-toolbar">
-        <button id="refreshBatchBtn">刷新数据</button>
-        <button id="showManifestBtn" class="secondary">查看 manifest</button>
-      </div>
-    </section>
+      <div id="imageList"></div>
+    </div>
 
-    <section class="annotator-main">
-      <article class="card">
-        <h2>数据文件夹信息</h2>
-        <pre id="batchInfo">加载中...</pre>
-      </article>
-      <article class="card">
-        <h2>后续标注功能预留区</h2>
-        <p>这里后续会接入 v2 的标注器逻辑，或重写为 v3 的标注组件。当前先保留独立页面、batch 上下文和 manifest 查看能力。</p>
+    <div id="canvasWrap" class="center">
+      <canvas id="canvas"></canvas>
+      <div id="canvasAutoWarning" class="canvas-auto-warning">自动标注待确认</div>
+    </div>
+
+    <div class="right">
+      <h3>标注设置</h3>
+      <div class="muted">任务类型</div>
+      <select id="taskType" onchange="onTaskChange()">
+        <option value="detection">Detection 矩形框</option>
+        <option value="obb">OBB 四点框</option>
+        <option value="segmentation">Segmentation 多边形</option>
+      </select>
+
+      <div class="section-title">类别</div>
+      <div id="classSummary" class="muted">还没有类别。画完第一个框后新增类别。</div>
+
+      <div class="row">
+        <button class="green" onclick="startDraw()">W 开始标注</button>
+        <button class="orange" onclick="deleteSelected()">Q 删除</button>
+        <button class="dark" onclick="saveCurrent(true)">S 保存</button>
+        <button class="gray" onclick="finishSegmentationPolygon()">Enter 完成多边形</button>
+      </div>
+
+      <div id="autoNotice" class="auto-notice">
+        自动标注待确认：无误按 <b>E</b>，或点击下方按钮复制到 labels。
+        <div class="row"><button class="green" onclick="confirmAutoLabel()">E 确认自动标注</button></div>
+      </div>
+
+      <div class="hint">
+        A/D：上一张/下一张。W：开始标注。Q：删除。S：保存。E：确认自动标注。Esc：取消。<br>
+        Detection：W 后拖拽矩形框。OBB：W 后依次点击 4 个角点。Segmentation：W 后依次点击多边形点，双击或 Enter 完成。鼠标滚轮缩放。<br>
+        人工标注保存到 labels；模型预标注保存到 labels_auto。
+      </div>
+
+      <div class="assist-panel">
+        <h3>模型辅助</h3>
+        <button class="green big" onclick="quickTrain()">快速学习</button>
+        <div style="height:10px"></div>
+        <button class="orange big" onclick="autoLabelRemaining()">预标注剩余图片</button>
+        <div class="progress"><div id="quickProgress" class="progress-inner"></div></div>
+        <div id="quickMsg" class="quick-msg">状态：未开始</div>
+      </div>
+
+      <div class="roi-launch-panel">
+        <h3>ROI 分类数据制作</h3>
         <div class="hint">
-          建议后续在本页完成：图片预览、标注编辑、自动标注、人工审核、任务类型确认、构建 dataset 等能力。当前不在主控制台第二步堆放这些按钮。        </div>
-        <pre id="manifestPreview">manifest 尚未加载。</pre>
-      </article>
-    </section>
-  </main>
+          用 detection 模型把当前 batch 的目标整体框裁剪成分类 ROI，再人工分配类别，输出到 data/raw_classification/&lt;类别&gt;/。
+        </div>
+        <button class="green big" onclick="openRoiModal()">打开 ROI 分类数据制作</button>
+      </div>
 
-  <script>
-    const params = new URLSearchParams(window.location.search);
-    const batchId = params.get('batch_id') || '';
-    const $ = (id) => document.getElementById(id);
-    const pretty = (value) => JSON.stringify(value, null, 2);
-    async function api(path) {
-      const res = await fetch(path);
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.message || data.detail || res.statusText);
-      return data;
+      <h3>当前标注</h3>
+      <div id="boxList" class="boxlist"></div>
+    </div>
+  </div>
+
+
+  <div class="review-done-float">
+    <button class="orange" onclick="acceptReviewedFromAnnotator()">确认审核完成</button>
+    <div id="reviewJobMsg" class="review-job-msg"></div>
+  </div>
+
+  <div id="classModal" class="modal-mask">
+    <div class="modal">
+      <h3 style="margin:0 0 8px;">选择这个框的类别</h3>
+      <div class="muted">类别顺序就是 YOLO 标签里的下标。第一次新增类别下标为 0，后续依次递增。</div>
+      <div id="existingClasses" class="class-grid"></div>
+      <div class="section-title">新建类别</div>
+      <input id="newClassInput" placeholder="例如 earphone / phone / defect" />
+      <div class="row">
+        <button class="green" onclick="confirmNewClass()">新建并使用</button>
+        <button class="gray" onclick="cancelClassModal()">取消本次框</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="roiClsModal" class="modal-mask">
+    <div class="modal roi-modal">
+      <div class="roi-modal-header">
+        <div>
+          <h2>ROI 分类数据制作</h2>
+          <div class="muted">第一版 roi_classification：检测框整体裁剪 → 人工选择分类类别 → 保存到 data/raw_classification。</div>
+        </div>
+        <button class="gray" onclick="closeRoiModal()">关闭</button>
+      </div>
+
+      <div class="roi-modal-body">
+        <div class="roi-modal-left">
+          <div class="hint">
+            生成候选时会先清空 <b>data/raw_classification/</b> 下已有数据，并删除旧的 ROI 候选 session，避免新旧分类样本混在一起。请确认旧数据不再需要后再生成。
+          </div>
+
+          <div class="section-title">1. 检测模型</div>
+          <select id="roiDetectorSelect"></select>
+
+          <div class="section-title">2. 检测与裁剪参数</div>
+          <div class="row">
+            <div style="width:48%">
+              <div class="roi-field-label">目标类别 ID</div>
+              <input id="roiTargetClassId" placeholder="可空，例如 0" />
+              <div class="roi-param-note">只裁剪该检测类别；留空表示所有类别都可作为候选。</div>
+            </div>
+            <div style="width:48%">
+              <div class="roi-field-label">目标类别名</div>
+              <input id="roiTargetClassName" placeholder="可空，例如 tube" />
+              <div class="roi-param-note">和类别 ID 二选一即可；同时填写时优先使用类别名。</div>
+            </div>
+          </div>
+          <div class="row">
+            <div style="width:48%">
+              <div class="roi-field-label">检测阈值 conf</div>
+              <input id="roiConf" placeholder="默认 0.35" />
+              <div class="roi-param-note">低于该置信度的检测框不会参与裁剪；数值越高，候选越少但更可靠。</div>
+            </div>
+            <div style="width:48%">
+              <div class="roi-field-label">裁剪扩边 padding</div>
+              <input id="roiPadding" placeholder="默认 0.05，可设 0" />
+              <div class="roi-param-note">0 表示严格按检测框裁剪；0.05 表示四周各扩展框宽/高的 5%。</div>
+            </div>
+          </div>
+          <div class="roi-field-label">多框选择策略</div>
+          <select id="roiSelectPolicy">
+            <option value="conf_area">置信度+面积</option>
+            <option value="highest_conf">最高置信度</option>
+            <option value="largest_area">最大面积</option>
+          </select>
+          <div class="roi-param-note">每张图只取一个目标框作为 ROI 候选；如果画面中只有一个目标，默认“置信度+面积”即可。</div>
+          <div style="height:14px"></div>
+          <button class="green big" onclick="buildRoiCandidates()">生成 ROI 候选</button>
+          <div class="progress"><div id="roiProgress" class="progress-inner"></div></div>
+          <div id="roiMsg" class="quick-msg">状态：未开始</div>
+        </div>
+
+        <div class="roi-modal-main">
+          <div class="roi-class-card">
+            <div class="section-title" style="margin-top:0">3. 分类类别</div>
+            <div class="muted">点击类别按钮即可把当前 ROI 保存到 data/raw_classification/&lt;类别&gt;/。类别不限于 ok/ng，可按缺陷类型新增。</div>
+            <div id="roiClassButtons" class="roi-class-buttons"></div>
+            <div class="row">
+              <input id="roiNewClassInput" placeholder="新增分类类别，例如 ok / gap_large / scratch" style="width:70%" />
+              <button class="gray" onclick="addRoiClass()">新增</button>
+            </div>
+          </div>
+
+          <div class="section-title">4. 候选 ROI 审核</div>
+          <div class="roi-review-top">
+            <div id="roiCandidateInfo" class="roi-info-card">暂无候选。</div>
+            <div class="fine-roi-panel">
+              <div class="fine-roi-toolbar">
+                <label><input id="fineRoiEnable" type="checkbox" onchange="onFineRoiToggle()" /> 启用精细 ROI</label>
+                <button id="fineRoiConfirmBtn" class="gray" onclick="confirmFineRoiPolicy()" style="display:none">确认精细 ROI</button>
+              </div>
+              <div id="fineRoiMsg" class="fine-roi-msg">默认不启用精细 ROI，直接使用检测框 + padding 的完整 ROI。</div>
+            </div>
+          </div>
+          <div class="roi-modal-grid">
+            <div class="roi-image-col">
+              <div class="muted">原图预览：绿色为检测框，红色为实际裁剪 ROI</div>
+              <img id="roiPreviewImg" class="roi-preview" style="display:none" />
+            </div>
+            <div class="roi-image-col crop-col">
+              <div class="muted">裁剪后的分类 ROI（已限制显示高度，实际训练图仍为原始裁剪尺寸）</div>
+              <div class="roi-crop-stage">
+              <div id="roiCropWrap" class="roi-crop-wrap" style="display:none">
+                <img id="roiCropImg" class="roi-crop" />
+                <div id="fineRoiBox" class="fine-roi-box">
+                  <div class="fine-roi-handle nw" data-handle="nw"></div>
+                  <div class="fine-roi-handle ne" data-handle="ne"></div>
+                  <div class="fine-roi-handle sw" data-handle="sw"></div>
+                  <div class="fine-roi-handle se" data-handle="se"></div>
+                </div>
+              </div>
+              </div>
+            </div>
+          </div>
+          <div class="roi-nav">
+            <button class="gray" onclick="prevRoiCandidate()">上一张</button>
+            <button class="gray" onclick="nextRoiCandidate()">下一张</button>
+            <button class="orange" onclick="skipRoiCandidate()">跳过</button>
+          </div>
+          <div class="hint">
+            先确认裁剪 ROI 是否完整覆盖目标，再点击上方类别按钮完成归类。分类类别不限制为 ok/ng，可以按实际缺陷类型新增。
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+let session = null;
+let currentIndex = 0;
+let currentMeta = null;
+let img = new Image();
+let annotations = [];
+let classes = [];
+let selectedIndex = -1;
+let drawingMode = false;
+let dragging = false;
+let startPt = null;
+let tempPt = null;
+let obbPoints = [];
+let segPoints = [];
+let pendingAnnotation = null;
+let baseScale = 1, zoom = 1, scale = 1, offsetX = 0, offsetY = 0;
+let mouseCanvas = null;
+let quickJobTimer = null;
+let roiJobTimer = null;
+let roiInfo = null;
+let roiSession = null;
+let roiCandidates = [];
+let roiCurrentIndex = 0;
+let fineRoiState = {
+  enabled: false,
+  box: {x1:0, y1:0, x2:1, y2:1},
+  dragging: false,
+  dragMode: '',
+  startMouse: null,
+  startBox: null
+};
+let labelSource = 'none';
+let dirty = false;
+const query = new URLSearchParams(window.location.search);
+const batchId = query.get('batch_id') || '';
+function withBatch(url) {
+  const sep = url.includes('?') ? '&' : '?';
+  return batchId ? (url + sep + 'batch_id=' + encodeURIComponent(batchId)) : url;
+}
+function notifyAndReturn(message) {
+  const el = document.getElementById('reviewJobMsg');
+  if (el) { el.style.display='block'; el.textContent=message || '审核完成，正在返回控制台...'; }
+  setTimeout(() => { window.location.href = '/'; }, 900);
+}
+
+// 主标注区编辑状态：普通模式下点击目标即可选中，随后可拖动移动、拉边缘/角点缩放。
+// ROI 分类数据制作弹窗有独立的 fineRoiState，不要与这里混用。
+let editMode = null;       // null | 'move' | 'resize' | 'point'
+let editHandle = null;     // bbox: n/ne/e/se/s/sw/w/nw；polygon/obb: 顶点下标
+let editStartPt = null;
+let editStartAnn = null;
+let editHasChanged = false;
+
+const canvas = document.getElementById('canvas');
+const wrap = document.getElementById('canvasWrap');
+const ctx = canvas.getContext('2d');
+
+function currentTask() { return document.getElementById('taskType').value; }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+async function init() {
+  const res = await fetch(withBatch('/api/annotator/session'));
+  const data = await res.json();
+  if (!res.ok) { alert(data.detail || '初始化失败'); return; }
+  session = data;
+  classes = Array.isArray(session.classes) ? [...session.classes] : [];
+  document.getElementById('taskType').value = session.default_task_type || 'detection';
+  document.getElementById('batch').textContent = 'batch: ' + session.batch_id;
+  renderClassSummary();
+  resizeCanvas();
+  await loadImage(0);
+  await loadRoiClsInfo();
+}
+
+async function refreshSession() {
+  const res = await fetch(withBatch('/api/annotator/session'));
+  const data = await res.json();
+  if (res.ok) session = data;
+}
+
+function renderClassSummary() {
+  const el = document.getElementById('classSummary');
+  el.textContent = classes.length ? classes.map((n, i) => `${i}: ${n}`).join('，') : '还没有类别。画完第一个框后新增类别。';
+}
+
+function imageLabelKind(name) {
+  if (!session) return '';
+  const stem = name.replace(/\.[^.]+$/, '');
+  // 后端没有返回逐图状态，这里只按当前图刷新；列表状态简化显示。
+  return '';
+}
+
+function renderImageList() {
+  document.getElementById('imageList').innerHTML = session.images.map((name, i) =>
+    `<div class="imgitem ${i===currentIndex?'active':''}" onclick="gotoImage(${i})">${i+1}. ${name}</div>`
+  ).join('');
+}
+
+function updateLabelSourceUI() {
+  const el = document.getElementById('labelSource');
+  const notice = document.getElementById('autoNotice');
+  const canvasWarn = document.getElementById('canvasAutoWarning');
+  const isAuto = labelSource === 'auto';
+  el.className = 'badge';
+  if (labelSource === 'manual') el.textContent = '标注来源: 人工 labels';
+  else if (isAuto) { el.textContent = '标注来源: 自动 labels_auto，待确认'; el.className = 'badge warn'; }
+  else el.textContent = '标注来源: 无';
+  notice.style.display = isAuto ? 'block' : 'none';
+  canvasWarn.style.display = isAuto ? 'block' : 'none';
+}
+
+async function loadImage(index) {
+  currentIndex = Math.max(0, Math.min(index, session.total - 1));
+  const res = await fetch(withBatch('/api/annotator/image/' + currentIndex));
+  const data = await res.json();
+  if (!res.ok) { alert(data.detail || '加载图片失败'); return; }
+  currentMeta = data;
+  if (data.task_type) document.getElementById('taskType').value = data.task_type;
+  annotations = data.annotations || [];
+  labelSource = data.label_source || 'none';
+  dirty = false;
+  selectedIndex = -1;
+  drawingMode = false;
+  dragging = false;
+  obbPoints = [];
+  segPoints = [];
+  pendingAnnotation = null;
+  mouseCanvas = null;
+  resetEditState();
+  zoom = 1;
+  img = new Image();
+  img.onload = () => { fitImageToCanvas(); draw(); };
+  img.src = data.image_url + (data.image_url.includes('?') ? '&' : '?') + 't=' + Date.now();
+  document.getElementById('progress').textContent = `${currentIndex + 1} / ${session.total}`;
+  document.getElementById('saveStatus').textContent = '已加载';
+  updateLabelSourceUI();
+  renderImageList();
+  renderBoxList();
+}
+
+function resizeCanvas() {
+  const rect = wrap.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(300, Math.floor(rect.width * dpr));
+  canvas.height = Math.max(300, Math.floor(rect.height * dpr));
+  canvas.style.width = rect.width + 'px';
+  canvas.style.height = rect.height + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (img && img.naturalWidth) { fitImageToCanvas(true); draw(); }
+}
+
+function canvasCssSize() { const r = canvas.getBoundingClientRect(); return {w:r.width, h:r.height}; }
+function fitImageToCanvas(keepZoom=false) {
+  const {w, h} = canvasCssSize();
+  baseScale = Math.min(w / img.naturalWidth, h / img.naturalHeight);
+  if (!Number.isFinite(baseScale) || baseScale <= 0) baseScale = 1;
+  if (!keepZoom) zoom = 1;
+  scale = baseScale * zoom;
+  offsetX = (w - img.naturalWidth * scale) / 2;
+  offsetY = (h - img.naturalHeight * scale) / 2;
+  updateZoomStatus();
+}
+function updateZoomStatus() { document.getElementById('zoomStatus').textContent = 'zoom: ' + Math.round(zoom * 100) + '%'; }
+function toCanvasPt(evt) { const r = canvas.getBoundingClientRect(); return {x:evt.clientX-r.left, y:evt.clientY-r.top}; }
+function toImgPtFromCanvas(p) { return {x:clamp((p.x-offsetX)/scale,0,img.naturalWidth), y:clamp((p.y-offsetY)/scale,0,img.naturalHeight)}; }
+function toImgPt(evt) { return toImgPtFromCanvas(toCanvasPt(evt)); }
+function sx(x){return x*scale+offsetX;} function sy(y){return y*scale+offsetY;}
+
+function resetEditState() {
+  editMode = null;
+  editHandle = null;
+  editStartPt = null;
+  editStartAnn = null;
+  editHasChanged = false;
+  if (canvas) canvas.style.cursor = drawingMode ? 'crosshair' : 'default';
+}
+
+function cloneAnn(ann) {
+  return JSON.parse(JSON.stringify(ann));
+}
+
+function annType(ann) {
+  return String((ann && ann.type) || 'bbox').toLowerCase();
+}
+
+function isBboxAnn(ann) {
+  const t = annType(ann);
+  return t === 'bbox' || t === 'detection' || t === 'rect' || t === 'box';
+}
+
+function isPolygonLike(ann) {
+  const t = annType(ann);
+  return t === 'obb' || t === 'segmentation' || t === 'polygon' || t === 'mask';
+}
+
+function annPoints(ann) {
+  return Array.isArray(ann && ann.points) ? ann.points : [];
+}
+
+function normBbox(ann) {
+  const x1 = Number(ann.x1), y1 = Number(ann.y1), x2 = Number(ann.x2), y2 = Number(ann.y2);
+  return {
+    x1: Math.min(x1, x2),
+    y1: Math.min(y1, y2),
+    x2: Math.max(x1, x2),
+    y2: Math.max(y1, y2),
+  };
+}
+
+function bboxHandles(ann) {
+  const b = normBbox(ann);
+  const cx = (b.x1 + b.x2) / 2;
+  const cy = (b.y1 + b.y2) / 2;
+  return [
+    ['nw', b.x1, b.y1],
+    ['n',  cx,   b.y1],
+    ['ne', b.x2, b.y1],
+    ['e',  b.x2, cy],
+    ['se', b.x2, b.y2],
+    ['s',  cx,   b.y2],
+    ['sw', b.x1, b.y2],
+    ['w',  b.x1, cy],
+  ];
+}
+
+function distToSegment(p, a, b) {
+  const vx = b[0] - a[0], vy = b[1] - a[1];
+  const wx = p.x - a[0], wy = p.y - a[1];
+  const c1 = vx * wx + vy * wy;
+  if (c1 <= 0) return Math.hypot(p.x - a[0], p.y - a[1]);
+  const c2 = vx * vx + vy * vy;
+  if (c2 <= c1) return Math.hypot(p.x - b[0], p.y - b[1]);
+  const t = c1 / Math.max(c2, 1e-6);
+  const px = a[0] + t * vx, py = a[1] + t * vy;
+  return Math.hypot(p.x - px, p.y - py);
+}
+
+function pointInPolygon(p, pts) {
+  if (!Array.isArray(pts) || pts.length < 3) return false;
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i][0], yi = pts[i][1];
+    const xj = pts[j][0], yj = pts[j][1];
+    const intersect = ((yi > p.y) !== (yj > p.y)) &&
+      (p.x < (xj - xi) * (p.y - yi) / ((yj - yi) || 1e-6) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function hitTestAnn(p) {
+  if (!img || !img.naturalWidth) return null;
+  const tol = Math.max(8 / Math.max(scale, 1e-6), 4);
+
+  // 逆序命中，后画的框优先选中。
+  for (let i = annotations.length - 1; i >= 0; i--) {
+    const ann = annotations[i];
+
+    if (isBboxAnn(ann)) {
+      const b = normBbox(ann);
+      if (![b.x1, b.y1, b.x2, b.y2].every(Number.isFinite)) continue;
+
+      // 1) 优先命中 8 个控制点。
+      for (const [handle, hx, hy] of bboxHandles(ann)) {
+        if (Math.abs(p.x - hx) <= tol && Math.abs(p.y - hy) <= tol) {
+          return {index: i, mode: 'resize', handle};
+        }
+      }
+
+      // 2) 命中边缘，也进入 resize，这样可以“拉边缘调整大小”。
+      const insideY = p.y >= b.y1 - tol && p.y <= b.y2 + tol;
+      const insideX = p.x >= b.x1 - tol && p.x <= b.x2 + tol;
+      if (insideY && Math.abs(p.x - b.x1) <= tol) return {index: i, mode: 'resize', handle: 'w'};
+      if (insideY && Math.abs(p.x - b.x2) <= tol) return {index: i, mode: 'resize', handle: 'e'};
+      if (insideX && Math.abs(p.y - b.y1) <= tol) return {index: i, mode: 'resize', handle: 'n'};
+      if (insideX && Math.abs(p.y - b.y2) <= tol) return {index: i, mode: 'resize', handle: 's'};
+
+      // 3) 命中内部，进入 move。
+      if (p.x >= b.x1 && p.x <= b.x2 && p.y >= b.y1 && p.y <= b.y2) {
+        return {index: i, mode: 'move', handle: null};
+      }
+      continue;
     }
-    async function loadBatch() {
-      if (!batchId) throw new Error('URL 缺少 batch_id');
-      $('batchTitle').textContent = batchId;
-      const result = await api('/api/server/batches/' + encodeURIComponent(batchId));
-      const batch = result.batch || result;
-      $('batchBadge').textContent = batch.status || 'unknown';
-      $('batchBadge').className = 'badge ' + (batch.status === 'rejected' ? 'danger' : (batch.status === 'extracted' ? 'warning' : ''));
-      $('batchInfo').textContent = pretty({
-        batch_id: batch.batch_id,
-        status: batch.status,
-        device_id: batch.device_id,
-        customer_id: batch.customer_id,
-        captured_at: batch.captured_at,
-        image_count: batch.image_count,
-        label_count: batch.label_count,
-        batch_path: batch.batch_path,
-        raw_path: batch.raw_path,
-        images_path: batch.images_path,
-        labels_path: batch.labels_path,
-        manifest_path: batch.manifest_path,
-      });
-      $('manifestPreview').textContent = pretty(batch.manifest || {message: '该 batch 未包含 manifest.json'});
+
+    if (isPolygonLike(ann)) {
+      const pts = annPoints(ann);
+      if (!pts.length) continue;
+
+      // 顶点命中：拖动顶点微调 OBB / segmentation。
+      for (let k = 0; k < pts.length; k++) {
+        const pt = pts[k];
+        if (Math.hypot(p.x - pt[0], p.y - pt[1]) <= tol) {
+          return {index: i, mode: 'point', handle: k};
+        }
+      }
+
+      // 边缘附近或多边形内部：拖动整体移动。
+      let nearEdge = false;
+      for (let k = 0; k < pts.length; k++) {
+        const a = pts[k];
+        const b = pts[(k + 1) % pts.length];
+        if (distToSegment(p, a, b) <= tol) {
+          nearEdge = true;
+          break;
+        }
+      }
+      if (nearEdge || pointInPolygon(p, pts)) {
+        return {index: i, mode: 'move', handle: null};
+      }
     }
-    $('refreshBatchBtn').onclick = () => loadBatch().catch(err => { $('batchInfo').textContent = err.message; });
-    $('showManifestBtn').onclick = () => {
-      const block = $('manifestPreview');
-      block.scrollIntoView({behavior: 'smooth', block: 'start'});
-    };
-    loadBatch().catch(err => {
-      $('batchTitle').textContent = '加载失败';
-      $('batchBadge').textContent = 'error';
-      $('batchBadge').className = 'badge danger';
-      $('batchInfo').textContent = err.message;
+  }
+  return null;
+}
+
+function cursorForHit(hit) {
+  if (!hit) return drawingMode ? 'crosshair' : 'default';
+  if (hit.mode === 'move') return 'move';
+  if (hit.mode === 'point') return 'grab';
+  const h = hit.handle || '';
+  if (h === 'n' || h === 's') return 'ns-resize';
+  if (h === 'e' || h === 'w') return 'ew-resize';
+  if (h === 'ne' || h === 'sw') return 'nesw-resize';
+  if (h === 'nw' || h === 'se') return 'nwse-resize';
+  return 'pointer';
+}
+
+function resizeBboxAnn(ann, startAnn, p, handle) {
+  const b0 = normBbox(startAnn);
+  let x1 = b0.x1, y1 = b0.y1, x2 = b0.x2, y2 = b0.y2;
+
+  if (String(handle).includes('w')) x1 = p.x;
+  if (String(handle).includes('e')) x2 = p.x;
+  if (String(handle).includes('n')) y1 = p.y;
+  if (String(handle).includes('s')) y2 = p.y;
+
+  x1 = clamp(x1, 0, img.naturalWidth);
+  x2 = clamp(x2, 0, img.naturalWidth);
+  y1 = clamp(y1, 0, img.naturalHeight);
+  y2 = clamp(y2, 0, img.naturalHeight);
+
+  // 避免框被拖成过小或反转后不可见。
+  if (Math.abs(x2 - x1) < 3 || Math.abs(y2 - y1) < 3) return;
+
+  ann.x1 = Math.min(x1, x2);
+  ann.y1 = Math.min(y1, y2);
+  ann.x2 = Math.max(x1, x2);
+  ann.y2 = Math.max(y1, y2);
+  ann.type = 'bbox';
+}
+
+function moveBboxAnn(ann, startAnn, dx, dy) {
+  const b0 = normBbox(startAnn);
+  const w = b0.x2 - b0.x1;
+  const h = b0.y2 - b0.y1;
+  let nx1 = clamp(b0.x1 + dx, 0, Math.max(0, img.naturalWidth - w));
+  let ny1 = clamp(b0.y1 + dy, 0, Math.max(0, img.naturalHeight - h));
+  ann.x1 = nx1;
+  ann.y1 = ny1;
+  ann.x2 = nx1 + w;
+  ann.y2 = ny1 + h;
+  ann.type = 'bbox';
+}
+
+function drawEditHandles(ann) {
+  ctx.save();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#f59e0b';
+  ctx.fillStyle = '#ffffff';
+
+  if (isBboxAnn(ann)) {
+    for (const [, hx, hy] of bboxHandles(ann)) {
+      const x = sx(hx), y = sy(hy);
+      ctx.beginPath();
+      ctx.rect(x - 5, y - 5, 10, 10);
+      ctx.fill();
+      ctx.stroke();
+    }
+  } else if (isPolygonLike(ann)) {
+    const pts = annPoints(ann);
+    pts.forEach((pt, i) => {
+      const x = sx(pt[0]), y = sy(pt[1]);
+      ctx.beginPath();
+      ctx.arc(x, y, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#f59e0b';
+      ctx.font = '13px Arial';
+      ctx.fillText(String(i + 1), x + 7, y - 7);
+      ctx.fillStyle = '#ffffff';
     });
-  </script>
+  }
+
+  ctx.restore();
+}
+
+function draw() {
+  const {w, h} = canvasCssSize();
+  ctx.clearRect(0,0,w,h);
+  ctx.fillStyle = '#e9eef6'; ctx.fillRect(0,0,w,h);
+  if (img && img.naturalWidth) ctx.drawImage(img, offsetX, offsetY, img.naturalWidth*scale, img.naturalHeight*scale);
+  annotations.forEach((ann,i)=>drawAnn(ann, i===selectedIndex));
+  if (dragging && startPt && tempPt) drawAnn({type:'bbox', class_id:-1, x1:startPt.x, y1:startPt.y, x2:tempPt.x, y2:tempPt.y}, true, true);
+  if (obbPoints.length) drawAnn({type:'obb', class_id:-1, points:obbPoints}, true, true);
+  if (segPoints.length) drawAnn({type:'segmentation', class_id:-1, points:segPoints}, true, true);
+  if (drawingMode && mouseCanvas) drawCrosshair(mouseCanvas.x, mouseCanvas.y);
+}
+
+function drawCrosshair(x, y) {
+  const {w, h} = canvasCssSize();
+  ctx.save(); ctx.strokeStyle='rgba(239,68,68,.85)'; ctx.lineWidth=1; ctx.setLineDash([6,4]);
+  ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.moveTo(x,0); ctx.lineTo(x,h); ctx.stroke();
+  ctx.setLineDash([]); ctx.fillStyle='rgba(239,68,68,.95)'; ctx.font='16px Arial'; ctx.fillText('标注中', x+8, y-8); ctx.restore();
+}
+function clsName(id) { if (id < 0) return '待选择类别'; return classes[id] || ('class_' + id); }
+function drawAnn(ann, active=false, temp=false) {
+  ctx.save();
+  ctx.lineWidth = active ? 3 : 2;
+  ctx.strokeStyle = temp ? '#f59e0b' : (active ? '#22c55e' : '#38bdf8');
+  ctx.fillStyle = ctx.strokeStyle;
+  const label = `${ann.class_id>=0?ann.class_id:'?'}: ${clsName(ann.class_id)}`;
+
+  if (isPolygonLike(ann)) {
+    const pts = annPoints(ann);
+    if (pts.length) {
+      ctx.beginPath();
+      ctx.moveTo(sx(pts[0][0]), sy(pts[0][1]));
+      for (let i=1;i<pts.length;i++) ctx.lineTo(sx(pts[i][0]), sy(pts[i][1]));
+      if (annType(ann) === 'segmentation' && pts.length >= 3) {
+        ctx.closePath();
+        ctx.fillStyle='rgba(34,197,94,.20)';
+        ctx.fill();
+        ctx.fillStyle=ctx.strokeStyle;
+      }
+      if (annType(ann) === 'obb' && pts.length === 4) ctx.closePath();
+      ctx.stroke();
+      pts.forEach(p=>{ctx.beginPath(); ctx.arc(sx(p[0]), sy(p[1]), 4, 0, Math.PI*2); ctx.fill();});
+      ctx.font = "35px Arial";
+      ctx.fillText(label, sx(pts[0][0])+4, sy(pts[0][1])-6);
+    }
+  } else {
+    const b = normBbox(ann);
+    ctx.strokeRect(sx(b.x1), sy(b.y1), (b.x2-b.x1)*scale, (b.y2-b.y1)*scale);
+    ctx.font = "35px Arial";
+    ctx.fillText(label, sx(b.x1)+4, sy(b.y1)-6);
+  }
+  ctx.restore();
+
+  if (active && !temp) drawEditHandles(ann);
+}
+function renderBoxList() {
+  const list = document.getElementById('boxList');
+  if (!annotations.length) { list.innerHTML='<div class="muted">暂无标注</div>'; return; }
+  list.innerHTML = annotations.map((a,i)=>`<div class="boxitem ${i===selectedIndex?'active':''}" onclick="selectAnn(${i})">${i+1}. ${annType(a) === 'segmentation' ? 'seg' : annType(a)} | ${a.class_id}: ${clsName(a.class_id)}</div>`).join('');
+}
+function selectAnn(i){selectedIndex=i; resetEditState(); renderBoxList(); draw();}
+function markDirty(){
+  dirty = true;
+  document.getElementById('saveStatus').textContent = labelSource === 'auto'
+    ? '已修改自动标注，需保存为人工标注'
+    : '已修改，需保存';
+}
+function startDraw(){
+  resetEditState();
+  selectedIndex=-1;
+  drawingMode=true; dragging=false; startPt=null; tempPt=null; obbPoints=[]; segPoints=[]; pendingAnnotation=null;
+  canvas.classList.add('draw-ready'); canvas.style.cursor='crosshair';
+  document.getElementById('saveStatus').textContent='标注中';
+  renderBoxList(); draw();
+}
+function stopDraw(){
+  drawingMode=false; dragging=false; startPt=null; tempPt=null; obbPoints=[]; segPoints=[];
+  canvas.classList.remove('draw-ready');
+  resetEditState();
+  draw();
+}
+async function onTaskChange(){stopDraw(); await fetch(withBatch('/api/annotator/task'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_type:currentTask()})});}
+function finishSegmentationPolygon(){
+  if (currentTask() !== 'segmentation' || segPoints.length < 3) { return; }
+  pendingAnnotation={type:'segmentation', class_id:-1, points:segPoints.map(p=>[p[0],p[1]])};
+  segPoints=[]; stopDraw(); openClassModal(pendingAnnotation);
+}
+
+canvas.addEventListener('mousedown', e => {
+  // 左键编辑，避免右键/中键误触。
+  if (e.button !== 0) return;
+  const p = toImgPt(e);
+
+  // 1. W 开始标注后的新建标注逻辑。
+  if (drawingMode) {
+    if (currentTask() === 'detection') {
+      dragging=true; startPt=p; tempPt=p;
+    } else if (currentTask() === 'segmentation') {
+      segPoints.push([p.x,p.y]);
+      draw();
+    } else {
+      obbPoints.push([p.x,p.y]);
+      if (obbPoints.length === 4) {
+        pendingAnnotation={type:'obb', class_id:-1, points:obbPoints.map(p=>[p[0],p[1]])};
+        obbPoints=[]; stopDraw(); openClassModal(pendingAnnotation);
+      }
+      draw();
+    }
+    return;
+  }
+
+  // 2. 普通编辑模式：点击已有框/多边形，选中并准备移动、拉边缘或拖动顶点。
+  const hit = hitTestAnn(p);
+  if (!hit) {
+    selectedIndex = -1;
+    resetEditState();
+    renderBoxList();
+    draw();
+    return;
+  }
+
+  selectedIndex = hit.index;
+  editMode = hit.mode;
+  editHandle = hit.handle;
+  editStartPt = p;
+  editStartAnn = cloneAnn(annotations[selectedIndex]);
+  editHasChanged = false;
+  canvas.style.cursor = cursorForHit(hit);
+  renderBoxList();
+  draw();
+});
+
+canvas.addEventListener('dblclick', e => {
+  if (drawingMode && currentTask() === 'segmentation') finishSegmentationPolygon();
+});
+
+canvas.addEventListener('mousemove', e => {
+  mouseCanvas = toCanvasPt(e);
+  const p = toImgPt(e);
+
+  if (dragging) {
+    tempPt = p;
+    draw();
+    return;
+  }
+
+  if (editMode && selectedIndex >= 0 && editStartPt && editStartAnn) {
+    const ann = annotations[selectedIndex];
+    const dx = p.x - editStartPt.x;
+    const dy = p.y - editStartPt.y;
+
+    if (editMode === 'move') {
+      if (isBboxAnn(ann)) {
+        moveBboxAnn(ann, editStartAnn, dx, dy);
+      } else if (isPolygonLike(ann)) {
+        ann.points = annPoints(editStartAnn).map(pt => [
+          clamp(pt[0] + dx, 0, img.naturalWidth),
+          clamp(pt[1] + dy, 0, img.naturalHeight)
+        ]);
+      }
+      editHasChanged = true;
+      markDirty(); renderBoxList(); draw(); return;
+    }
+
+    if (editMode === 'resize' && isBboxAnn(ann)) {
+      resizeBboxAnn(ann, editStartAnn, p, editHandle);
+      editHasChanged = true;
+      markDirty(); renderBoxList(); draw(); return;
+    }
+
+    if (editMode === 'point' && isPolygonLike(ann)) {
+      ann.points[editHandle] = [
+        clamp(p.x, 0, img.naturalWidth),
+        clamp(p.y, 0, img.naturalHeight)
+      ];
+      editHasChanged = true;
+      markDirty(); renderBoxList(); draw(); return;
+    }
+  }
+
+  if (!drawingMode) canvas.style.cursor = cursorForHit(hitTestAnn(p));
+  if (drawingMode) draw();
+});
+
+canvas.addEventListener('mouseleave', () => {
+  mouseCanvas=null;
+  if (!editMode) canvas.style.cursor = drawingMode ? 'crosshair' : 'default';
+  if (drawingMode || dragging || editMode) draw();
+});
+
+function handleCanvasMouseUp(e) {
+  // 1. 结束已有标注编辑。
+  if (editMode) {
+    const changed = editHasChanged;
+    resetEditState();
+    if (changed) document.getElementById('saveStatus').textContent = '已修改，需保存';
+    draw();
+    return;
+  }
+
+  // 2. 结束新建 detection 框。
+  if (!dragging || currentTask() !== 'detection') return;
+  tempPt = toImgPt(e);
+  if (Math.abs(tempPt.x-startPt.x)>3 && Math.abs(tempPt.y-startPt.y)>3) {
+    pendingAnnotation={type:'bbox', class_id:-1, x1:startPt.x, y1:startPt.y, x2:tempPt.x, y2:tempPt.y};
+    dragging=false; stopDraw(); openClassModal(pendingAnnotation);
+  } else { dragging=false; draw(); }
+}
+canvas.addEventListener('mouseup', handleCanvasMouseUp);
+window.addEventListener('mouseup', e => { if (editMode) handleCanvasMouseUp(e); });
+canvas.addEventListener('wheel', e => {
+  e.preventDefault(); if (!img || !img.naturalWidth) return;
+  const p = toCanvasPt(e); const before = toImgPtFromCanvas(p); const factor = e.deltaY < 0 ? 1.12 : 0.89;
+  zoom = clamp(zoom * factor, 0.25, 8); scale = baseScale * zoom;
+  offsetX = p.x - before.x * scale; offsetY = p.y - before.y * scale;
+  updateZoomStatus(); draw();
+}, {passive:false});
+
+function openClassModal(ann) {
+  pendingAnnotation = ann;
+  const existing = document.getElementById('existingClasses');
+  existing.innerHTML = classes.length ? classes.map((name,i)=>`<button class="class-chip" onclick="confirmExistingClass(${i})">${i}: ${name}</button>`).join('') : '<div class="muted">暂无类别，请新建第一个类别。</div>';
+  document.getElementById('newClassInput').value = '';
+  document.getElementById('classModal').style.display = 'flex';
+  setTimeout(()=>document.getElementById('newClassInput').focus(),50);
+}
+function closeClassModal(){document.getElementById('classModal').style.display='none';}
+function confirmExistingClass(classId){ if(!pendingAnnotation)return; pendingAnnotation.class_id=classId; annotations.push(pendingAnnotation); selectedIndex=annotations.length-1; pendingAnnotation=null; closeClassModal(); markDirty(); renderBoxList(); draw(); }
+async function confirmNewClass(){ const input=document.getElementById('newClassInput'); const name=input.value.trim(); if(!name){alert('请输入类别名'); return;} let classId=classes.indexOf(name); if(classId<0){classes.push(name); classId=classes.length-1; renderClassSummary(); await saveClassesOnly();} confirmExistingClass(classId); }
+function cancelClassModal(){ pendingAnnotation=null; closeClassModal(); draw(); }
+async function saveClassesOnly(){ await fetch(withBatch('/api/annotator/classes'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({classes, task_type: currentTask()})}); }
+
+async function saveCurrent(force=false){
+  if(!currentMeta) return;
+  // 自动标注未修改时，切图不会自动确认；必须按 E。
+  if (labelSource === 'auto' && !dirty && !force) return;
+  if (labelSource === 'none' && annotations.length === 0 && !dirty && !force) return;
+  const res = await fetch(withBatch('/api/annotator/save'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:currentMeta.filename, task_type:currentTask(), annotations, classes})});
+  const data = await res.json();
+  if(!res.ok){alert(data.detail || '保存失败'); return;}
+  labelSource = 'manual';
+  dirty = false;
+  updateLabelSourceUI();
+  document.getElementById('saveStatus').textContent = '已保存人工标注 ' + annotations.length + ' 个';
+}
+
+async function confirmAutoLabel(){
+  if(!currentMeta) return;
+  const res = await fetch(withBatch('/api/annotator/confirm-auto'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:currentMeta.filename})});
+  const data = await res.json();
+  if(!res.ok){alert(data.detail || '确认失败'); return;}
+  labelSource = 'manual';
+  dirty = false;
+  updateLabelSourceUI();
+  document.getElementById('saveStatus').textContent = '已确认自动标注';
+  await refreshSession();
+}
+
+async function nextImage(){await saveCurrent(false); await loadImage(currentIndex+1);}
+async function prevImage(){await saveCurrent(false); await loadImage(currentIndex-1);}
+async function gotoImage(i){await saveCurrent(false); await loadImage(i);}
+function deleteSelected(){
+  if(!annotations.length)return;
+  if(selectedIndex < 0){ alert('请先用鼠标左键点击图中的目标框/多边形，或在右侧“当前标注”列表中选择要删除的标注。'); return; }
+  annotations.splice(selectedIndex,1);
+  selectedIndex=-1;
+  resetEditState();
+  markDirty();
+  renderBoxList();
+  draw();
+}
+
+function setQuickProgress(percent, text) {
+  document.getElementById('quickProgress').style.width = Math.max(0, Math.min(100, percent || 0)) + '%';
+  document.getElementById('quickMsg').textContent = text;
+}
+
+async function pollQuickJob(jobId) {
+  const res = await fetch(withBatch('/api/annotator/jobs/' + jobId));
+  const data = await res.json();
+  if (!res.ok) { setQuickProgress(100, data.detail || '任务状态读取失败'); return; }
+  const text = `任务：${data.name}\n状态：${data.status}\n进度：${data.progress || 0}%\n${data.message || ''}`;
+  setQuickProgress(data.progress || 0, text);
+  if (data.status === 'success' || data.status === 'failed') {
+    if (quickJobTimer) clearInterval(quickJobTimer);
+    quickJobTimer = null;
+    await refreshSession();
+    if (data.status === 'success' && data.name === 'auto-label-remaining') await loadImage(currentIndex);
+  }
+}
+
+async function startQuickJob(url, label) {
+  await saveCurrent(true);
+  const res = await fetch(withBatch(url), {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_type:currentTask(), classes})});
+  const data = await res.json();
+  if (!res.ok) { alert(data.detail || (label + '启动失败')); return; }
+  setQuickProgress(5, data.message + '\njob_id=' + data.job_id);
+  if (quickJobTimer) clearInterval(quickJobTimer);
+  quickJobTimer = setInterval(() => pollQuickJob(data.job_id), 1500);
+  pollQuickJob(data.job_id);
+}
+
+async function quickTrain() {
+  const ok = confirm('将扫描 labels 下非空人工标注文件，并检查每个类别的人工样本数后快速训练临时模型。继续？');
+  if (!ok) return;
+  await startQuickJob('/api/annotator/quick-train', '快速学习');
+}
+
+async function autoLabelRemaining() {
+  const ok = confirm('将清空 labels_auto，并用快速学习模型预标注所有 labels 中还没有确认文件的图片。继续？');
+  if (!ok) return;
+  await startQuickJob('/api/annotator/auto-label-remaining', '预标注剩余图片');
+}
+
+function setRoiProgress(percent, text) {
+  const bar = document.getElementById('roiProgress');
+  const msg = document.getElementById('roiMsg');
+  if (bar) bar.style.width = Math.max(0, Math.min(100, percent || 0)) + '%';
+  if (msg) msg.textContent = text || '';
+}
+
+async function openRoiModal() {
+  const modal = document.getElementById('roiClsModal');
+  if (modal) modal.style.display = 'flex';
+  await loadRoiClsInfo();
+}
+
+function closeRoiModal() {
+  const modal = document.getElementById('roiClsModal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function loadRoiClsInfo() {
+  const res = await fetch(withBatch('/api/annotator/roi-cls/session'));
+  const data = await res.json();
+  if (!res.ok) {
+    setRoiProgress(0, data.detail || 'ROI 分类数据制作信息加载失败');
+    return;
+  }
+  roiInfo = data;
+  renderRoiDetectorOptions();
+  renderRoiClassButtons();
+  if (Array.isArray(data.sessions) && data.sessions.length) {
+    await loadRoiSession(data.sessions[0].session_id, false);
+  } else {
+    renderRoiCandidate();
+  }
+}
+
+function renderRoiDetectorOptions() {
+  const sel = document.getElementById('roiDetectorSelect');
+  if (!sel || !roiInfo) return;
+  const detectors = Array.isArray(roiInfo.detectors) ? roiInfo.detectors : [];
+  if (!detectors.length) {
+    sel.innerHTML = '<option value="">未发现检测模型，请先在 models/checkpoints_detection/ 下放置 .pt 模型</option>';
+  } else {
+    sel.innerHTML = detectors.map(m => `<option value="${escapeHtml(m.path)}">${escapeHtml(m.path)}</option>`).join('');
+  }
+  const d = roiInfo.defaults || {};
+  document.getElementById('roiConf').value = d.conf_threshold || '0.35';
+  document.getElementById('roiPadding').value = d.padding_ratio || '0.05';
+  document.getElementById('roiSelectPolicy').value = d.select_policy || 'conf_area';
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+}
+
+function renderRoiClassButtons() {
+  const el = document.getElementById('roiClassButtons');
+  if (!el) return;
+  const classes = roiInfo && Array.isArray(roiInfo.classes) ? roiInfo.classes : [];
+  if (!classes.length) {
+    el.innerHTML = '<div class="muted">暂无分类类别。先新增 ok / ng 或其他具体类别。</div>';
+    return;
+  }
+  el.innerHTML = classes.map(c =>
+    `<button onclick="labelRoiCandidate('${escapeJs(c.name)}')">${escapeHtml(c.name)} (${c.count || 0})</button>`
+  ).join('');
+}
+
+function escapeJs(s) {
+  return String(s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+async function addRoiClass() {
+  const input = document.getElementById('roiNewClassInput');
+  const name = input.value.trim();
+  if (!name) { alert('请输入类别名'); return; }
+  const res = await fetch(withBatch('/api/annotator/roi-cls/classes'), {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({class_name:name})
+  });
+  const data = await res.json();
+  if (!res.ok) { alert(data.detail || '新增类别失败'); return; }
+  input.value = '';
+  await loadRoiClsInfo();
+  setRoiProgress(0, '类别已新增：' + data.class.name);
+}
+
+async function buildRoiCandidates() {
+  const detectorModel = document.getElementById('roiDetectorSelect').value;
+  if (!detectorModel) { alert('请先选择检测模型。模型需要位于 models/checkpoints_detection/ 下。'); return; }
+
+  const ok = confirm('将使用 detection 模型对当前 batch 的 all_images 批量检测，并把检测框整体裁剪为 ROI 候选。\n\n注意：开始生成前会清空 data/raw_classification/ 下已有分类数据，并删除旧的 ROI 候选 session，避免新旧样本混乱。继续？');
+  if (!ok) return;
+
+  const payload = {
+    detector_model: detectorModel,
+    target_class_id: document.getElementById('roiTargetClassId').value.trim(),
+    target_class_name: document.getElementById('roiTargetClassName').value.trim(),
+    conf_threshold: document.getElementById('roiConf').value.trim() || 0.35,
+    padding_ratio: document.getElementById('roiPadding').value.trim() || 0.05,
+    select_policy: document.getElementById('roiSelectPolicy').value || 'conf_area'
+  };
+  if (payload.target_class_id === '') payload.target_class_id = null;
+
+  const res = await fetch(withBatch('/api/annotator/roi-cls/build-candidates'), {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
+  });
+  const data = await res.json();
+  if (!res.ok) { alert(data.detail || '生成 ROI 候选失败'); return; }
+  setRoiProgress(5, data.message + '\njob_id=' + data.job_id);
+  if (roiJobTimer) clearInterval(roiJobTimer);
+  roiJobTimer = setInterval(() => pollRoiJob(data.job_id), 1500);
+  pollRoiJob(data.job_id);
+}
+
+async function pollRoiJob(jobId) {
+  const res = await fetch(withBatch('/api/annotator/jobs/' + jobId));
+  const data = await res.json();
+  if (!res.ok) { setRoiProgress(100, data.detail || 'ROI 任务状态读取失败'); return; }
+  const text = `任务：${data.name}\n状态：${data.status}\n进度：${data.progress || 0}%\n${data.message || ''}`;
+  setRoiProgress(data.progress || 0, text);
+  if (data.status === 'success' || data.status === 'failed') {
+    if (roiJobTimer) clearInterval(roiJobTimer);
+    roiJobTimer = null;
+    await loadRoiClsInfo();
+    if (data.status === 'success' && data.session_id) {
+      await loadRoiSession(data.session_id, true);
+    }
+  }
+}
+
+async function loadRoiSession(sessionId, showMsg=true) {
+  if (!sessionId) return;
+  const res = await fetch(withBatch('/api/annotator/roi-cls/sessions/' + encodeURIComponent(sessionId)));
+  const data = await res.json();
+  if (!res.ok) { if(showMsg) alert(data.detail || '加载 ROI session 失败'); return; }
+  roiSession = data.manifest;
+  roiInfo = roiInfo || {};
+  roiInfo.classes = data.classes || roiInfo.classes || [];
+  roiCandidates = Array.isArray(roiSession.items) ? roiSession.items : [];
+  const firstPending = roiCandidates.findIndex(x => x.status !== 'labeled' && x.status !== 'skipped');
+  roiCurrentIndex = firstPending >= 0 ? firstPending : 0;
+  renderRoiClassButtons();
+  renderRoiCandidate();
+}
+
+function roiDetectorClassKey(item) {
+  if (!item) return '';
+  const cid = Number.isFinite(Number(item.det_class_id)) ? Number(item.det_class_id) : -1;
+  const cname = String(item.det_class_name || cid).trim() || String(cid);
+  return `${cid}:${cname}`;
+}
+
+function getRoiPolicyForItem(item) {
+  if (!roiSession || !item) return null;
+  const policy = roiSession.roi_policy || {};
+  const byClass = policy.by_detector_class || {};
+  const entry = byClass[roiDetectorClassKey(item)];
+  if (entry && entry.enabled) return entry;
+  return null;
+}
+
+function currentFineRoiBoxText() {
+  const b = fineRoiState.box || {x1:0,y1:0,x2:1,y2:1};
+  return `x1=${b.x1.toFixed(3)}, y1=${b.y1.toFixed(3)}, x2=${b.x2.toFixed(3)}, y2=${b.y2.toFixed(3)}`;
+}
+
+function setFineRoiMessage(text) {
+  const el = document.getElementById('fineRoiMsg');
+  if (el) el.textContent = text || '';
+}
+
+function updateFineRoiOverlay() {
+  const boxEl = document.getElementById('fineRoiBox');
+  const wrap = document.getElementById('roiCropWrap');
+  const imgEl = document.getElementById('roiCropImg');
+  const confirmBtn = document.getElementById('fineRoiConfirmBtn');
+  if (!boxEl || !wrap || !imgEl) return;
+
+  if (!fineRoiState.enabled || !imgEl.complete || !imgEl.naturalWidth) {
+    boxEl.style.display = 'none';
+    if (confirmBtn) confirmBtn.style.display = 'none';
+    return;
+  }
+
+  const w = imgEl.clientWidth;
+  const h = imgEl.clientHeight;
+  if (!w || !h) return;
+
+  const b = fineRoiState.box || {x1:0,y1:0,x2:1,y2:1};
+  boxEl.style.display = 'block';
+  boxEl.style.left = (b.x1 * w) + 'px';
+  boxEl.style.top = (b.y1 * h) + 'px';
+  boxEl.style.width = Math.max(10, (b.x2 - b.x1) * w) + 'px';
+  boxEl.style.height = Math.max(10, (b.y2 - b.y1) * h) + 'px';
+  if (confirmBtn) confirmBtn.style.display = 'inline-block';
+  setFineRoiMessage('已启用精细 ROI。拖动橙色框或四角调整后，点击“确认精细 ROI”。当前比例：' + currentFineRoiBoxText());
+}
+
+function initFineRoiForCurrentItem() {
+  const checkbox = document.getElementById('fineRoiEnable');
+  const item = roiCandidates[roiCurrentIndex];
+  const policy = getRoiPolicyForItem(item);
+
+  if (policy && policy.relative_box) {
+    fineRoiState.enabled = true;
+    fineRoiState.box = {
+      x1: Number(policy.relative_box.x1 ?? 0),
+      y1: Number(policy.relative_box.y1 ?? 0),
+      x2: Number(policy.relative_box.x2 ?? 1),
+      y2: Number(policy.relative_box.y2 ?? 1)
+    };
+    if (checkbox) checkbox.checked = true;
+    setFineRoiMessage(`当前检测类别 ${roiDetectorClassKey(item)} 已保存精细 ROI，可拖动后再次确认覆盖。比例：${currentFineRoiBoxText()}`);
+  } else {
+    fineRoiState.enabled = false;
+    fineRoiState.box = {x1:0, y1:0, x2:1, y2:1};
+    if (checkbox) checkbox.checked = false;
+    setFineRoiMessage('默认不启用精细 ROI，直接使用检测框 + padding 的完整 ROI。');
+  }
+  updateFineRoiOverlay();
+}
+
+function onFineRoiToggle() {
+  const checkbox = document.getElementById('fineRoiEnable');
+  fineRoiState.enabled = !!(checkbox && checkbox.checked);
+  if (fineRoiState.enabled) {
+    // 默认完整覆盖当前 base ROI，相当于“不裁减”；用户可拖动四角变成更精细区域。
+    if (!fineRoiState.box) fineRoiState.box = {x1:0, y1:0, x2:1, y2:1};
+  }
+  updateFineRoiOverlay();
+  if (!fineRoiState.enabled) {
+    setFineRoiMessage('默认不启用精细 ROI，直接使用检测框 + padding 的完整 ROI。');
+  }
+}
+
+function getFineRoiMouseRel(evt) {
+  const imgEl = document.getElementById('roiCropImg');
+  const rect = imgEl.getBoundingClientRect();
+  return {
+    x: clamp((evt.clientX - rect.left) / Math.max(1, rect.width), 0, 1),
+    y: clamp((evt.clientY - rect.top) / Math.max(1, rect.height), 0, 1)
+  };
+}
+
+function normalizeFineRoiBox(b) {
+  let x1 = clamp(Number(b.x1), 0, 1), y1 = clamp(Number(b.y1), 0, 1);
+  let x2 = clamp(Number(b.x2), 0, 1), y2 = clamp(Number(b.y2), 0, 1);
+  if (x2 < x1) [x1, x2] = [x2, x1];
+  if (y2 < y1) [y1, y2] = [y2, y1];
+  const minSize = 0.02;
+  if (x2 - x1 < minSize) x2 = Math.min(1, x1 + minSize);
+  if (y2 - y1 < minSize) y2 = Math.min(1, y1 + minSize);
+  return {x1, y1, x2, y2};
+}
+
+function beginFineRoiDrag(evt) {
+  if (!fineRoiState.enabled) return;
+  evt.preventDefault();
+  evt.stopPropagation();
+  const handle = evt.target && evt.target.dataset ? evt.target.dataset.handle : '';
+  fineRoiState.dragging = true;
+  fineRoiState.dragMode = handle || 'move';
+  fineRoiState.startMouse = getFineRoiMouseRel(evt);
+  fineRoiState.startBox = {...fineRoiState.box};
+}
+
+function updateFineRoiDrag(evt) {
+  if (!fineRoiState.dragging) return;
+  evt.preventDefault();
+  const p = getFineRoiMouseRel(evt);
+  const s = fineRoiState.startMouse;
+  const b0 = fineRoiState.startBox;
+  const dx = p.x - s.x;
+  const dy = p.y - s.y;
+  let b = {...b0};
+
+  if (fineRoiState.dragMode === 'move') {
+    const width = b0.x2 - b0.x1;
+    const height = b0.y2 - b0.y1;
+    let nx1 = clamp(b0.x1 + dx, 0, 1 - width);
+    let ny1 = clamp(b0.y1 + dy, 0, 1 - height);
+    b = {x1:nx1, y1:ny1, x2:nx1 + width, y2:ny1 + height};
+  } else {
+    if (fineRoiState.dragMode.includes('n')) b.y1 = p.y;
+    if (fineRoiState.dragMode.includes('s')) b.y2 = p.y;
+    if (fineRoiState.dragMode.includes('w')) b.x1 = p.x;
+    if (fineRoiState.dragMode.includes('e')) b.x2 = p.x;
+  }
+
+  fineRoiState.box = normalizeFineRoiBox(b);
+  updateFineRoiOverlay();
+}
+
+function endFineRoiDrag() {
+  if (!fineRoiState.dragging) return;
+  fineRoiState.dragging = false;
+  fineRoiState.dragMode = '';
+  fineRoiState.startMouse = null;
+  fineRoiState.startBox = null;
+}
+
+async function confirmFineRoiPolicy() {
+  if (!roiSession || !roiCandidates.length) { alert('暂无 ROI 候选'); return; }
+  const item = roiCandidates[roiCurrentIndex];
+  const checkbox = document.getElementById('fineRoiEnable');
+  if (!checkbox || !checkbox.checked) { alert('请先勾选“启用精细 ROI”'); return; }
+
+  const classKey = roiDetectorClassKey(item);
+  const ok = confirm(`确认为检测类别 ${classKey} 保存这一套精细 ROI？\n\n同一个检测类别只会保留一套精细 ROI。确认后会重新裁剪该检测类别下已经分类的训练样本。`);
+  if (!ok) return;
+
+  const res = await fetch(withBatch('/api/annotator/roi-cls/roi-policy'), {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      session_id: roiSession.session_id,
+      item_id: item.id,
+      enabled: true,
+      relative_box: fineRoiState.box
+    })
+  });
+  const data = await res.json();
+  if (!res.ok) { alert(data.detail || '保存精细 ROI 失败'); return; }
+
+  roiSession = data.manifest;
+  roiCandidates = Array.isArray(roiSession.items) ? roiSession.items : [];
+  roiInfo.classes = data.classes || roiInfo.classes || [];
+  renderRoiClassButtons();
+  renderRoiCandidate();
+  setRoiProgress(0, data.message);
+}
+
+function renderRoiCandidate() {
+  const info = document.getElementById('roiCandidateInfo');
+  const preview = document.getElementById('roiPreviewImg');
+  const crop = document.getElementById('roiCropImg');
+  const cropWrap = document.getElementById('roiCropWrap');
+  if (!info || !preview || !crop || !cropWrap) return;
+  if (!roiCandidates.length) {
+    info.textContent = '暂无候选。请先点击“生成 ROI 候选”。';
+    preview.style.display = 'none';
+    cropWrap.style.display = 'none';
+    return;
+  }
+  roiCurrentIndex = Math.max(0, Math.min(roiCurrentIndex, roiCandidates.length - 1));
+  const item = roiCandidates[roiCurrentIndex];
+  const labeled = roiCandidates.filter(x => x.status === 'labeled').length;
+  const skipped = roiCandidates.filter(x => x.status === 'skipped').length;
+  const statusText = `${item.status || 'pending'}${item.assigned_label ? ' → ' + item.assigned_label : ''}`;
+  const detText = `${item.det_class_name || item.det_class_id} · conf ${Number(item.det_conf || 0).toFixed(3)}`;
+  const baseSize = (item.roi_size || []).join(' × ') || '-';
+  const finalSize = (item.final_roi_size || []).join(' × ') || baseSize;
+  const fileText = item.source_filename || '-';
+
+  info.innerHTML = `
+    <div class="roi-info-head">
+      <strong>${roiCurrentIndex + 1} / ${roiCandidates.length}</strong>
+      <span class="roi-info-chip">已分类 ${labeled}</span>
+      <span class="roi-info-chip">跳过 ${skipped}</span>
+      <span class="roi-info-chip">状态 ${statusText}</span>
+    </div>
+    <div class="roi-info-lines">
+      <div class="roi-info-line"><b>检测：</b>${detText}</div>
+      <div class="roi-info-line"><b>ROI：</b>基础 ${baseSize}　|　训练 ${finalSize}</div>
+      <div class="roi-info-line roi-info-file"><b>来源：</b>${fileText}</div>
+    </div>`;
+
+  const sid = roiSession.session_id;
+  preview.src = withBatch(`/api/annotator/roi-cls/file/${encodeURIComponent(sid)}/previews/${encodeURIComponent(item.id + '.jpg')}`) + `&t=${Date.now()}`;
+  crop.onload = () => { initFineRoiForCurrentItem(); };
+  crop.src = withBatch(`/api/annotator/roi-cls/file/${encodeURIComponent(sid)}/candidates/${encodeURIComponent(item.id + '.jpg')}`) + `&t=${Date.now()}`;
+  preview.style.display = 'block';
+  cropWrap.style.display = 'inline-block';
+}
+
+function nextUnfinishedRoiIndex(start) {
+  if (!roiCandidates.length) return 0;
+  for (let i = start; i < roiCandidates.length; i++) {
+    if (roiCandidates[i].status !== 'labeled' && roiCandidates[i].status !== 'skipped') return i;
+  }
+  for (let i = 0; i < roiCandidates.length; i++) {
+    if (roiCandidates[i].status !== 'labeled' && roiCandidates[i].status !== 'skipped') return i;
+  }
+  return Math.min(start, roiCandidates.length - 1);
+}
+
+function nextRoiCandidate() { if (!roiCandidates.length) return; roiCurrentIndex = Math.min(roiCandidates.length - 1, roiCurrentIndex + 1); renderRoiCandidate(); }
+function prevRoiCandidate() { if (!roiCandidates.length) return; roiCurrentIndex = Math.max(0, roiCurrentIndex - 1); renderRoiCandidate(); }
+
+async function labelRoiCandidate(label) {
+  if (!roiSession || !roiCandidates.length) { alert('暂无 ROI 候选'); return; }
+  const item = roiCandidates[roiCurrentIndex];
+  const res = await fetch(withBatch('/api/annotator/roi-cls/label'), {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:roiSession.session_id, item_id:item.id, label})
+  });
+  const data = await res.json();
+  if (!res.ok) { alert(data.detail || '保存 ROI 分类样本失败'); return; }
+  roiSession = data.manifest;
+  roiCandidates = Array.isArray(roiSession.items) ? roiSession.items : [];
+  roiInfo.classes = data.classes || roiInfo.classes || [];
+  renderRoiClassButtons();
+  roiCurrentIndex = nextUnfinishedRoiIndex(roiCurrentIndex + 1);
+  renderRoiCandidate();
+  setRoiProgress(0, data.message);
+}
+
+async function skipRoiCandidate() {
+  if (!roiSession || !roiCandidates.length) return;
+  const item = roiCandidates[roiCurrentIndex];
+  const res = await fetch(withBatch('/api/annotator/roi-cls/skip'), {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:roiSession.session_id, item_id:item.id})
+  });
+  const data = await res.json();
+  if (!res.ok) { alert(data.detail || '跳过失败'); return; }
+  roiSession = data.manifest;
+  roiCandidates = Array.isArray(roiSession.items) ? roiSession.items : [];
+  roiCurrentIndex = nextUnfinishedRoiIndex(roiCurrentIndex + 1);
+  renderRoiCandidate();
+}
+
+
+
+function setupFineRoiEvents() {
+  const box = document.getElementById('fineRoiBox');
+  if (box && !box.dataset.bound) {
+    box.dataset.bound = '1';
+    box.addEventListener('mousedown', beginFineRoiDrag);
+  }
+  window.addEventListener('mousemove', updateFineRoiDrag);
+  window.addEventListener('mouseup', endFineRoiDrag);
+  window.addEventListener('resize', updateFineRoiOverlay);
+}
+setupFineRoiEvents();
+
+let reviewJobTimer = null;
+
+function setReviewJobMsg(text, visible=true) {
+  const el = document.getElementById('reviewJobMsg');
+  if (!el) return;
+  el.style.display = visible ? 'block' : 'none';
+  el.textContent = text || '';
+}
+
+async function pollReviewJob(jobId) {
+  const res = await fetch('/api/jobs/' + jobId + '/logs');
+  const data = await res.json();
+  if (!res.ok) {
+    setReviewJobMsg(data.detail || '审核入库任务状态读取失败');
+    return;
+  }
+  const status = data.status || {};
+  setReviewJobMsg(`审核入库任务：${status.status || '-'}
+job_id=${jobId}`);
+  if (status.status === 'success' || status.status === 'failed') {
+    if (reviewJobTimer) clearInterval(reviewJobTimer);
+    reviewJobTimer = null;
+    setReviewJobMsg(`审核入库任务：${status.status}
+${status.status === 'success' ? '已整理到训练数据目录。' : '请回控制台查看运行日志。'}`);
+  }
+}
+
+async function acceptReviewedFromAnnotator() {
+  const ok = confirm('确认当前 batch 的标注已经审核完成？确认后将返回服务端控制台。');
+  if (!ok) return;
+  await saveCurrent(true);
+  const res = await fetch(withBatch('/api/accept-reviewed'), {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({task_type: currentTask()})
+  });
+  const data = await res.json();
+  if (!res.ok) { alert(data.message || data.detail || '确认审核完成失败'); return; }
+  notifyAndReturn(data.message || '审核完成，正在返回控制台...');
+}
+
+window.addEventListener('keydown', async e => {
+  if (e.target && ['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) { if(e.key==='Enter' && e.target.id==='newClassInput') await confirmNewClass(); return; }
+  const k=e.key.toLowerCase();
+  if(k==='a') await prevImage();
+  if(k==='d') await nextImage();
+  if(k==='w') startDraw();
+  if(k==='s') await saveCurrent(true);
+  if(k==='q') deleteSelected();
+  if(k==='e') await confirmAutoLabel();
+  if(k==='enter') finishSegmentationPolygon();
+  if(k==='escape'){ pendingAnnotation=null; closeClassModal(); closeRoiModal(); stopDraw(); }
+});
+window.addEventListener('resize', resizeCanvas);
+init();
+</script>
 </body>
 </html>

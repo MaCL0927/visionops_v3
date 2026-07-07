@@ -38,18 +38,19 @@ function showModal(title, body) {
   $('modalBody').textContent = typeof body === 'string' ? body : pretty(body);
   $('modal').style.display = 'flex';
 }
-function showToast(message, type = 'info') {
-  const host = $('toastHost');
-  if (!host) return;
-  const toast = document.createElement('div');
-  toast.className = `toast ${type}`;
-  toast.textContent = typeof message === 'string' ? message : pretty(message);
-  host.appendChild(toast);
-  window.setTimeout(() => toast.classList.add('show'), 20);
-  window.setTimeout(() => {
-    toast.classList.remove('show');
-    window.setTimeout(() => toast.remove(), 250);
-  }, 2600);
+function showToast(message, kind = 'success') {
+  let root = document.querySelector('.toast-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.className = 'toast-root';
+    document.body.appendChild(root);
+  }
+  const item = document.createElement('div');
+  item.className = 'toast ' + (kind || 'success');
+  item.textContent = String(message || '操作完成');
+  root.appendChild(item);
+  setTimeout(() => { item.style.opacity = '0'; item.style.transform = 'translateY(8px)'; }, 2600);
+  setTimeout(() => item.remove(), 3100);
 }
 
 async function refresh() {
@@ -101,10 +102,10 @@ function renderOverview() {
     ['设备', state.devices.length],
   ].map(([name, value]) => `<div class="metric"><div class="value">${value}</div><div class="name">${name}</div></div>`).join('');
 
-  const latestBatch = state.batches[0] || null;
-  const latestDataset = state.datasets[0] || null;
-  const latestJob = state.jobs[0] || null;
-  const latestModel = state.models[0] || null;
+  const latestBatch = state.batches.at(-1) || state.batches[0] || null;
+  const latestDataset = state.datasets.at(-1) || state.datasets[0] || null;
+  const latestJob = state.jobs.at(-1) || state.jobs[0] || null;
+  const latestModel = state.models.at(-1) || state.models[0] || null;
   $('currentContext').textContent = pretty({
     data_root: h.data_root,
     incoming_root: state.incomingRoot,
@@ -151,19 +152,19 @@ function renderIncomingPackages() {
 function renderBatches() {
   const root = $('batches');
   if (!root) return;
-  const batches = [...state.batches].sort((a, b) => Number(b.updated_at_ms || b.created_at_ms || 0) - Number(a.updated_at_ms || a.created_at_ms || 0));
-  if (!batches.length) {
+  const items = [...state.batches].sort((a, b) => Number(b.created_at_ms || b.updated_at_ms || 0) - Number(a.created_at_ms || a.updated_at_ms || 0));
+  if (!items.length) {
     root.className = 'folder-list empty';
     root.textContent = '暂无已解压数据文件夹。请先在第 1 步处理 incoming 上传包。';
     return;
   }
   root.className = 'folder-list';
-  root.innerHTML = batches.map(item => `
+  root.innerHTML = items.map(item => `
     <div class="folder-card">
       <div class="folder-icon">📁</div>
-      <div class="folder-body">
-        <div class="folder-title">${escapeHtml(item.batch_id)}</div>
-        <div class="item-meta">device=${escapeHtml(item.device_id || '-')} | customer=${escapeHtml(item.customer_id || '-')} | images=${item.image_count || 0} | labels=${item.label_count || 0} | ${formatTime(item.created_at_ms)}</div>
+      <div>
+        <div class="folder-title">${escapeHtml(item.batch_id)} <span class="badge ${badgeClass(item.status)}">${escapeHtml(item.status || 'extracted')}</span></div>
+        <div class="folder-meta">device=${escapeHtml(item.device_id || '-')} | customer=${escapeHtml(item.customer_id || '-')} | images=${item.image_count || 0} | labels=${item.label_count || 0} | ${formatTime(item.created_at_ms)}</div>
       </div>
       <div class="folder-actions">
         <button onclick="openAnnotator('${escapeHtml(item.batch_id)}')">标注</button>
@@ -174,7 +175,7 @@ function renderBatches() {
 
 function renderDatasets() {
   const root = $('datasets');
-  if (!root || root.hidden) return;
+  if (!root) return;
   if (!state.datasets.length) { root.className = 'list empty'; root.textContent = '暂无 dataset。'; return; }
   root.className = 'list';
   root.innerHTML = state.datasets.map(item => `
@@ -243,10 +244,7 @@ function refreshSelects() {
     : '<option value="">请先生成模型包</option>';
 }
 
-function selectedTaskType() {
-  const el = $('datasetTaskType');
-  return el ? el.value : 'detection';
-}
+function selectedTaskType() { return $('datasetTaskType') ? $('datasetTaskType').value : 'detection'; }
 
 function showManifest(batchId) {
   const batch = state.batches.find(x => x.batch_id === batchId);
@@ -254,33 +252,30 @@ function showManifest(batchId) {
   showModal(`manifest：${batchId}`, batch.manifest || {message: '该 batch 未包含 manifest.json'});
 }
 
-function openAnnotator(batchId) {
-  window.location.href = `/annotate?batch_id=${encodeURIComponent(batchId)}`;
-}
-
-async function deleteBatch(batchId) {
-  try {
-    await api(`/api/server/batches/${encodeURIComponent(batchId)}/delete`, {method:'POST', body:'{}'});
-    state.selectedBatchIds.delete(batchId);
-    showToast(`已删除数据文件夹：${batchId}`, 'success');
-    await refresh();
-  } catch (err) {
-    showToast(`删除数据文件夹失败：${err.message}`, 'danger');
-  }
-}
-
 async function processSelectedPackages() {
   const packages = [...state.selectedPackageNames];
-  if (!packages.length) return showToast('请先勾选 incoming 目录下的 tar.gz 上传包。', 'warning');
+  if (!packages.length) return showToast('请先勾选 incoming 目录下的 tar.gz 上传包。');
   const result = await api('/api/server/batches/process-incoming', {
     method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({packages})
   });
   state.selectedPackageNames.clear();
-  const batch = result.batch || {};
-  const count = Array.isArray(batch.batches) ? batch.batches.length : 1;
-  showToast(`上传包处理完成，已生成 ${count} 个数据文件夹。`, 'success');
+  showToast('上传包处理完成，已生成 batch：' + (result.batch && result.batch.batch_id ? result.batch.batch_id : ''), 'success');
   await refresh();
 }
+
+function openAnnotator(batchId) {
+  if (!batchId) return showToast('batch_id 为空', 'error');
+  window.location.href = '/annotate?batch_id=' + encodeURIComponent(batchId);
+}
+
+async function deleteBatch(batchId) {
+  if (!batchId) return;
+  await api(`/api/server/batches/${encodeURIComponent(batchId)}/delete`, {method:'POST', body:'{}'});
+  state.selectedBatchIds.delete(batchId);
+  showToast('已删除数据文件夹：' + batchId, 'success');
+  await refresh();
+}
+
 async function acceptBatch(batchId) {
   await api(`/api/server/batches/${encodeURIComponent(batchId)}/accept`, {
     method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({task_type: selectedTaskType()})
@@ -336,27 +331,17 @@ async function publishModel(modelId) {
   await refresh();
 }
 
-function bindClick(id, handler) {
-  const el = $(id);
-  if (el) el.onclick = handler;
-}
-function bindChange(id, handler) {
-  const el = $(id);
-  if (el) el.onchange = handler;
-}
+$('refreshBtn').onclick = () => refresh().catch(err => showToast(err.message, 'error'));
+if ($('modalClose')) $('modalClose').onclick = () => { $('modal').style.display = 'none'; };
+if ($('modal')) $('modal').onclick = (event) => { if (event.target.id === 'modal') $('modal').style.display = 'none'; };
+if ($('refreshIncomingBtn')) $('refreshIncomingBtn').onclick = () => refresh().catch(err => showToast(err.message, 'error'));
+if ($('processIncomingBtn')) $('processIncomingBtn').onclick = () => processSelectedPackages().catch(err => showToast(err.message, 'error'));
+if ($('acceptSelectedBtn')) $('acceptSelectedBtn').onclick = () => acceptSelected().catch(err => showToast(err.message, 'error'));
+if ($('rejectSelectedBtn')) $('rejectSelectedBtn').onclick = () => rejectSelected().catch(err => showToast(err.message, 'error'));
+if ($('buildDatasetBtn')) $('buildDatasetBtn').onclick = () => buildDataset().catch(err => showToast(err.message, 'error'));
+if ($('datasetTaskType')) $('datasetTaskType').onchange = () => renderBatches();
 
-bindClick('refreshBtn', () => refresh().catch(err => showToast(err.message)));
-bindClick('modalClose', () => { $('modal').style.display = 'none'; });
-$('modal').onclick = (event) => { if (event.target.id === 'modal') $('modal').style.display = 'none'; };
-bindClick('refreshIncomingBtn', () => refresh().catch(err => showToast(err.message)));
-bindClick('processIncomingBtn', () => processSelectedPackages().catch(err => showToast(`上传包处理失败：${err.message}`, 'danger')));
-bindClick('acceptSelectedBtn', () => acceptSelected().catch(err => showToast(err.message)));
-bindClick('rejectSelectedBtn', () => rejectSelected().catch(err => showToast(err.message)));
-bindClick('buildDatasetBtn', () => buildDataset().catch(err => showToast(err.message)));
-bindChange('datasetTaskType', () => renderBatches());
-bindClick('openAnnotatorBtn', () => showModal('标注器入口说明', `v3 服务端当前先按 v2 的数据流转方式完成 incoming 包处理和 batch/dataset 管理，内置标注器尚未迁移。`));
-
-$('jobForm').onsubmit = async (event) => {
+if ($('jobForm')) $('jobForm').onsubmit = async (event) => {
   event.preventDefault();
   const form = new FormData(event.target);
   const body = Object.fromEntries(form.entries());
@@ -367,14 +352,14 @@ $('jobForm').onsubmit = async (event) => {
   setTimeout(() => refresh().catch(console.error), 200);
   setTimeout(() => refresh().catch(console.error), 800);
 };
-$('deviceForm').onsubmit = async (event) => {
+if ($('deviceForm')) $('deviceForm').onsubmit = async (event) => {
   event.preventDefault();
   const body = Object.fromEntries(new FormData(event.target).entries());
   const result = await api('/api/server/devices', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
   showModal('设备已更新', result.device);
   await refresh();
 };
-$('assignModelBtn').onclick = async () => {
+if ($('assignModelBtn')) $('assignModelBtn').onclick = async () => {
   const deviceId = $('assignDeviceSelect').value;
   const modelId = $('assignModelSelect').value;
   if (!deviceId || !modelId) return showToast('请先登记设备并生成模型包。');

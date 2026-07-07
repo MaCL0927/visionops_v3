@@ -21,6 +21,7 @@ from .services.device_service import DeviceService
 from .services.ingest_service import BatchService
 from .services.model_package_service import ModelPackageService
 from .services.training_job_service import TrainingJobService
+from .services.annotation_service import AnnotationService
 
 FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend" / "static"
 
@@ -44,6 +45,7 @@ class VisionOpsServer(ThreadingHTTPServer):
             target_platform=config.default_target_platform,
         )
         self.device_service = DeviceService(config.devices_path)
+        self.annotation_service = AnnotationService(self.batch_service, config.data_root)
 
     def uptime_s(self) -> float:
         return time.monotonic() - self.started_at
@@ -112,6 +114,8 @@ class ServerRequestHandler(BaseHTTPRequestHandler):
                 device_id = path.rsplit("/", 1)[-1]
                 self._send_json(200, self._ok("server_device_detail", {"device": self.server.device_service.get_device(device_id)}))
                 return
+            if self._handle_annotator_get(path):
+                return
             self._send_error(404, "ROUTE_NOT_FOUND", "接口不存在")
         except Exception as error:
             self._handle_exception(error)
@@ -128,6 +132,11 @@ class ServerRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/server/batches/upload":
                 self._upload_batch()
                 return
+            if path.startswith("/api/server/batches/") and path.endswith("/delete"):
+                batch_id = path.split("/")[-2]
+                deleted = self.server.batch_service.delete_batch(batch_id)
+                self._send_json(200, self._ok("server_batch_deleted", {"batch": deleted}))
+                return
             if path.startswith("/api/server/batches/") and path.endswith("/accept"):
                 batch_id = path.split("/")[-2]
                 body = self._read_json_body(default={})
@@ -139,11 +148,6 @@ class ServerRequestHandler(BaseHTTPRequestHandler):
                 body = self._read_json_body(default={})
                 batch = self.server.batch_service.set_status(batch_id, "rejected", str(body.get("note", "")), task_type=body.get("task_type"))
                 self._send_json(200, self._ok("server_batch_rejected", {"batch": batch}))
-                return
-            if path.startswith("/api/server/batches/") and path.endswith("/delete"):
-                batch_id = path.split("/")[-2]
-                batch = self.server.batch_service.delete_batch(batch_id)
-                self._send_json(200, self._ok("server_batch_deleted", {"batch": batch}))
                 return
             if path == "/api/server/datasets/build":
                 body = self._read_json_body(default={})
@@ -182,6 +186,8 @@ class ServerRequestHandler(BaseHTTPRequestHandler):
                 device = self.server.device_service.assign_model(device_id, str(body.get("model_id") or ""))
                 self._send_json(200, self._ok("server_device_model_assigned", {"device": device}))
                 return
+            if self._handle_annotator_post(path):
+                return
             self._send_error(404, "ROUTE_NOT_FOUND", "接口不存在")
         except Exception as error:
             self._handle_exception(error)
@@ -203,6 +209,133 @@ class ServerRequestHandler(BaseHTTPRequestHandler):
         model_id = path.rsplit("/", 1)[-1]
         package = self.server.model_package_service.get_package(model_id)
         self._send_json(200, self._ok("server_model_package_detail", {"model_package": package}))
+
+
+    def _query(self) -> dict[str, list[str]]:
+        return parse_qs(urlsplit(self.path).query)
+
+    def _query_text(self, name: str, default: str = "") -> str:
+        values = self._query().get(name)
+        if not values:
+            return default
+        return str(values[0])
+
+    def _require_batch_id(self) -> str:
+        batch_id = self._query_text("batch_id")
+        if not batch_id:
+            raise ValueError("缺少 batch_id")
+        return batch_id
+
+    def _project_root(self) -> Path:
+        return Path(__file__).resolve().parents[3]
+
+    def _handle_annotator_get(self, path: str) -> bool:
+        service = self.server.annotation_service
+        if path == "/api/annotator/session":
+            batch_id = self._require_batch_id()
+            self._send_json(200, service.session_info(batch_id))
+            return True
+        if path.startswith("/api/annotator/image/"):
+            batch_id = self._require_batch_id()
+            index = int(path.rsplit("/", 1)[-1])
+            self._send_json(200, service.image_meta(batch_id, index))
+            return True
+        if path.startswith("/api/annotator/file/"):
+            batch_id = self._require_batch_id()
+            index = int(path.rsplit("/", 1)[-1])
+            file_path = service.image_file(batch_id, index)
+            self._serve_file(file_path, mimetypes.guess_type(file_path.name)[0] or "application/octet-stream")
+            return True
+        if path.startswith("/api/annotator/jobs/"):
+            batch_id = self._require_batch_id()
+            job_id = path.rsplit("/", 1)[-1]
+            self._send_json(200, service.jobs.get(service.quick_root(batch_id), job_id))
+            return True
+        if path == "/api/annotator/roi-cls/session":
+            batch_id = self._require_batch_id()
+            self._send_json(200, service.roi_session_info(batch_id, self._project_root()))
+            return True
+        if path.startswith("/api/annotator/roi-cls/sessions/"):
+            batch_id = self._require_batch_id()
+            session_id = path.rsplit("/", 1)[-1]
+            self._send_json(200, {"manifest": service.get_roi_session(batch_id, session_id), "classes": service.roi_classes()})
+            return True
+        if path.startswith("/api/annotator/roi-cls/file/"):
+            batch_id = self._require_batch_id()
+            parts = path.strip("/").split("/")
+            # api/annotator/roi-cls/file/{session_id}/{kind}/{filename}
+            if len(parts) < 7:
+                raise ValueError("ROI 文件路径不完整")
+            session_id, kind, filename = parts[4], parts[5], parts[6]
+            file_path = service.roi_file(batch_id, session_id, kind, filename)
+            self._serve_file(file_path, mimetypes.guess_type(file_path.name)[0] or "application/octet-stream")
+            return True
+        if path.startswith("/api/jobs/") and path.endswith("/logs"):
+            # v2 标注器遗留的审核任务轮询接口；v3 当前确认审核后会直接返回控制台。
+            self._send_json(200, {"status": {"status": "success", "message": "v3 annotator returns to console directly"}, "logs": ""})
+            return True
+        return False
+
+    def _handle_annotator_post(self, path: str) -> bool:
+        service = self.server.annotation_service
+        if path == "/api/annotator/classes":
+            batch_id = self._require_batch_id()
+            body = self._read_json_body(default={})
+            classes = body.get("classes") if isinstance(body.get("classes"), list) else []
+            task_type = body.get("task_type")
+            if task_type:
+                service.save_task(batch_id, str(task_type))
+            saved = service.save_classes(batch_id, [str(x) for x in classes])
+            self._send_json(200, {"message": "类别已保存", "classes": saved, "num_classes": len(saved), "task_type": service.load_task(batch_id)})
+            return True
+        if path == "/api/annotator/task":
+            batch_id = self._require_batch_id()
+            task = service.save_task(batch_id, str(self._read_json_body(default={}).get("task_type") or "detection"))
+            self._send_json(200, {"message": "任务类型已保存", "task_type": task})
+            return True
+        if path == "/api/annotator/save":
+            batch_id = self._require_batch_id()
+            self._send_json(200, service.save_annotation(batch_id, self._read_json_body(default={})))
+            return True
+        if path == "/api/annotator/confirm-auto":
+            batch_id = self._require_batch_id()
+            self._send_json(200, service.confirm_auto(batch_id, self._read_json_body(default={})))
+            return True
+        if path == "/api/annotator/quick-train":
+            batch_id = self._require_batch_id()
+            self._send_json(200, service.start_quick_train(batch_id, self._read_json_body(default={}), self._project_root()))
+            return True
+        if path == "/api/annotator/auto-label-remaining":
+            batch_id = self._require_batch_id()
+            self._send_json(200, service.start_auto_label(batch_id, self._read_json_body(default={}), self._project_root()))
+            return True
+        if path == "/api/annotator/roi-cls/classes":
+            batch_id = self._require_batch_id()  # noqa: F841 - batch id keeps API scoped to current task.
+            created = service.add_roi_class(str(self._read_json_body(default={}).get("class_name") or ""))
+            self._send_json(200, {"message": "类别已创建", "class": created, "classes": service.roi_classes()})
+            return True
+        if path == "/api/annotator/roi-cls/build-candidates":
+            batch_id = self._require_batch_id()
+            self._send_json(200, service.start_roi_candidates(batch_id, self._read_json_body(default={}), self._project_root()))
+            return True
+        if path == "/api/annotator/roi-cls/label":
+            batch_id = self._require_batch_id()
+            self._send_json(200, service.label_roi(batch_id, self._read_json_body(default={})))
+            return True
+        if path == "/api/annotator/roi-cls/skip":
+            batch_id = self._require_batch_id()
+            self._send_json(200, service.skip_roi(batch_id, self._read_json_body(default={})))
+            return True
+        if path == "/api/annotator/roi-cls/roi-policy":
+            batch_id = self._require_batch_id()
+            self._send_json(200, service.save_roi_policy(batch_id, self._read_json_body(default={})))
+            return True
+        if path == "/api/accept-reviewed":
+            batch_id = self._require_batch_id()
+            task_type = str(self._read_json_body(default={}).get("task_type") or "detection")
+            self._send_json(200, service.accept_reviewed(batch_id, task_type))
+            return True
+        return False
 
     def _upload_batch(self) -> None:
         length = int(self.headers.get("Content-Length", "0") or "0")
