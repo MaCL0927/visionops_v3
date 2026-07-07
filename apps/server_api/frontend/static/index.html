@@ -57,6 +57,10 @@
           <div class="path-note">
             边缘端 Web 打包后的 tar.gz 请复制或通过 Syncthing 同步到该目录。处理后原包会移动到 incoming/processed，解压内容会进入 batch 原始目录。
           </div>
+          <div class="toolbar incoming-toolbar source-toolbar">
+            <button id="refreshIncomingBtn" class="ghost">刷新上传包</button>
+            <button id="processIncomingBtn">处理选中上传包</button>
+          </div>
         </div>
 
         <div class="panel incoming-packages-panel">
@@ -65,10 +69,6 @@
               <h3>待处理上传包</h3>
               <span class="badge muted">*.tar.gz</span>
             </div>
-            <div class="toolbar incoming-toolbar">
-              <button id="refreshIncomingBtn" class="ghost">刷新上传包</button>
-              <button id="processIncomingBtn">处理选中上传包</button>
-            </div>
           </div>
           <div id="incomingPackages" class="list empty incoming-list">正在加载 incoming 目录...</div>
         </div>
@@ -76,31 +76,19 @@
     </section>
 
     <section class="grid-2">
-      <article class="card step-card">
+      <article class="card step-card annotation-step-card">
         <div class="step-title">
           <span class="step-no">2</span>
           <div>
             <h2>标注与审核 / 构建数据集</h2>
           </div>
         </div>
-        <label>数据集任务类型（本步骤确认）
-          <select id="datasetTaskType">
-            <option value="detection">detection</option>
-            <option value="classification">classification</option>
-            <option value="obb_detection">obb_detection</option>
-            <option value="segmentation">segmentation</option>
-          </select>
-        </label>
-        <div class="toolbar">
-          <button id="openAnnotatorBtn" class="secondary">标注器入口说明</button>
-          <button id="acceptSelectedBtn" class="success">确认选中 batch 类型</button>
-          <button id="rejectSelectedBtn" class="danger">reject 选中 batch</button>
-          <button id="buildDatasetBtn">用选中/已确认 batch 构建数据集</button>
+        <div class="section-head annotation-head">
+          <h3>已解压数据文件夹</h3>
+          <span class="badge muted">最新在上</span>
         </div>
-        <h3>已解压 batch</h3>
-        <div id="batches" class="list empty">暂无 batch。</div>
-        <h3 style="margin-top:14px;">数据集列表</h3>
-        <div id="datasets" class="list empty">暂无 dataset。</div>
+        <div id="batches" class="folder-list empty">暂无已解压数据文件夹。</div>
+        <div id="datasets" hidden></div>
       </article>
 
       <article class="card step-card">
@@ -202,6 +190,7 @@
       <pre id="modalBody"></pre>
     </div>
   </div>
+  <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
 
   <script src="/static/js/main.js"></script>
 </body>

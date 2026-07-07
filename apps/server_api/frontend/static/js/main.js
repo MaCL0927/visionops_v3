@@ -38,7 +38,19 @@ function showModal(title, body) {
   $('modalBody').textContent = typeof body === 'string' ? body : pretty(body);
   $('modal').style.display = 'flex';
 }
-function showToast(message) { showModal('提示', message); }
+function showToast(message, type = 'info') {
+  const host = $('toastHost');
+  if (!host) return;
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.textContent = typeof message === 'string' ? message : pretty(message);
+  host.appendChild(toast);
+  window.setTimeout(() => toast.classList.add('show'), 20);
+  window.setTimeout(() => {
+    toast.classList.remove('show');
+    window.setTimeout(() => toast.remove(), 250);
+  }, 2600);
+}
 
 async function refresh() {
   const [health, incoming, batches, datasets, jobs, models, devices] = await Promise.all([
@@ -89,10 +101,10 @@ function renderOverview() {
     ['设备', state.devices.length],
   ].map(([name, value]) => `<div class="metric"><div class="value">${value}</div><div class="name">${name}</div></div>`).join('');
 
-  const latestBatch = state.batches.at(-1) || state.batches[0] || null;
-  const latestDataset = state.datasets.at(-1) || state.datasets[0] || null;
-  const latestJob = state.jobs.at(-1) || state.jobs[0] || null;
-  const latestModel = state.models.at(-1) || state.models[0] || null;
+  const latestBatch = state.batches[0] || null;
+  const latestDataset = state.datasets[0] || null;
+  const latestJob = state.jobs[0] || null;
+  const latestModel = state.models[0] || null;
   $('currentContext').textContent = pretty({
     data_root: h.data_root,
     incoming_root: state.incomingRoot,
@@ -138,35 +150,31 @@ function renderIncomingPackages() {
 
 function renderBatches() {
   const root = $('batches');
-  const taskType = $('datasetTaskType') ? $('datasetTaskType').value : 'detection';
-  if (!state.batches.length) { root.className = 'list empty'; root.textContent = '暂无已解压 batch。请先在第 1 步处理 incoming 上传包。'; return; }
-  root.className = 'list';
-  root.innerHTML = state.batches.map(item => `
-    <div class="item">
-      <div class="item-main">
-        <input type="checkbox" class="batch-check" data-id="${escapeHtml(item.batch_id)}" ${state.selectedBatchIds.has(item.batch_id) ? 'checked' : ''} />
-        <div>
-          <div class="item-title">${escapeHtml(item.batch_id)} <span class="badge ${badgeClass(item.status)}">${escapeHtml(item.status)}</span></div>
-          <div class="item-meta">task=${escapeHtml(item.task_type || 'unassigned')} | device=${escapeHtml(item.device_id)} | customer=${escapeHtml(item.customer_id || '-')} | images=${item.image_count || 0} | labels=${item.label_count || 0} | ${formatTime(item.created_at_ms)}</div>
-        </div>
-        <div class="item-actions">
-          <button onclick="acceptBatch('${escapeHtml(item.batch_id)}')" class="success">确认 ${escapeHtml(taskType)}</button>
-          <button onclick="rejectBatch('${escapeHtml(item.batch_id)}')" class="danger">reject</button>
-          <button onclick="showManifest('${escapeHtml(item.batch_id)}')" class="secondary">manifest</button>
-          <button onclick="showModal('batch 详情', state.batches.find(x => x.batch_id === '${escapeHtml(item.batch_id)}'))" class="secondary">详情</button>
-        </div>
+  if (!root) return;
+  const batches = [...state.batches].sort((a, b) => Number(b.updated_at_ms || b.created_at_ms || 0) - Number(a.updated_at_ms || a.created_at_ms || 0));
+  if (!batches.length) {
+    root.className = 'folder-list empty';
+    root.textContent = '暂无已解压数据文件夹。请先在第 1 步处理 incoming 上传包。';
+    return;
+  }
+  root.className = 'folder-list';
+  root.innerHTML = batches.map(item => `
+    <div class="folder-card">
+      <div class="folder-icon">📁</div>
+      <div class="folder-body">
+        <div class="folder-title">${escapeHtml(item.batch_id)}</div>
+        <div class="item-meta">device=${escapeHtml(item.device_id || '-')} | customer=${escapeHtml(item.customer_id || '-')} | images=${item.image_count || 0} | labels=${item.label_count || 0} | ${formatTime(item.created_at_ms)}</div>
+      </div>
+      <div class="folder-actions">
+        <button onclick="openAnnotator('${escapeHtml(item.batch_id)}')">标注</button>
+        <button onclick="deleteBatch('${escapeHtml(item.batch_id)}')" class="danger">删除</button>
       </div>
     </div>`).join('');
-  document.querySelectorAll('.batch-check').forEach(el => {
-    el.onchange = (event) => {
-      const id = event.target.dataset.id;
-      if (event.target.checked) state.selectedBatchIds.add(id); else state.selectedBatchIds.delete(id);
-    };
-  });
 }
 
 function renderDatasets() {
   const root = $('datasets');
+  if (!root || root.hidden) return;
   if (!state.datasets.length) { root.className = 'list empty'; root.textContent = '暂无 dataset。'; return; }
   root.className = 'list';
   root.innerHTML = state.datasets.map(item => `
@@ -235,7 +243,10 @@ function refreshSelects() {
     : '<option value="">请先生成模型包</option>';
 }
 
-function selectedTaskType() { return $('datasetTaskType').value; }
+function selectedTaskType() {
+  const el = $('datasetTaskType');
+  return el ? el.value : 'detection';
+}
 
 function showManifest(batchId) {
   const batch = state.batches.find(x => x.batch_id === batchId);
@@ -243,14 +254,31 @@ function showManifest(batchId) {
   showModal(`manifest：${batchId}`, batch.manifest || {message: '该 batch 未包含 manifest.json'});
 }
 
+function openAnnotator(batchId) {
+  window.location.href = `/annotate?batch_id=${encodeURIComponent(batchId)}`;
+}
+
+async function deleteBatch(batchId) {
+  try {
+    await api(`/api/server/batches/${encodeURIComponent(batchId)}/delete`, {method:'POST', body:'{}'});
+    state.selectedBatchIds.delete(batchId);
+    showToast(`已删除数据文件夹：${batchId}`, 'success');
+    await refresh();
+  } catch (err) {
+    showToast(`删除数据文件夹失败：${err.message}`, 'danger');
+  }
+}
+
 async function processSelectedPackages() {
   const packages = [...state.selectedPackageNames];
-  if (!packages.length) return showToast('请先勾选 incoming 目录下的 tar.gz 上传包。');
+  if (!packages.length) return showToast('请先勾选 incoming 目录下的 tar.gz 上传包。', 'warning');
   const result = await api('/api/server/batches/process-incoming', {
     method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({packages})
   });
   state.selectedPackageNames.clear();
-  showModal('上传包处理完成', result.batch);
+  const batch = result.batch || {};
+  const count = Array.isArray(batch.batches) ? batch.batches.length : 1;
+  showToast(`上传包处理完成，已生成 ${count} 个数据文件夹。`, 'success');
   await refresh();
 }
 async function acceptBatch(batchId) {
@@ -308,16 +336,25 @@ async function publishModel(modelId) {
   await refresh();
 }
 
-$('refreshBtn').onclick = () => refresh().catch(err => showToast(err.message));
-$('modalClose').onclick = () => { $('modal').style.display = 'none'; };
+function bindClick(id, handler) {
+  const el = $(id);
+  if (el) el.onclick = handler;
+}
+function bindChange(id, handler) {
+  const el = $(id);
+  if (el) el.onchange = handler;
+}
+
+bindClick('refreshBtn', () => refresh().catch(err => showToast(err.message)));
+bindClick('modalClose', () => { $('modal').style.display = 'none'; });
 $('modal').onclick = (event) => { if (event.target.id === 'modal') $('modal').style.display = 'none'; };
-$('refreshIncomingBtn').onclick = () => refresh().catch(err => showToast(err.message));
-$('processIncomingBtn').onclick = () => processSelectedPackages().catch(err => showToast(err.message));
-$('acceptSelectedBtn').onclick = () => acceptSelected().catch(err => showToast(err.message));
-$('rejectSelectedBtn').onclick = () => rejectSelected().catch(err => showToast(err.message));
-$('buildDatasetBtn').onclick = () => buildDataset().catch(err => showToast(err.message));
-$('datasetTaskType').onchange = () => renderBatches();
-$('openAnnotatorBtn').onclick = () => showModal('标注器入口说明', `v3 服务端当前先按 v2 的数据流转方式完成 incoming 包处理和 batch/dataset 管理，内置标注器尚未迁移。\n\n当前建议流程：\n1. 边缘端 Web 打包 tar.gz 后，把文件复制或同步到服务端 incoming_root。\n2. 在第 1 步勾选 tar.gz 并处理，服务端会解压为 batch。\n3. 在第 2 步查看 batch manifest，根据实际数据类型选择 detection/classification/OBB/segmentation。\n4. 标注人员完成标注审核后，再确认 batch 并构建 dataset。\n\n后续接入 v2 标注器时，应继续复用 v3 的 batch/dataset API，不恢复 v2 的目录强绑定逻辑。`);
+bindClick('refreshIncomingBtn', () => refresh().catch(err => showToast(err.message)));
+bindClick('processIncomingBtn', () => processSelectedPackages().catch(err => showToast(`上传包处理失败：${err.message}`, 'danger')));
+bindClick('acceptSelectedBtn', () => acceptSelected().catch(err => showToast(err.message)));
+bindClick('rejectSelectedBtn', () => rejectSelected().catch(err => showToast(err.message)));
+bindClick('buildDatasetBtn', () => buildDataset().catch(err => showToast(err.message)));
+bindChange('datasetTaskType', () => renderBatches());
+bindClick('openAnnotatorBtn', () => showModal('标注器入口说明', `v3 服务端当前先按 v2 的数据流转方式完成 incoming 包处理和 batch/dataset 管理，内置标注器尚未迁移。`));
 
 $('jobForm').onsubmit = async (event) => {
   event.preventDefault();

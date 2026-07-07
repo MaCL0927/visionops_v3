@@ -286,12 +286,32 @@ class BatchService:
         return self.create_from_zip(archive_path)
 
     def list_batches(self) -> list[dict[str, Any]]:
+        """列出已解压 batch，按更新时间/创建时间倒序，方便 Web 端最新数据置顶。"""
         result = []
-        for batch_dir in sorted([entry for entry in self.batches_root.iterdir() if entry.is_dir()], key=lambda x: x.name):
+        for batch_dir in [entry for entry in self.batches_root.iterdir() if entry.is_dir()]:
             meta = self._store(batch_dir.name).read()
             if isinstance(meta, dict) and meta.get("batch_id"):
                 result.append(meta)
-        return result
+        return sorted(
+            result,
+            key=lambda item: int(item.get("updated_at_ms") or item.get("created_at_ms") or 0),
+            reverse=True,
+        )
+
+    def delete_batch(self, batch_id: str) -> dict[str, Any]:
+        """删除已解压 batch 文件夹。
+
+        当前第二步把已解压 batch 作为待标注数据文件夹展示；点击删除时，
+        只删除对应 batches/<batch_id> 目录，不回滚 incoming/processed 中的原始压缩包。
+        """
+        batch_id = _safe_id(batch_id)
+        meta = self.get_batch(batch_id)
+        batch_dir = self.batches_root / batch_id
+        if batch_dir.exists():
+            shutil.rmtree(batch_dir)
+        meta["status"] = "deleted"
+        meta["deleted_at_ms"] = _now_ms()
+        return meta
 
     def get_batch(self, batch_id: str) -> dict[str, Any]:
         meta = self._store(_safe_id(batch_id)).read()

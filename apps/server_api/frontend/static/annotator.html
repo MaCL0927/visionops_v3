@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VisionOps v3 标注界面</title>
+  <link rel="stylesheet" href="/static/css/main.css" />
+</head>
+<body class="annotator-page">
+  <header class="topbar">
+    <div>
+      <h1>VisionOps v3 标注界面</h1>
+      <p>当前版本先完成从数据文件夹跳转到独立标注界面的入口，后续再接入 v2 标注器或新的标注组件。</p>
+    </div>
+    <div class="top-actions">
+      <a class="button secondary" href="/">返回服务端控制台</a>
+    </div>
+  </header>
+
+  <main class="annotator-shell">
+    <section class="card">
+      <div class="section-head">
+        <div>
+          <div class="label">当前 batch</div>
+          <h2 id="batchTitle">加载中...</h2>
+        </div>
+        <span id="batchBadge" class="badge muted">未加载</span>
+      </div>
+      <div class="annotator-toolbar">
+        <button id="refreshBatchBtn">刷新数据</button>
+        <button id="showManifestBtn" class="secondary">查看 manifest</button>
+      </div>
+    </section>
+
+    <section class="annotator-main">
+      <article class="card">
+        <h2>数据文件夹信息</h2>
+        <pre id="batchInfo">加载中...</pre>
+      </article>
+      <article class="card">
+        <h2>后续标注功能预留区</h2>
+        <p>这里后续会接入 v2 的标注器逻辑，或重写为 v3 的标注组件。当前先保留独立页面、batch 上下文和 manifest 查看能力。</p>
+        <div class="hint">
+          建议后续在本页完成：图片预览、标注编辑、自动标注、人工审核、任务类型确认、构建 dataset 等能力。当前不在主控制台第二步堆放这些按钮。        </div>
+        <pre id="manifestPreview">manifest 尚未加载。</pre>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const batchId = params.get('batch_id') || '';
+    const $ = (id) => document.getElementById(id);
+    const pretty = (value) => JSON.stringify(value, null, 2);
+    async function api(path) {
+      const res = await fetch(path);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || data.detail || res.statusText);
+      return data;
+    }
+    async function loadBatch() {
+      if (!batchId) throw new Error('URL 缺少 batch_id');
+      $('batchTitle').textContent = batchId;
+      const result = await api('/api/server/batches/' + encodeURIComponent(batchId));
+      const batch = result.batch || result;
+      $('batchBadge').textContent = batch.status || 'unknown';
+      $('batchBadge').className = 'badge ' + (batch.status === 'rejected' ? 'danger' : (batch.status === 'extracted' ? 'warning' : ''));
+      $('batchInfo').textContent = pretty({
+        batch_id: batch.batch_id,
+        status: batch.status,
+        device_id: batch.device_id,
+        customer_id: batch.customer_id,
+        captured_at: batch.captured_at,
+        image_count: batch.image_count,
+        label_count: batch.label_count,
+        batch_path: batch.batch_path,
+        raw_path: batch.raw_path,
+        images_path: batch.images_path,
+        labels_path: batch.labels_path,
+        manifest_path: batch.manifest_path,
+      });
+      $('manifestPreview').textContent = pretty(batch.manifest || {message: '该 batch 未包含 manifest.json'});
+    }
+    $('refreshBatchBtn').onclick = () => loadBatch().catch(err => { $('batchInfo').textContent = err.message; });
+    $('showManifestBtn').onclick = () => {
+      const block = $('manifestPreview');
+      block.scrollIntoView({behavior: 'smooth', block: 'start'});
+    };
+    loadBatch().catch(err => {
+      $('batchTitle').textContent = '加载失败';
+      $('batchBadge').textContent = 'error';
+      $('batchBadge').className = 'badge danger';
+      $('batchInfo').textContent = err.message;
+    });
+  </script>
+</body>
+</html>

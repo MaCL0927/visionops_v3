@@ -65,6 +65,9 @@ class ServerRequestHandler(BaseHTTPRequestHandler):
             if path == "/":
                 self._serve_file(FRONTEND_DIR / "index.html", "text/html; charset=utf-8")
                 return
+            if path == "/annotate":
+                self._serve_file(FRONTEND_DIR / "annotator.html", "text/html; charset=utf-8")
+                return
             if path.startswith("/static/"):
                 self._serve_static(path)
                 return
@@ -136,6 +139,11 @@ class ServerRequestHandler(BaseHTTPRequestHandler):
                 body = self._read_json_body(default={})
                 batch = self.server.batch_service.set_status(batch_id, "rejected", str(body.get("note", "")), task_type=body.get("task_type"))
                 self._send_json(200, self._ok("server_batch_rejected", {"batch": batch}))
+                return
+            if path.startswith("/api/server/batches/") and path.endswith("/delete"):
+                batch_id = path.split("/")[-2]
+                batch = self.server.batch_service.delete_batch(batch_id)
+                self._send_json(200, self._ok("server_batch_deleted", {"batch": batch}))
                 return
             if path == "/api/server/datasets/build":
                 body = self._read_json_body(default={})
