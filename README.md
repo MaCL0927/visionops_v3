@@ -339,3 +339,147 @@ bash edge/gateway_adapter/tests/smoke_test.sh
 - `interfaces/schemas / interfaces/examples / interfaces/protocols` 是模块间契约，请勿随意删除。
 - `edge/runtime_cpp/examples/mock_model_package`、`mock backend`、`test_image / mock frame source` 仍保留，用于无硬件测试与开发验证。
 - 历史过程性交接文档已归档到 `docs/archive/handoff/`；当前理解系统请优先阅读本 README 和 `docs/handoff/current_state_2026_06_30.md`。
+
+## 15. 服务端 MVP：数据、训练、模型包与设备分发
+
+v3 边缘端初版完成后，服务端重新定位为：
+
+```text
+数据中心 + 训练中心 + 模型包中心 + 设备分发中心
+```
+
+服务端不替代边缘端 Collector Web，也不执行边缘端实时推理。边缘端主链路仍然保持：
+
+```text
+Camera Bridge / SDK Bridge
+  -> C++ RKNN Runtime
+  -> Collector Web
+  -> Business App / Gateway / Modbus
+```
+
+### 15.1 当前服务端已实现能力
+
+当前 MVP 位于 `apps/server_api`，已支持：
+
+- `GET /api/server/health`：服务健康检查。
+- `GET /api/server/incoming-packages`：扫描 incoming 目录下尚未处理的 tar.gz。
+- `POST /api/server/batches/process-incoming`：处理选中的 tar.gz，解压为数据批次 batch。
+- `POST /api/server/batches/upload`：保留兼容入口，支持简单直传包。
+- `GET /api/server/batches`：查看 batch 列表。
+- `POST /api/server/batches/{batch_id}/accept`：接受批次。
+- `POST /api/server/batches/{batch_id}/reject`：拒绝批次。
+- `POST /api/server/datasets/build`：从 accepted batch 构建 dataset 清单。
+- `POST /api/server/training/jobs`：创建训练任务。
+- `GET /api/server/training/jobs/{job_id}/logs`：查看训练日志。
+- `GET /api/server/model-packages`：查看模型包列表。
+- `POST /api/server/model-packages/{model_id}/publish`：发布模型包到同步目录。
+- `GET /api/server/devices` / `POST /api/server/devices`：设备注册表。
+- `POST /api/server/devices/{device_id}/assign-model`：给设备分配目标模型。
+
+说明：当前 training job 是 mock runner，用于验证任务编排和 v3 标准模型包生成契约；不执行真实 GPU 训练、ONNX 导出或 RKNN 转换。
+
+### 15.2 启动服务端
+
+```bash
+cd /opt/visionops_v3
+
+python3 -m apps.server_api.backend.main \
+  --host 0.0.0.0 \
+  --port 18100 \
+  --data-root /opt/visionops_v3/server_data \
+  --incoming-root /opt/visionops_v3/server_data/incoming \
+  --publish-root /opt/visionops_v3/server_data/published_models
+```
+
+浏览器访问：
+
+```text
+http://127.0.0.1:18100/
+```
+
+### 15.3 服务端推荐工作流
+
+```text
+边缘端采集并导出 tar.gz
+  -> tar.gz 复制或 Syncthing 同步到 server_data/incoming
+  -> 服务端扫描 incoming 并处理选中上传包，生成 batch
+  -> 第二步查看 manifest，确认任务类型，accept / reject
+  -> 从 extracted/accepted batch 构建 dataset
+  -> 创建 training job
+  -> mock runner 生成 v3 model package
+  -> publish 到 Syncthing 共享目录
+  -> 边缘端 Collector Web 扫描 model.rknn + model.yaml
+```
+
+### 15.4 v3 标准模型包
+
+服务端完整模型包：
+
+```text
+server_data/model_packages/<model_id>/
+├── model.rknn
+├── model.yaml
+├── package.json
+├── metrics.json
+├── train_config.yaml.json
+├── export_report.json
+└── logs/
+```
+
+发布到边缘端时只复制：
+
+```text
+models/<model_name>/
+├── model.rknn
+└── model.yaml
+```
+
+`model.yaml` 是 Collector Web 扫描模型包的唯一元信息来源。
+
+### 15.5 常用验证命令
+
+```bash
+curl http://127.0.0.1:18100/api/server/health | python3 -m json.tool
+
+curl http://127.0.0.1:18100/api/server/incoming-packages | python3 -m json.tool
+
+curl -X POST http://127.0.0.1:18100/api/server/batches/process-incoming \
+  -H 'Content-Type: application/json' \
+  -d '{"packages":["rk3576-001_package-test_20260707_085333.tar.gz"]}' | python3 -m json.tool
+
+curl http://127.0.0.1:18100/api/server/batches | python3 -m json.tool
+
+curl -X POST http://127.0.0.1:18100/api/server/batches/<batch_id>/accept \
+  -H 'Content-Type: application/json' \
+  -d '{"task_type":"detection"}'
+
+curl -X POST http://127.0.0.1:18100/api/server/datasets/build \
+  -H 'Content-Type: application/json' \
+  -d '{"task_type":"detection","batch_ids":["<batch_id>"]}' | python3 -m json.tool
+
+curl -X POST http://127.0.0.1:18100/api/server/training/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"dataset_id":"<dataset_id>","task_type":"detection","epochs":50,"batch_size":16,"imgsz":640}' \
+  | python3 -m json.tool
+
+curl http://127.0.0.1:18100/api/server/model-packages | python3 -m json.tool
+
+curl -X POST http://127.0.0.1:18100/api/server/model-packages/<model_id>/publish \
+  -H 'Content-Type: application/json' \
+  -d '{"publish_root":"/tmp/visionops_publish"}'
+```
+
+更多说明见：
+
+- `docs/server/README.md`
+- `docs/server/api.md`
+- `docs/server/model_package_spec.md`
+- `docs/server/workflow.md`
+
+### 15.6 当前限制
+
+- 真实训练流水线尚未接入。
+- MLflow 目前只保留配置字段，未创建真实 run。
+- ONNX 导出和 RKNN 转换为 stage 占位。
+- 标注审核器尚未迁移到 v3 服务端。
+- 设备分发当前只维护注册表和目标模型，尚未远程控制边缘端 Collector。

@@ -29,6 +29,27 @@ compile_commands.json
 *.so
 *.out
 
+
+# 服务端运行数据（仅保留目录占位）
+server_data/*
+!server_data/.gitkeep
+!server_data/batches/
+server_data/batches/*
+!server_data/batches/.gitkeep
+!server_data/datasets/
+server_data/datasets/*
+!server_data/datasets/.gitkeep
+!server_data/jobs/
+server_data/jobs/*
+!server_data/jobs/.gitkeep
+!server_data/model_packages/
+server_data/model_packages/*
+!server_data/model_packages/.gitkeep
+!server_data/registry/
+server_data/registry/*
+!server_data/registry/.gitkeep
+published_models/
+
 # 模型、训练结果与运行时制品
 *.pt
 *.pth
@@ -78,3 +99,17 @@ Log/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 重新允许服务端占位目录被纳入仓库（覆盖通用 datasets/ 等规则）
+!server_data/
+!server_data/.gitkeep
+!server_data/batches/
+!server_data/batches/.gitkeep
+!server_data/datasets/
+!server_data/datasets/.gitkeep
+!server_data/jobs/
+!server_data/jobs/.gitkeep
+!server_data/model_packages/
+!server_data/model_packages/.gitkeep
+!server_data/registry/
+!server_data/registry/.gitkeep

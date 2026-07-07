@@ -1,0 +1,37 @@
+# VisionOps v3 服务端示例配置。真实部署时请复制为外部配置，不要提交真实路径和私有 IP。
+server:
+  host: 0.0.0.0
+  port: 18100
+  data_root: ./server_data
+  # v3 服务端第一步扫描该目录下的 *.tar.gz 上传包。
+  # 边缘端 Web 打包后的 tar.gz 建议先同步/复制到这里，再在服务端控制台选择处理。
+  incoming_root: ./server_data/incoming
+  max_upload_mb: 2048
+
+mlflow:
+  tracking_uri: http://127.0.0.1:5000
+
+training:
+  allowed_task_types:
+    - detection
+    - classification
+    - obb_detection
+    - segmentation
+  default:
+    task_type: detection
+    epochs: 50
+    batch_size: 16
+    imgsz: 640
+    device: cuda:0
+
+export:
+  target_platform: rk3576
+  rknn_toolkit_env: rknn311
+
+model_package:
+  root: ./server_data/model_packages
+  # 可设置为 Syncthing 共享目录，例如 /home/pc/Sync/visionops_models
+  publish_root: ./server_data/published_models
+
+devices:
+  registry_path: ./server_data/registry/devices.json
