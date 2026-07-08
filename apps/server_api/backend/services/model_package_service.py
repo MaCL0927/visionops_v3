@@ -197,6 +197,16 @@ class ModelPackageService:
             "published_at_ms": timestamp_ms(),
         }
 
+    def delete_package(self, model_id: str) -> dict[str, Any]:
+        package_dir = self.model_packages_root / _safe_id(model_id)
+        if not package_dir.is_dir():
+            raise FileNotFoundError(f"模型包不存在: {model_id}")
+        summary = self.get_package(package_dir.name) or {"model_id": package_dir.name, "package_path": str(package_dir)}
+        shutil.rmtree(package_dir)
+        summary["deleted"] = True
+        summary["deleted_at_ms"] = timestamp_ms()
+        return summary
+
 
 def _safe_id(value: str) -> str:
     value = str(value or "").strip().replace(" ", "_")

@@ -1,10 +1,21 @@
-"""训练流水线 stage 占位。
-
-真实实现接入时，该模块应只处理本 stage 的输入/输出，不绑定边缘端内部路径。
-"""
+"""Collect metrics produced by Ultralytics training."""
 
 from __future__ import annotations
 
+from typing import Any
 
-def run(*args, **kwargs):  # type: ignore[no-untyped-def]
-    raise NotImplementedError("该 stage 尚未接入真实训练流水线")
+from training.pipeline.common import PipelineContext, write_json
+
+
+def run(ctx: PipelineContext, train_report: dict[str, Any]) -> dict[str, Any]:
+    metrics = train_report.get("metrics") if isinstance(train_report.get("metrics"), dict) else {}
+    report = {
+        "status": "success",
+        "source": "ultralytics_results_csv",
+        "metrics": metrics,
+        "best_pt": train_report.get("best_pt"),
+        "run_dir": train_report.get("run_dir"),
+    }
+    write_json(ctx.output_dir / "evaluate_report.json", report)
+    ctx.log(f"[evaluate] metrics_keys={list(metrics.keys())}")
+    return report

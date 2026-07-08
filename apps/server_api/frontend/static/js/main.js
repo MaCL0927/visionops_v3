@@ -8,7 +8,7 @@ const state = {
   models: [],
   devices: [],
   selectedPackageNames: new Set(),
-  selectedBatchIds: new Set(),
+  activeLogJobId: '',
 };
 
 async function api(path, options = {}) {
@@ -53,6 +53,11 @@ function showToast(message, kind = 'success') {
   setTimeout(() => item.remove(), 3100);
 }
 
+function latestJob() {
+  const jobs = [...state.jobs].sort((a, b) => Number(b.updated_at_ms || b.created_at_ms || 0) - Number(a.updated_at_ms || a.created_at_ms || 0));
+  return jobs.find(x => x.status === 'running') || jobs[0] || null;
+}
+
 async function refresh() {
   const [health, incoming, batches, datasets, jobs, models, devices] = await Promise.all([
     api('/api/server/health'),
@@ -72,12 +77,12 @@ async function refresh() {
   state.models = models.model_packages || [];
   state.devices = devices.devices || [];
   state.selectedPackageNames = new Set([...state.selectedPackageNames].filter(name => state.incomingPackages.some(x => x.name === name)));
-  state.selectedBatchIds = new Set([...state.selectedBatchIds].filter(id => state.batches.some(x => x.batch_id === id)));
   renderAll();
+  await updateRealtimeLog(false);
 }
 
 function renderAll() {
-  renderOverview();
+  renderStatus();
   renderIncomingPackages();
   renderBatches();
   renderDatasets();
@@ -87,47 +92,25 @@ function renderAll() {
   refreshSelects();
 }
 
-function renderOverview() {
+function renderStatus() {
   const h = state.health || {};
-  $('serverBadge').textContent = h.status === 'ok' ? '服务端：已连接' : '服务端：未连接';
-  $('serverBadge').className = 'badge ' + (h.status === 'ok' ? '' : 'danger');
-  $('mlflowLink').href = h.mlflow_uri || '#';
-  $('overviewCards').innerHTML = [
-    ['待处理包', state.incomingPackages.length],
-    ['数据批次', state.batches.length],
-    ['已确认批次', state.batches.filter(x => x.status === 'accepted').length],
-    ['数据集', state.datasets.length],
-    ['训练任务', state.jobs.length],
-    ['模型包', state.models.length],
-    ['设备', state.devices.length],
-  ].map(([name, value]) => `<div class="metric"><div class="value">${value}</div><div class="name">${name}</div></div>`).join('');
-
-  const latestBatch = state.batches.at(-1) || state.batches[0] || null;
-  const latestDataset = state.datasets.at(-1) || state.datasets[0] || null;
-  const latestJob = state.jobs.at(-1) || state.jobs[0] || null;
-  const latestModel = state.models.at(-1) || state.models[0] || null;
-  $('currentContext').textContent = pretty({
-    data_root: h.data_root,
-    incoming_root: state.incomingRoot,
-    batch_root: h.batch_root,
-    publish_root: h.publish_root || '(未配置，可在模型发布时手动填写)',
-    current_batch: latestBatch ? `${latestBatch.batch_id} (${latestBatch.status}, task=${latestBatch.task_type}, images=${latestBatch.image_count}, labels=${latestBatch.label_count})` : null,
-    current_dataset: latestDataset ? `${latestDataset.dataset_id} (${latestDataset.task_type}, images=${latestDataset.image_count})` : null,
-    latest_job: latestJob ? `${latestJob.job_id} (${latestJob.status}, stage=${latestJob.current_stage})` : null,
-    latest_model: latestModel ? `${latestModel.model_id} (${latestModel.status})` : null,
-  });
-  if (latestJob) loadJobLogs(latestJob.job_id, false).catch(() => {});
+  const badge = $('serverBadge');
+  if (badge) {
+    badge.textContent = h.status === 'ok' ? '服务端：已连接' : '服务端：未连接';
+    badge.className = 'badge ' + (h.status === 'ok' ? '' : 'danger');
+  }
+  if ($('mlflowLink')) $('mlflowLink').href = h.mlflow_uri || '#';
 }
 
 function renderIncomingPackages() {
   $('incomingRootText').textContent = state.incomingRoot || '-';
   const root = $('incomingPackages');
   if (!state.incomingPackages.length) {
-    root.className = 'list empty';
+    root.className = 'list empty incoming-list';
     root.textContent = `当前没有待处理上传包。目录：${state.incomingRoot || '-'}`;
     return;
   }
-  root.className = 'list';
+  root.className = 'list incoming-list';
   root.innerHTML = state.incomingPackages.map(item => `
     <div class="item">
       <div class="item-main">
@@ -164,10 +147,11 @@ function renderBatches() {
       <div class="folder-icon">📁</div>
       <div>
         <div class="folder-title">${escapeHtml(item.batch_id)} <span class="badge ${badgeClass(item.status)}">${escapeHtml(item.status || 'extracted')}</span></div>
-        <div class="folder-meta">device=${escapeHtml(item.device_id || '-')} | customer=${escapeHtml(item.customer_id || '-')} | images=${item.image_count || 0} | labels=${item.label_count || 0} | ${formatTime(item.created_at_ms)}</div>
+        <div class="folder-meta">device=${escapeHtml(item.device_id || '-')} | customer=${escapeHtml(item.customer_id || '-')} | task=${escapeHtml(item.task_type || 'unassigned')} | images=${item.image_count || 0} | labels=${item.label_count || 0} | ${formatTime(item.created_at_ms)}</div>
       </div>
       <div class="folder-actions">
         <button onclick="openAnnotator('${escapeHtml(item.batch_id)}')">标注</button>
+        <button onclick="openBatchFolder('${escapeHtml(item.batch_id)}')" class="secondary">详情</button>
         <button onclick="deleteBatch('${escapeHtml(item.batch_id)}')" class="danger">删除</button>
       </div>
     </div>`).join('');
@@ -176,43 +160,63 @@ function renderBatches() {
 function renderDatasets() {
   const root = $('datasets');
   if (!root) return;
-  if (!state.datasets.length) { root.className = 'list empty'; root.textContent = '暂无 dataset。'; return; }
-  root.className = 'list';
-  root.innerHTML = state.datasets.map(item => `
+  const items = [...state.datasets].sort((a, b) => Number(b.created_at_ms || 0) - Number(a.created_at_ms || 0));
+  if (!items.length) {
+    root.className = 'list empty compact-list';
+    root.textContent = '暂无 dataset。标注器点击“确认审核完成”后会自动生成。';
+    return;
+  }
+  root.className = 'list compact-list';
+  root.innerHTML = items.map(item => `
     <div class="item">
-      <div class="item-title">${escapeHtml(item.dataset_id)} <span class="badge ${badgeClass(item.status)}">${escapeHtml(item.status)}</span></div>
-      <div class="item-meta">${escapeHtml(item.task_type)} | batches=${(item.batch_ids || []).length} | images=${item.image_count || 0} | labels=${item.label_count || 0}</div>
-      <div class="item-actions"><button onclick="showModal('dataset 详情（含源 manifest）', state.datasets.find(x => x.dataset_id === '${escapeHtml(item.dataset_id)}'))" class="secondary">详情</button></div>
+      <div class="item-title">${escapeHtml(item.dataset_id)} <span class="badge ${badgeClass(item.status)}">${escapeHtml(item.status || 'ready')}</span></div>
+      <div class="item-meta">${escapeHtml(item.task_type)} | batches=${(item.batch_ids || []).length} | images=${item.image_count || 0} | labels=${item.label_count || 0} | classes=${item.class_count || 0}</div>
+      <div class="item-actions">
+        <button onclick="openDatasetFolder('${escapeHtml(item.dataset_id)}')" class="secondary">详情</button>
+        <button onclick="deleteDataset('${escapeHtml(item.dataset_id)}')" class="danger">删除</button>
+      </div>
     </div>`).join('');
 }
 
 function renderJobs() {
   const root = $('jobs');
-  if (!state.jobs.length) { root.className = 'list empty'; root.textContent = '暂无 training job。'; return; }
-  root.className = 'list';
-  root.innerHTML = state.jobs.map(item => `
-    <div class="item">
-      <div class="item-title">${escapeHtml(item.job_id)} <span class="badge ${badgeClass(item.status)}">${escapeHtml(item.status)}</span></div>
-      <div class="item-meta">stage=${escapeHtml(item.current_stage)} | dataset=${escapeHtml(item.dataset_id)} | model=${escapeHtml(item.output_model_package || '-')} | ${formatTime(item.updated_at_ms)}</div>
-      <div class="item-actions">
-        <button onclick="loadJobLogs('${escapeHtml(item.job_id)}', true)" class="secondary">日志</button>
-        <button onclick="cancelJob('${escapeHtml(item.job_id)}')" class="warning">取消</button>
-        <button onclick="showModal('job 详情', state.jobs.find(x => x.job_id === '${escapeHtml(item.job_id)}'))" class="secondary">详情</button>
+  if (!root) return;
+  const items = [...state.jobs].sort((a, b) => Number(b.updated_at_ms || b.created_at_ms || 0) - Number(a.updated_at_ms || a.created_at_ms || 0));
+  if (!items.length) { root.className = 'list empty training-job-list'; root.textContent = '暂无 training job。'; return; }
+  root.className = 'list training-job-list compact-row-list';
+  root.innerHTML = items.map(item => {
+    const canCancel = !['success', 'failed', 'canceled'].includes(String(item.status || ''));
+    const cancelBtn = canCancel ? `<button onclick="cancelJob('${escapeHtml(item.job_id)}')" class="warning">取消</button>` : '';
+    return `
+    <div class="item item-compact">
+      <div class="inline-info">
+        <span class="item-title">${escapeHtml(item.job_id)} <span class="badge ${badgeClass(item.status)}">${escapeHtml(item.status)}</span></span>
+        <span class="item-meta inline-meta">stage=${escapeHtml(item.current_stage)} | dataset=${escapeHtml(item.dataset_id)} | model=${escapeHtml(item.output_model_package || '-')} | ${formatTime(item.updated_at_ms)}</span>
       </div>
-    </div>`).join('');
+      <div class="item-actions">
+        ${cancelBtn}
+        <button onclick="openJobFolder('${escapeHtml(item.job_id)}')" class="secondary">详情</button>
+        <button onclick="deleteJob('${escapeHtml(item.job_id)}')" class="danger">删除</button>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 function renderModels() {
   const root = $('models');
   if (!state.models.length) { root.className = 'list empty'; root.textContent = '暂无模型包。训练任务成功后会自动生成。'; return; }
-  root.className = 'list';
-  root.innerHTML = state.models.map(item => `
-    <div class="item">
-      <div class="item-title">${escapeHtml(item.model_id)} <span class="badge ${badgeClass(item.status)}">${escapeHtml(item.status)}</span></div>
-      <div class="item-meta">${escapeHtml(item.task_type)} | platform=${escapeHtml(item.target_platform)} | job=${escapeHtml(item.job_id || '-')}</div>
+  root.className = 'list compact-row-list model-package-list';
+  const items = [...state.models].sort((a, b) => Number(b.updated_at_ms || b.created_at_ms || 0) - Number(a.updated_at_ms || a.created_at_ms || 0));
+  root.innerHTML = items.map(item => `
+    <div class="item item-compact">
+      <div class="inline-info">
+        <span class="item-title">${escapeHtml(item.model_id)} <span class="badge ${badgeClass(item.status)}">${escapeHtml(item.status)}</span></span>
+        <span class="item-meta inline-meta">${escapeHtml(item.task_type)} | platform=${escapeHtml(item.target_platform)} | job=${escapeHtml(item.job_id || '-')}</span>
+      </div>
       <div class="item-actions">
         <button onclick="publishModel('${escapeHtml(item.model_id)}')" class="success">发布</button>
-        <button onclick="showModal('model package 详情', state.models.find(x => x.model_id === '${escapeHtml(item.model_id)}'))" class="secondary">详情</button>
+        <button onclick="openModelFolder('${escapeHtml(item.model_id)}')" class="secondary">详情</button>
+        <button onclick="deleteModel('${escapeHtml(item.model_id)}')" class="danger">删除</button>
       </div>
     </div>`).join('');
 }
@@ -231,10 +235,11 @@ function renderDevices() {
 
 function refreshSelects() {
   const datasetSelect = $('datasetSelect');
-  datasetSelect.innerHTML = state.datasets.length
-    ? state.datasets.map(d => `<option value="${escapeHtml(d.dataset_id)}">${escapeHtml(d.dataset_id)} (${escapeHtml(d.task_type)})</option>`).join('')
-    : '<option value="">请先构建 dataset</option>';
-  datasetSelect.disabled = !state.datasets.length;
+  const datasets = [...state.datasets].sort((a, b) => Number(b.created_at_ms || 0) - Number(a.created_at_ms || 0));
+  datasetSelect.innerHTML = datasets.length
+    ? datasets.map(d => `<option value="${escapeHtml(d.dataset_id)}" data-task="${escapeHtml(d.task_type)}">${escapeHtml(d.dataset_id)} (${escapeHtml(d.task_type)})</option>`).join('')
+    : '<option value="">请先完成标注审核生成 dataset</option>';
+  datasetSelect.disabled = !datasets.length;
 
   $('assignDeviceSelect').innerHTML = state.devices.length
     ? state.devices.map(d => `<option value="${escapeHtml(d.device_id)}">${escapeHtml(d.device_id)}</option>`).join('')
@@ -244,12 +249,40 @@ function refreshSelects() {
     : '<option value="">请先生成模型包</option>';
 }
 
-function selectedTaskType() { return $('datasetTaskType') ? $('datasetTaskType').value : 'detection'; }
+function taskFromDatasetId(datasetId) {
+  const dataset = state.datasets.find(x => x.dataset_id === datasetId);
+  return dataset ? dataset.task_type : 'detection';
+}
 
-function showManifest(batchId) {
+function openAnnotator(batchId) {
+  if (!batchId) return showToast('batch_id 为空', 'error');
+  window.location.href = '/annotate?batch_id=' + encodeURIComponent(batchId);
+}
+
+async function openPath(path) {
+  if (!path) return showToast('路径为空', 'error');
+  await api('/api/server/open-path', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path})});
+  showToast('已请求打开文件夹：' + path, 'success');
+}
+async function openBatchFolder(batchId) {
   const batch = state.batches.find(x => x.batch_id === batchId);
-  if (!batch) return showToast('batch 不存在');
-  showModal(`manifest：${batchId}`, batch.manifest || {message: '该 batch 未包含 manifest.json'});
+  if (!batch) return showToast('batch 不存在', 'error');
+  await openPath(batch.raw_path || batch.batch_path);
+}
+async function openDatasetFolder(datasetId) {
+  const dataset = state.datasets.find(x => x.dataset_id === datasetId);
+  if (!dataset) return showToast('dataset 不存在', 'error');
+  await openPath(dataset.dataset_path);
+}
+async function openJobFolder(jobId) {
+  const job = state.jobs.find(x => x.job_id === jobId);
+  if (!job) return showToast('training job 不存在', 'error');
+  await openPath(job.job_path);
+}
+async function openModelFolder(modelId) {
+  const model = state.models.find(x => x.model_id === modelId);
+  if (!model) return showToast('模型包不存在', 'error');
+  await openPath(model.package_path);
 }
 
 async function processSelectedPackages() {
@@ -259,66 +292,55 @@ async function processSelectedPackages() {
     method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({packages})
   });
   state.selectedPackageNames.clear();
-  showToast('上传包处理完成，已生成 batch：' + (result.batch && result.batch.batch_id ? result.batch.batch_id : ''), 'success');
+  showToast('上传包处理完成，已生成标注数据文件夹：' + (result.batch && result.batch.batch_id ? result.batch.batch_id : ''), 'success');
   await refresh();
-}
-
-function openAnnotator(batchId) {
-  if (!batchId) return showToast('batch_id 为空', 'error');
-  window.location.href = '/annotate?batch_id=' + encodeURIComponent(batchId);
 }
 
 async function deleteBatch(batchId) {
   if (!batchId) return;
   await api(`/api/server/batches/${encodeURIComponent(batchId)}/delete`, {method:'POST', body:'{}'});
-  state.selectedBatchIds.delete(batchId);
   showToast('已删除数据文件夹：' + batchId, 'success');
   await refresh();
 }
+async function deleteDataset(datasetId) {
+  if (!datasetId) return;
+  await api(`/api/server/datasets/${encodeURIComponent(datasetId)}/delete`, {method:'POST', body:'{}'});
+  showToast('已删除数据集：' + datasetId, 'success');
+  await refresh();
+}
+async function deleteJob(jobId) {
+  if (!jobId) return;
+  await api(`/api/server/training/jobs/${encodeURIComponent(jobId)}/delete`, {method:'POST', body:'{}'});
+  if (state.activeLogJobId === jobId) state.activeLogJobId = '';
+  showToast('已删除训练任务：' + jobId, 'success');
+  await refresh();
+}
+async function deleteModel(modelId) {
+  if (!modelId) return;
+  await api(`/api/server/model-packages/${encodeURIComponent(modelId)}/delete`, {method:'POST', body:'{}'});
+  showToast('已删除模型包：' + modelId, 'success');
+  await refresh();
+}
 
-async function acceptBatch(batchId) {
-  await api(`/api/server/batches/${encodeURIComponent(batchId)}/accept`, {
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({task_type: selectedTaskType()})
-  });
-  await refresh();
+async function setActiveLogJob(jobId) {
+  state.activeLogJobId = jobId || '';
+  await updateRealtimeLog(false);
 }
-async function rejectBatch(batchId) {
-  await api(`/api/server/batches/${encodeURIComponent(batchId)}/reject`, {method:'POST', body:'{}'});
-  state.selectedBatchIds.delete(batchId);
-  await refresh();
+async function updateRealtimeLog(showToastOnEmpty=false) {
+  const job = state.activeLogJobId ? state.jobs.find(x => x.job_id === state.activeLogJobId) : latestJob();
+  if (!job) {
+    $('jobLog').textContent = '暂无任务日志。';
+    if (showToastOnEmpty) showToast('暂无训练任务日志');
+    return;
+  }
+  state.activeLogJobId = job.job_id;
+  const result = await api(`/api/server/training/jobs/${encodeURIComponent(job.job_id)}/logs`);
+  const header = `[job] ${job.job_id}\n[status] ${job.status} | stage=${job.current_stage} | dataset=${job.dataset_id}\n\n`;
+  $('jobLog').textContent = header + (result.logs || '暂无日志。');
+  const pre = $('jobLog');
+  pre.scrollTop = pre.scrollHeight;
 }
-async function acceptSelected() {
-  const ids = [...state.selectedBatchIds];
-  if (!ids.length) return showToast('请先勾选 batch。');
-  for (const id of ids) await api(`/api/server/batches/${encodeURIComponent(id)}/accept`, {
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({task_type: selectedTaskType()})
-  });
-  await refresh();
-}
-async function rejectSelected() {
-  const ids = [...state.selectedBatchIds];
-  if (!ids.length) return showToast('请先勾选 batch。');
-  for (const id of ids) await api(`/api/server/batches/${encodeURIComponent(id)}/reject`, {method:'POST', body:'{}'});
-  state.selectedBatchIds.clear();
-  await refresh();
-}
-async function buildDataset() {
-  const taskType = selectedTaskType();
-  const selected = [...state.selectedBatchIds].filter(id => {
-    const item = state.batches.find(x => x.batch_id === id);
-    return item && ['extracted', 'accepted'].includes(item.status);
-  });
-  const body = {task_type: taskType};
-  if (selected.length) body.batch_ids = selected;
-  const result = await api('/api/server/datasets/build', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-  showModal('数据集已构建', result.dataset);
-  await refresh();
-}
-async function loadJobLogs(jobId, show) {
-  const result = await api(`/api/server/training/jobs/${encodeURIComponent(jobId)}/logs`);
-  $('jobLog').textContent = result.logs || '暂无日志。';
-  if (show) showModal(`任务日志：${jobId}`, result.logs || '暂无日志。');
-}
+
 async function cancelJob(jobId) {
   await api(`/api/server/training/jobs/${encodeURIComponent(jobId)}/cancel`, {method:'POST', body:'{}'});
   await refresh();
@@ -327,7 +349,8 @@ async function publishModel(modelId) {
   const publishRoot = $('publishRootInput').value.trim();
   const body = publishRoot ? {publish_root: publishRoot} : {};
   const result = await api(`/api/server/model-packages/${encodeURIComponent(modelId)}/publish`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-  showModal('模型包已发布', result.publish);
+  const publishPath = result.publish && result.publish.publish_path ? result.publish.publish_path : '';
+  showToast('模型包已发布到：' + publishPath, 'success');
   await refresh();
 }
 
@@ -336,22 +359,34 @@ if ($('modalClose')) $('modalClose').onclick = () => { $('modal').style.display 
 if ($('modal')) $('modal').onclick = (event) => { if (event.target.id === 'modal') $('modal').style.display = 'none'; };
 if ($('refreshIncomingBtn')) $('refreshIncomingBtn').onclick = () => refresh().catch(err => showToast(err.message, 'error'));
 if ($('processIncomingBtn')) $('processIncomingBtn').onclick = () => processSelectedPackages().catch(err => showToast(err.message, 'error'));
-if ($('acceptSelectedBtn')) $('acceptSelectedBtn').onclick = () => acceptSelected().catch(err => showToast(err.message, 'error'));
-if ($('rejectSelectedBtn')) $('rejectSelectedBtn').onclick = () => rejectSelected().catch(err => showToast(err.message, 'error'));
-if ($('buildDatasetBtn')) $('buildDatasetBtn').onclick = () => buildDataset().catch(err => showToast(err.message, 'error'));
-if ($('datasetTaskType')) $('datasetTaskType').onchange = () => renderBatches();
 
 if ($('jobForm')) $('jobForm').onsubmit = async (event) => {
   event.preventDefault();
   const form = new FormData(event.target);
-  const body = Object.fromEntries(form.entries());
-  if (!body.dataset_id) return showToast('请先构建 dataset。');
-  body.epochs = Number(body.epochs); body.batch_size = Number(body.batch_size); body.imgsz = Number(body.imgsz);
+  const datasetId = String(form.get('dataset_id') || '').trim();
+  if (!datasetId) return showToast('请先完成标注审核生成 dataset。', 'error');
+  const body = {
+    dataset_id: datasetId,
+    task_type: taskFromDatasetId(datasetId),
+    epochs: Number(form.get('epochs') || 100),
+    batch_size: Number(form.get('batch_size') || 4),
+    imgsz: Number(form.get('imgsz') || 640),
+    device: '0',
+    target_platform: String(form.get('target_platform') || 'rk3576').trim() || 'rk3576',
+    conda_executable: 'conda',
+    onnx_conda_env: 'pt2onnx',
+    rknn_conda_env: 'rknn311',
+    amp: form.get('amp') === 'on',
+    do_quantization: form.get('do_quantization') === 'on',
+  };
   const result = await api('/api/server/training/jobs', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-  showModal('训练任务已创建', result.job);
+  state.activeLogJobId = result.job.job_id;
+  showToast('训练任务已创建：' + result.job.job_id, 'success');
+  await updateRealtimeLog(false).catch(() => {});
   setTimeout(() => refresh().catch(console.error), 200);
-  setTimeout(() => refresh().catch(console.error), 800);
+  setTimeout(() => refresh().catch(console.error), 1000);
 };
+
 if ($('deviceForm')) $('deviceForm').onsubmit = async (event) => {
   event.preventDefault();
   const body = Object.fromEntries(new FormData(event.target).entries());
@@ -369,7 +404,15 @@ if ($('assignModelBtn')) $('assignModelBtn').onclick = async () => {
 };
 
 refresh().catch(err => {
-  $('serverBadge').textContent = '服务端：连接失败';
-  $('serverBadge').className = 'badge danger';
-  $('currentContext').textContent = err.message;
+  if ($('serverBadge')) {
+    $('serverBadge').textContent = '服务端：连接失败';
+    $('serverBadge').className = 'badge danger';
+  }
+  $('jobLog').textContent = err.message;
 });
+setInterval(() => {
+  refresh().catch(() => {});
+}, 3000);
+setInterval(() => {
+  updateRealtimeLog(false).catch(() => {});
+}, 1200);

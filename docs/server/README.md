@@ -9,7 +9,7 @@
 - 处理 incoming 目录下的 `*.tar.gz`：`POST /api/server/batches/process-incoming`
 - 批次列表、详情、accept、reject
 - 第二步确认任务类型，并从 extracted/accepted batch 构建数据集清单
-- 创建训练任务 mock runner
+- 创建真实训练任务（默认 train 在当前 visionops 环境，ONNX 导出在 pt2onnx，RKNN 转换在 rknn311）
 - 自动生成 v3 标准模型包
 - 模型包列表、详情、发布到同步目录
 - 设备注册表与目标模型分配
@@ -30,7 +30,7 @@
 
 - `batch`：一次上传包解压后的数据批次；第一步不确认任务类型，默认 `task_type=unassigned`。
 - `dataset`：由一个或多个 batch 组成的数据集版本；第二步才确认 detection/classification/OBB/segmentation。
-- `training job`：训练流水线任务；MVP 阶段为 mock runner。
+- `training job`：训练流水线任务；目录和日志按 `设备ID_客户ID_任务类型_时间` 命名。
 - `model package`：服务端生成并管理的 v3 标准模型包。
 - `device`：设备注册表和目标模型分配记录。
 
@@ -89,3 +89,51 @@ server_data/incoming/processed/         # 已处理的原始 tar.gz
 - 数据标注审核器
 
 这些能力在目录和 API 上已经预留，但第一版不假装生产可用。
+
+## 第三步：训练与模型状态（v3 pipeline）
+
+当前版本已把第三步从 mock runner 替换为 v3 stage 化训练流水线。服务端控制台中的“训练与模型状态”分为两步：
+
+1. **从已审核数据构建数据集**：扫描 `server_data/batches/<batch_id>/raw` 下的图片与 `labels`，生成数据集版本，并物化 YOLO 数据目录。
+2. **启动训练流水线**：执行 `preprocess -> train -> evaluate -> export_onnx -> convert_rknn -> package_v3_model`，最终生成 v3 标准模型包。
+
+数据集目录示例：
+
+```text
+server_data/datasets/<device_id>_<customer_id>_<task>_<yyyymmdd_hhmmss>/
+  dataset.json
+  batches.json
+  yolo_dataset/
+    data.yaml
+    images/train
+    images/val
+    labels/train
+    labels/val
+```
+
+训练任务目录示例：
+
+```text
+server_data/jobs/<device_id>_<customer_id>_<task>_job_<yyyymmdd_hhmmss>/
+  job.json
+  job_config.json
+  <job_id>.log
+  pipeline_status.json
+  work/
+  outputs/
+```
+
+模型包目录示例：
+
+```text
+server_data/model_packages/<model_id>/
+  model.rknn
+  model.yaml
+  package.json
+  metrics.json
+  train_config.yaml.json
+  export_report.json
+  logs/
+```
+
+当前真实 pipeline 首版优先支持 `detection`，同时保留 `obb_detection` 与 `segmentation` 的 YOLO 任务分支；`classification` 的真实训练整理后续接入。训练阶段使用服务端当前环境（通常为 `visionops`）；ONNX 导出阶段默认通过 `conda run --no-capture-output -n pt2onnx ...` 切换到瑞芯微修改版 Ultralytics 环境，以导出多头 ONNX；RKNN 转换阶段默认通过 `conda run --no-capture-output -n rknn311 python -m training.pipeline.stages.convert_rknn_worker ...` 切换到 `rknn311` 环境。

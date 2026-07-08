@@ -61,7 +61,7 @@ def test_batch_upload_accept_and_dataset_build(tmp_path: Path) -> None:
     assert accepted["status"] == "accepted"
 
     dataset_service = DatasetService(tmp_path / "datasets", batch_service)
-    dataset = dataset_service.build_dataset(task_type="detection")
+    dataset = dataset_service.build_dataset(task_type="detection", batch_ids=[batch["batch_id"]])
     assert dataset["image_count"] == 1
     assert dataset["batch_ids"] == [batch["batch_id"]]
 
@@ -96,11 +96,11 @@ def test_training_job_mock_runner_generates_model_package(tmp_path: Path) -> Non
     batch = batch_service.create_from_zip(_sample_zip(tmp_path / "upload.zip"), device_id="edge-dev", task_type="detection")
     batch_service.set_status(batch["batch_id"], "accepted")
     dataset_service = DatasetService(tmp_path / "datasets", batch_service)
-    dataset = dataset_service.build_dataset(task_type="detection")
+    dataset = dataset_service.build_dataset(task_type="detection", batch_ids=[batch["batch_id"]])
     package_service = ModelPackageService(tmp_path / "packages")
     job_service = TrainingJobService(tmp_path / "jobs", dataset_service, package_service)
 
-    job = job_service.create_job({"dataset_id": dataset["dataset_id"], "task_type": "detection", "run_inline": True})
+    job = job_service.create_job({"dataset_id": dataset["dataset_id"], "task_type": "detection", "run_inline": True, "runner": "mock"})
     assert job["status"] == "success"
     assert job["output_model_package"]
     assert package_service.get_package(job["output_model_package"])["status"] == "ready"
@@ -114,3 +114,32 @@ def test_device_registry_assign_model(tmp_path: Path) -> None:
     assigned = service.assign_model("lb3576-dev", "demo-det")
     assert assigned["target_model"] == "demo-det"
     assert service.get_device("lb3576-dev")["sync_status"] == "assigned"
+
+
+def test_model_package_delete_removes_package_dir(tmp_path: Path) -> None:
+    service = ModelPackageService(tmp_path / "packages")
+    package = service.create_mock_package(model_id="demo-delete", model_name="demo", task_type="detection")
+    package_path = Path(package["package_path"])
+    assert package_path.exists()
+
+    deleted = service.delete_package("demo-delete")
+    assert deleted["deleted"] is True
+    assert not package_path.exists()
+
+
+def test_training_job_delete_removes_job_dir(tmp_path: Path) -> None:
+    batch_service = BatchService(tmp_path / "batches", ("detection",))
+    batch = batch_service.create_from_zip(_sample_zip(tmp_path / "upload.zip"), device_id="edge-dev", task_type="detection")
+    batch_service.set_status(batch["batch_id"], "accepted")
+    dataset_service = DatasetService(tmp_path / "datasets", batch_service)
+    dataset = dataset_service.build_dataset(task_type="detection", batch_ids=[batch["batch_id"]])
+    package_service = ModelPackageService(tmp_path / "packages")
+    job_service = TrainingJobService(tmp_path / "jobs", dataset_service, package_service)
+
+    job = job_service.create_job({"dataset_id": dataset["dataset_id"], "task_type": "detection", "run_inline": True, "runner": "mock"})
+    job_path = Path(job["job_path"])
+    assert job_path.exists()
+
+    deleted = job_service.delete_job(job["job_id"])
+    assert deleted["deleted"] is True
+    assert not job_path.exists()

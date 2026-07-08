@@ -7,6 +7,7 @@ import json
 import mimetypes
 import shutil
 import signal
+import subprocess
 import tempfile
 import threading
 import time
@@ -158,6 +159,16 @@ class ServerRequestHandler(BaseHTTPRequestHandler):
                 )
                 self._send_json(200, self._ok("server_dataset_built", {"dataset": dataset}))
                 return
+            if path.startswith("/api/server/datasets/") and path.endswith("/delete"):
+                dataset_id = path.split("/")[-2]
+                deleted = self.server.dataset_service.delete_dataset(dataset_id)
+                self._send_json(200, self._ok("server_dataset_deleted", {"dataset": deleted}))
+                return
+            if path == "/api/server/open-path":
+                body = self._read_json_body(default={})
+                result = self._open_local_path(str(body.get("path") or ""))
+                self._send_json(200, self._ok("server_path_opened", {"result": result}))
+                return
             if path == "/api/server/training/jobs":
                 body = self._read_json_body(default={})
                 job = self.server.training_job_service.create_job(body)
@@ -168,12 +179,22 @@ class ServerRequestHandler(BaseHTTPRequestHandler):
                 job = self.server.training_job_service.cancel_job(job_id)
                 self._send_json(200, self._ok("server_training_job_canceled", {"job": job}))
                 return
+            if path.startswith("/api/server/training/jobs/") and path.endswith("/delete"):
+                job_id = path.split("/")[-2]
+                job = self.server.training_job_service.delete_job(job_id)
+                self._send_json(200, self._ok("server_training_job_deleted", {"job": job}))
+                return
             if path.startswith("/api/server/model-packages/") and path.endswith("/publish"):
                 model_id = path.split("/")[-2]
                 body = self._read_json_body(default={})
                 publish_root = Path(body["publish_root"]) if body.get("publish_root") else None
                 result = self.server.model_package_service.publish_package(model_id, publish_root=publish_root)
                 self._send_json(200, self._ok("server_model_package_published", {"publish": result}))
+                return
+            if path.startswith("/api/server/model-packages/") and path.endswith("/delete"):
+                model_id = path.split("/")[-2]
+                package = self.server.model_package_service.delete_package(model_id)
+                self._send_json(200, self._ok("server_model_package_deleted", {"model_package": package}))
                 return
             if path == "/api/server/devices":
                 body = self._read_json_body(default={})
@@ -333,9 +354,27 @@ class ServerRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/accept-reviewed":
             batch_id = self._require_batch_id()
             task_type = str(self._read_json_body(default={}).get("task_type") or "detection")
-            self._send_json(200, service.accept_reviewed(batch_id, task_type))
+            result = service.accept_reviewed(batch_id, task_type)
+            batch = result.get("batch", {}) if isinstance(result, dict) else {}
+            server_task = str(batch.get("task_type") or task_type or "detection")
+            dataset = self.server.dataset_service.build_dataset(task_type=server_task, batch_ids=[batch_id])
+            result["dataset"] = dataset
+            result["message"] = f"审核完成，已自动生成训练数据集：{dataset.get('dataset_id')}"
+            self._send_json(200, result)
             return True
         return False
+
+    def _open_local_path(self, raw_path: str) -> dict[str, Any]:
+        path = Path(str(raw_path or "")).expanduser().resolve()
+        data_root = self.server.config.data_root.resolve()
+        try:
+            path.relative_to(data_root)
+        except ValueError as exc:
+            raise ValueError(f"只允许打开 server_data 下的路径: {path}") from exc
+        if not path.exists():
+            raise FileNotFoundError(f"路径不存在: {path}")
+        subprocess.Popen(["xdg-open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return {"path": str(path), "opened": True}
 
     def _upload_batch(self) -> None:
         length = int(self.headers.get("Content-Length", "0") or "0")

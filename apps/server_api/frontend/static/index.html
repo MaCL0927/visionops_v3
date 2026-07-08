@@ -3,48 +3,34 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>VisionOps v3 服务端控制台</title>
+  <title>VisionOps 数据闭环控制台</title>
   <link rel="stylesheet" href="/static/css/main.css" />
 </head>
 <body>
-  <header class="topbar">
+  <header class="topbar simple-topbar">
     <div>
-      <h1>VisionOps v3 服务端控制台</h1>
-      <p>参考 v2 数据闭环控制台的操作流程，基于 v3 新架构管理数据批次、标注审核、训练状态、模型包和设备部署。</p>
-    </div>
-    <div class="top-actions">
-      <button id="refreshBtn">刷新状态</button>
-      <a class="button secondary" id="mlflowLink" href="#" target="_blank" rel="noopener">打开 MLflow</a>
+      <h1>VisionOps 数据闭环控制台</h1>
+      <p>接收数据 → 标注与审核 → 训练与模型状态 → 模型部署</p>
     </div>
   </header>
 
   <main class="page">
-    <section class="card status-card">
+    <section class="card status-card realtime-log-card">
       <div class="section-head">
-        <div>
-          <h2>总览</h2>
-        </div>
-        <span id="serverBadge" class="badge muted">未连接</span>
-      </div>
-      <div id="overviewCards" class="metric-grid"></div>
-      <div class="context-grid">
-        <div>
-          <div class="label">当前数据上下文</div>
-          <pre id="currentContext">加载中...</pre>
-        </div>
-        <div>
-          <div class="label">最近任务日志</div>
-          <pre id="jobLog">暂无任务日志。</pre>
+        <h2>运行日志</h2>
+        <div class="top-actions">
+          <span id="serverBadge" class="badge muted">未连接</span>
+          <button id="refreshBtn" class="ghost">刷新状态</button>
+          <a class="button secondary" id="mlflowLink" href="#" target="_blank" rel="noopener">打开 MLflow</a>
         </div>
       </div>
+      <pre id="jobLog">暂无任务日志。</pre>
     </section>
 
     <section class="card step-card wide incoming-step-card">
       <div class="step-title compact-title">
         <span class="step-no">1</span>
-        <div>
-          <h2>接收并处理上传包</h2>
-        </div>
+        <div><h2>接收并处理上传包</h2></div>
       </div>
 
       <div class="incoming-layout">
@@ -79,57 +65,60 @@
       <article class="card step-card annotation-step-card">
         <div class="step-title">
           <span class="step-no">2</span>
-          <div>
-            <h2>标注与审核 / 构建数据集</h2>
-          </div>
+          <div><h2>标注与审核</h2></div>
         </div>
         <h3>已解压数据文件夹</h3>
         <div id="batches" class="folder-list empty">暂无已解压数据文件夹。</div>
       </article>
 
-      <article class="card step-card">
+      <article class="card step-card training-step-card">
         <div class="step-title">
           <span class="step-no">3</span>
-          <div>
-            <h2>训练与模型状态</h2>
+          <div><h2>训练与模型状态</h2></div>
+        </div>
+
+        <div class="training-layout">
+          <div class="panel training-datasets-panel">
+            <h3>训练数据集</h3>
+            <div id="datasets" class="list empty compact-list">暂无 dataset。标注器点击“确认审核完成”后会自动生成。</div>
+          </div>
+
+          <div class="panel training-start-panel">
+            <h3>启动训练流水线</h3>
+            <form id="jobForm" class="form-grid compact">
+              <label>dataset
+                <select name="dataset_id" id="datasetSelect" required></select>
+              </label>
+              <label>epochs
+                <input name="epochs" type="number" value="100" min="1" />
+              </label>
+              <label>batch_size
+                <input name="batch_size" type="number" value="4" min="1" />
+              </label>
+              <label>imgsz
+                <input name="imgsz" type="number" value="640" min="32" />
+              </label>
+              <label>target_platform
+                <input name="target_platform" value="rk3576" />
+              </label>
+              <label class="check-label"><input name="amp" type="checkbox" checked /> AMP</label>
+              <label class="check-label"><input name="do_quantization" type="checkbox" checked /> RKNN 量化</label>
+              <button type="submit">开始训练流水线</button>
+            </form>
+          </div>
+
+          <div class="panel training-jobs-panel">
+            <h3>训练任务</h3>
+            <div id="jobs" class="list empty training-job-list compact-row-list">暂无 training job。</div>
           </div>
         </div>
-        <form id="jobForm" class="form-grid">
-          <label>dataset
-            <select name="dataset_id" id="datasetSelect" required></select>
-          </label>
-          <label>task_type
-            <select name="task_type" id="jobTaskType">
-              <option value="detection">detection</option>
-              <option value="classification">classification</option>
-              <option value="obb_detection">obb_detection</option>
-              <option value="segmentation">segmentation</option>
-            </select>
-          </label>
-          <label>preset_name
-            <input name="preset_name" value="default" />
-          </label>
-          <label>epochs
-            <input name="epochs" type="number" value="50" min="1" />
-          </label>
-          <label>batch_size
-            <input name="batch_size" type="number" value="16" min="1" />
-          </label>
-          <label>imgsz
-            <input name="imgsz" type="number" value="640" min="32" />
-          </label>
-          <button type="submit">开始训练流水线</button>
-        </form>
-        <div id="jobs" class="list empty">暂无 training job。</div>
       </article>
     </section>
 
     <section class="card step-card wide">
       <div class="step-title">
         <span class="step-no">4</span>
-        <div>
-          <h2>模型部署</h2>
-        </div>
+        <div><h2>模型部署</h2></div>
       </div>
       <div class="two-col">
         <div class="panel">
@@ -169,11 +158,6 @@
           <div id="devices" class="list empty">暂无设备。</div>
         </div>
       </div>
-    </section>
-
-    <section class="card note-card">
-      <h2>当前状态说明</h2>
-      <p>这版 Web 已经把 v2 控制台的 4 步流程迁移到 v3 的数据结构和 API 上，并接入了内置标注器。当前真实训练、ONNX 导出、RKNN 转换和 MLflow 真实 run 仍未接入，下一步可以继续替换 training runner。</p>
     </section>
   </main>
 
