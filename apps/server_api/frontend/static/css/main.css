@@ -182,3 +182,55 @@ pre { background: #0b1020; color: #d1e7ff; border-radius: 14px; padding: 14px; m
   .item-compact .inline-info { align-items: flex-start; flex-direction: column; gap: 4px; }
   .item-compact .item-title { max-width: 100%; }
 }
+
+/* Deployment refinement: taller step 2/3 cards and visible training form/jobs. */
+.annotation-step-card,
+.training-step-card {
+  height: 640px;
+}
+.training-layout {
+  grid-template-rows: minmax(360px, 1fr) minmax(190px, 0.52fr);
+}
+.training-datasets-panel .compact-list,
+.training-jobs-panel .training-job-list {
+  min-height: 0;
+}
+.training-start-panel form.compact {
+  grid-template-columns: 1fr 1fr;
+  align-content: start;
+}
+.training-start-panel form button {
+  grid-column: 1 / -1;
+}
+.training-jobs-panel {
+  min-height: 150px;
+}
+.training-job-list .item-compact {
+  min-height: 46px;
+}
+.select-with-delete {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  gap: 8px;
+  align-items: center;
+}
+.select-with-delete select { min-width: 0; }
+.model-package-list .item-compact,
+.training-job-list .item-compact {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.model-package-list .item-actions,
+.training-job-list .item-actions {
+  flex-wrap: nowrap;
+}
+@media (max-width: 980px) {
+  .annotation-step-card,
+  .training-step-card { height: auto; max-height: none; }
+}
+
+/* Keep the training start panel fully visible after adding the training-job list. */
+.training-start-panel { min-height: 0; }
+.training-start-panel form.compact { row-gap: 10px; }
+.training-start-panel .check-label { align-self: center; }
+.training-jobs-panel .training-job-list { min-height: 132px; }
+.device-list .item-title .badge { margin-left: 6px; }

@@ -28,8 +28,8 @@ function formatTime(ms) {
   try { return new Date(Number(ms)).toLocaleString(); } catch { return '-'; }
 }
 function badgeClass(status) {
-  if (['ok', 'ready', 'success', 'accepted'].includes(status)) return '';
-  if (['failed', 'rejected', 'error'].includes(status)) return 'danger';
+  if (['ok', 'ready', 'success', 'accepted', 'connect', 'connected', 'synced'].includes(status)) return '';
+  if (['failed', 'rejected', 'error', 'fail', 'sync_failed'].includes(status)) return 'danger';
   if (['extracted', 'uploaded', 'pending', 'running', 'assigned', 'unassigned'].includes(status)) return 'warning';
   return 'muted';
 }
@@ -224,13 +224,22 @@ function renderModels() {
 function renderDevices() {
   const root = $('devices');
   if (!state.devices.length) { root.className = 'list empty'; root.textContent = '暂无设备。'; return; }
-  root.className = 'list';
-  root.innerHTML = state.devices.map(item => `
-    <div class="item">
-      <div class="item-title">${escapeHtml(item.device_id)} <span class="badge ${badgeClass(item.sync_status)}">${escapeHtml(item.sync_status || 'unknown')}</span></div>
-      <div class="item-meta">${escapeHtml(item.device_type)} | ip=${escapeHtml(item.ip || '-')} | current=${escapeHtml(item.current_model || '-')} | target=${escapeHtml(item.target_model || '-')}</div>
-      <div class="item-actions"><button onclick="showModal('device 详情', state.devices.find(x => x.device_id === '${escapeHtml(item.device_id)}'))" class="secondary">详情</button></div>
-    </div>`).join('');
+  root.className = 'list compact-row-list device-list';
+  root.innerHTML = state.devices.map(item => {
+    const deviceUser = item.device_user || item.ssh_user || item.user || 'neardi';
+    const collectorStatus = item.collector_status || 'unknown';
+    return `
+    <div class="item item-compact">
+      <div class="inline-info">
+        <span class="item-title">${escapeHtml(item.device_id)} <span class="badge ${badgeClass(item.sync_status)}">${escapeHtml(item.sync_status || 'unknown')}</span><span class="badge ${badgeClass(collectorStatus)}">${escapeHtml(collectorStatus)}</span></span>
+        <span class="item-meta inline-meta">${escapeHtml(deviceUser)} | ip=${escapeHtml(item.ip || '-')} | root=${escapeHtml(item.model_root || '-')} | current=${escapeHtml(item.current_model || '-')} | target=${escapeHtml(item.target_model || '-')}</span>
+      </div>
+      <div class="item-actions">
+        <button onclick="showModal('device 详情', state.devices.find(x => x.device_id === '${escapeHtml(item.device_id)}'))" class="secondary">详情</button>
+        <button onclick="deleteDevice('${escapeHtml(item.device_id)}')" class="danger">删除</button>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 function refreshSelects() {
@@ -242,7 +251,10 @@ function refreshSelects() {
   datasetSelect.disabled = !datasets.length;
 
   $('assignDeviceSelect').innerHTML = state.devices.length
-    ? state.devices.map(d => `<option value="${escapeHtml(d.device_id)}">${escapeHtml(d.device_id)}</option>`).join('')
+    ? state.devices.map(d => {
+        const status = d.collector_status || 'unknown';
+        return `<option value="${escapeHtml(d.device_id)}">${escapeHtml(d.device_id)} (${escapeHtml(status)})</option>`;
+      }).join('')
     : '<option value="">请先登记设备</option>';
   $('assignModelSelect').innerHTML = state.models.length
     ? state.models.map(m => `<option value="${escapeHtml(m.model_id)}">${escapeHtml(m.model_id)}</option>`).join('')
@@ -321,6 +333,12 @@ async function deleteModel(modelId) {
   showToast('已删除模型包：' + modelId, 'success');
   await refresh();
 }
+async function deleteDevice(deviceId) {
+  if (!deviceId) return showToast('请先选择设备。', 'error');
+  await api(`/api/server/devices/${encodeURIComponent(deviceId)}/delete`, {method:'POST', body:'{}'});
+  showToast('已删除设备：' + deviceId, 'success');
+  await refresh();
+}
 
 async function setActiveLogJob(jobId) {
   state.activeLogJobId = jobId || '';
@@ -391,7 +409,8 @@ if ($('deviceForm')) $('deviceForm').onsubmit = async (event) => {
   event.preventDefault();
   const body = Object.fromEntries(new FormData(event.target).entries());
   const result = await api('/api/server/devices', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-  showModal('设备已更新', result.device);
+  const status = result.device && result.device.collector_status ? result.device.collector_status : 'unknown';
+  showToast('设备已更新，SSH状态：' + status, status === 'connect' ? 'success' : (status === 'fail' ? 'error' : 'success'));
   await refresh();
 };
 if ($('assignModelBtn')) $('assignModelBtn').onclick = async () => {
@@ -399,10 +418,10 @@ if ($('assignModelBtn')) $('assignModelBtn').onclick = async () => {
   const modelId = $('assignModelSelect').value;
   if (!deviceId || !modelId) return showToast('请先登记设备并生成模型包。');
   const result = await api(`/api/server/devices/${encodeURIComponent(deviceId)}/assign-model`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({model_id: modelId})});
-  showModal('目标模型已分配', result.device);
+  const remoteDir = result.sync && result.sync.remote_dir ? result.sync.remote_dir : '';
+  showToast(`目标模型已通过 SSH 同步到 ${deviceId}${remoteDir ? '：' + remoteDir : ''}`, 'success');
   await refresh();
 };
-
 refresh().catch(err => {
   if ($('serverBadge')) {
     $('serverBadge').textContent = '服务端：连接失败';

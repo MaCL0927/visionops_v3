@@ -201,11 +201,24 @@ class ServerRequestHandler(BaseHTTPRequestHandler):
                 device = self.server.device_service.upsert_device(body)
                 self._send_json(200, self._ok("server_device_upserted", {"device": device}))
                 return
+            if path.startswith("/api/server/devices/") and path.endswith("/delete"):
+                device_id = path.split("/")[-2]
+                device = self.server.device_service.delete_device(device_id)
+                self._send_json(200, self._ok("server_device_deleted", {"device": device}))
+                return
             if path.startswith("/api/server/devices/") and path.endswith("/assign-model"):
                 device_id = path.split("/")[-2]
                 body = self._read_json_body(default={})
-                device = self.server.device_service.assign_model(device_id, str(body.get("model_id") or ""))
-                self._send_json(200, self._ok("server_device_model_assigned", {"device": device}))
+                model_id = str(body.get("model_id") or "")
+                package = self.server.model_package_service.get_package(model_id)
+                if not package:
+                    raise FileNotFoundError(f"模型包不存在: {model_id}")
+                result = self.server.device_service.sync_model_to_device(
+                    device_id,
+                    model_id,
+                    Path(str(package.get("package_path") or "")),
+                )
+                self._send_json(200, self._ok("server_device_model_assigned", {"device": result.get("device"), "sync": result}))
                 return
             if self._handle_annotator_post(path):
                 return
