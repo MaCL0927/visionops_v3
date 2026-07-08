@@ -127,7 +127,7 @@ class DatasetService:
 def normalize_task(task_type: str | None) -> str:
     task = str(task_type or "detection").strip().lower()
     if task in {"obb", "obb_detection", "oriented_detection", "rotated_detection"}:
-        return "obb_detection"
+        return "obb"
     if task in {"seg", "segment", "segmentation", "instance_segmentation", "yolo_seg"}:
         return "segmentation"
     if task in {"classification", "cls"}:
@@ -144,7 +144,7 @@ def _common_or_multi(values: list[str], fallback: str) -> str:
 
 
 def _task_for_name(task_type: str) -> str:
-    if task_type == "obb_detection":
+    if task_type == "obb":
         return "obb"
     if task_type == "segmentation":
         return "seg"
@@ -244,7 +244,7 @@ def _materialize_yolo_dataset(yolo_dir: Path, batches: list[dict[str, Any]], cla
 
 def _write_data_yaml(path: Path, yolo_dir: Path, classes: list[str], task_type: str) -> None:
     names_lines = "\n".join([f"  {i}: {name}" for i, name in enumerate(classes)])
-    task_line = "task: segment\n" if task_type == "segmentation" else ("task: obb\n" if task_type == "obb_detection" else "")
+    task_line = "task: segment\n" if task_type == "segmentation" else ("task: obb\n" if task_type == "obb" else "")
     path.write_text(
         f"path: {yolo_dir.as_posix()}\n"
         "train: images/train\n"

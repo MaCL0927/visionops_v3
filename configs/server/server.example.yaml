@@ -15,7 +15,7 @@ training:
   allowed_task_types:
     - detection
     - classification
-    - obb_detection
+    - obb
     - segmentation
   default:
     task_type: detection

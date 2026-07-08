@@ -550,9 +550,8 @@ class AnnotationService:
         task = _normalize_task(task_type)
         if task == "classification":
             task = "detection"
-        # 标注器内部使用 obb，服务端 batch/dataset 规范使用 obb_detection。
-        server_task = "obb_detection" if task == "obb" else task
-        batch = self.batch_service.set_status(batch_id, "accepted", "annotator_review_completed", task_type=server_task)
+        # 标注器、服务端 dataset、模型包和边缘端 Runtime 统一使用 obb/segmentation/detection。
+        batch = self.batch_service.set_status(batch_id, "accepted", "annotator_review_completed", task_type=task)
         batch["manual_label_count"] = self.count_manual(batch_id)
         return {"message": "审核完成，已返回服务端控制台", "batch": batch, "redirect": "/"}
 

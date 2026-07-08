@@ -18,6 +18,17 @@ def timestamp_ms() -> int:
     return int(time.time() * 1000)
 
 
+def normalize_model_task(task_type: str | None) -> str:
+    task = str(task_type or "detection").strip().lower()
+    if task in {"obb", "obb_detection", "oriented_detection", "rotated_detection"}:
+        return "obb"
+    if task in {"seg", "segment", "segmentation", "instance_segmentation", "yolo_seg"}:
+        return "segmentation"
+    if task in {"classification", "cls"}:
+        return "classification"
+    return "detection"
+
+
 def make_model_yaml(
     *,
     model_id: str,
@@ -33,6 +44,7 @@ def make_model_yaml(
     preprocess: str = "letterbox",
     color: str = "rgb",
 ) -> dict[str, Any]:
+    task_type = normalize_model_task(task_type)
     normalized_classes: list[dict[str, Any]] = []
     if classes:
         for index, item in enumerate(classes):
@@ -73,86 +85,63 @@ def make_model_yaml(
     }
 
 
-def write_model_yaml(path: Path, document: dict[str, Any]) -> None:
-    """Write the v3 edge deployment model.yaml without YAML anchors.
-
-    The C++ runtime intentionally uses a lightweight parser.  In particular, it
-    expects ``input_size`` to be a plain inline list or simple block list, not a
-    YAML anchor/alias such as ``input_size: &id001``.  Use a small explicit
-    writer for this deployment contract instead of a generic PyYAML dump.
-    """
-    _write_runtime_model_yaml(path, document)
-
-
-def _yaml_quote(value: Any) -> str:
-    text = str(value)
-    escaped = text.replace("'", "''")
-    return f"'{escaped}'"
-
-
 def _yaml_scalar(value: Any) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float):
-        return str(value)
-    return _yaml_quote(value)
+    text = str(value)
+    if text == "" or any(ch in text for ch in [":", "#", "[", "]", "{", "}", ",", "&", "*", "!", "|", ">", "'", '"']) or text.lower() in {"true", "false", "null", "none"}:
+        return "'" + text.replace("'", "''") + "'"
+    return text
 
 
-def _write_runtime_model_yaml(path: Path, doc: dict[str, Any]) -> None:
-    input_size = doc.get("input_size") or [640, 640]
-    width = int(input_size[0])
-    height = int(input_size[1])
-    model = doc.get("model") if isinstance(doc.get("model"), dict) else {}
-    post = doc.get("postprocess") if isinstance(doc.get("postprocess"), dict) else {}
-    runtime = doc.get("runtime") if isinstance(doc.get("runtime"), dict) else {}
-    classes = doc.get("classes") if isinstance(doc.get("classes"), list) else []
-    class_names = doc.get("class_names") if isinstance(doc.get("class_names"), list) else [
-        str(item.get("name")) for item in classes if isinstance(item, dict) and item.get("name") is not None
+def write_model_yaml(path: Path, document: dict[str, Any]) -> None:
+    size = document.get("input_size") or [640, 640]
+    width, height = int(size[0]), int(size[1])
+    model = document.get("model") if isinstance(document.get("model"), dict) else {}
+    post = document.get("postprocess") if isinstance(document.get("postprocess"), dict) else {}
+    runtime = document.get("runtime") if isinstance(document.get("runtime"), dict) else {}
+    classes = document.get("classes") if isinstance(document.get("classes"), list) else []
+    class_names = document.get("class_names") if isinstance(document.get("class_names"), list) else []
+
+    lines: list[str] = [
+        "schema_version: '1.0'",
+        f"model_id: {_yaml_scalar(document.get('model_id', ''))}",
+        f"model_name: {_yaml_scalar(document.get('model_name', ''))}",
+        f"model_version: {_yaml_scalar(document.get('model_version', ''))}",
+        f"task_type: {_yaml_scalar(document.get('task_type', 'detection'))}",
+        f"target_platform: {_yaml_scalar(document.get('target_platform', 'rk3576'))}",
+        f"input_size: [{width}, {height}]",
+        "model:",
+        f"  name: {_yaml_scalar(model.get('name', document.get('model_name', '')))}",
+        f"  version: {_yaml_scalar(model.get('version', document.get('model_version', '')))}",
+        f"  task: {_yaml_scalar(model.get('task', document.get('task_type', 'detection')))}",
+        f"  format: {_yaml_scalar(model.get('format', 'rknn'))}",
+        f"  target_platform: {_yaml_scalar(model.get('target_platform', document.get('target_platform', 'rk3576')))}",
+        f"  input_size: [{width}, {height}]",
+        "classes:",
     ]
-    if not classes:
-        classes = [{"id": i, "name": name} for i, name in enumerate(class_names or ["object"])]
-    if not class_names:
-        class_names = [str(item.get("name", f"class_{i}")) for i, item in enumerate(classes) if isinstance(item, dict)]
-
-    lines: list[str] = []
-    lines.append(f"schema_version: {_yaml_scalar(doc.get('schema_version', '1.0'))}")
-    lines.append(f"model_id: {_yaml_scalar(doc.get('model_id', ''))}")
-    lines.append(f"model_name: {_yaml_scalar(doc.get('model_name', ''))}")
-    lines.append(f"model_version: {_yaml_scalar(doc.get('model_version', ''))}")
-    lines.append(f"task_type: {_yaml_scalar(doc.get('task_type', 'detection'))}")
-    lines.append(f"target_platform: {_yaml_scalar(doc.get('target_platform', 'rk3576'))}")
-    lines.append(f"input_size: [{width}, {height}]")
-    lines.append("model:")
-    lines.append(f"  name: {_yaml_scalar(model.get('name', doc.get('model_name', '')))}")
-    lines.append(f"  version: {_yaml_scalar(model.get('version', doc.get('model_version', '')))}")
-    lines.append(f"  task: {_yaml_scalar(model.get('task', doc.get('task_type', 'detection')))}")
-    lines.append(f"  format: {_yaml_scalar(model.get('format', 'rknn'))}")
-    lines.append(f"  target_platform: {_yaml_scalar(model.get('target_platform', doc.get('target_platform', 'rk3576')))}")
-    lines.append(f"  input_size: [{width}, {height}]")
-    lines.append("classes:")
-    for index, item in enumerate(classes):
+    for idx, item in enumerate(classes):
         if isinstance(item, dict):
-            class_id = int(item.get("id", index))
-            name = str(item.get("name", f"class_{index}"))
+            cid = int(item.get("id", idx))
+            name = str(item.get("name", f"class_{idx}"))
         else:
-            class_id = index
+            cid = idx
             name = str(item)
-        lines.append(f"- id: {class_id}")
+        lines.append(f"- id: {cid}")
         lines.append(f"  name: {_yaml_scalar(name)}")
     lines.append("class_names:")
     for name in class_names:
         lines.append(f"- {_yaml_scalar(name)}")
-    lines.append("postprocess:")
-    lines.append(f"  conf_threshold: {float(post.get('conf_threshold', 0.25))}")
-    lines.append(f"  iou_threshold: {float(post.get('iou_threshold', 0.45))}")
-    lines.append(f"  max_det: {int(post.get('max_det', 100))}")
-    lines.append("runtime:")
-    lines.append(f"  preprocess: {_yaml_scalar(runtime.get('preprocess', 'letterbox'))}")
-    lines.append(f"  color: {_yaml_scalar(runtime.get('color', 'rgb'))}")
+    lines.extend([
+        "postprocess:",
+        f"  conf_threshold: {float(post.get('conf_threshold', 0.25))}",
+        f"  iou_threshold: {float(post.get('iou_threshold', 0.45))}",
+        f"  max_det: {int(post.get('max_det', 100))}",
+        "runtime:",
+        f"  preprocess: {_yaml_scalar(runtime.get('preprocess', 'letterbox'))}",
+        f"  color: {_yaml_scalar(runtime.get('color', 'rgb'))}",
+    ])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
 
 
 class ModelPackageService:
@@ -212,6 +201,7 @@ class ModelPackageService:
         metrics: dict[str, Any] | None = None,
         train_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        task_type = normalize_model_task(task_type)
         safe_model_id = _safe_id(model_id)
         package_dir = self.model_packages_root / safe_model_id
         package_dir.mkdir(parents=True, exist_ok=True)

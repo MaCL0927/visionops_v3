@@ -136,4 +136,4 @@ server_data/model_packages/<model_id>/
   logs/
 ```
 
-当前真实 pipeline 首版优先支持 `detection`，同时保留 `obb_detection` 与 `segmentation` 的 YOLO 任务分支；`classification` 的真实训练整理后续接入。训练阶段使用服务端当前环境（通常为 `visionops`）；ONNX 导出阶段默认通过 `conda run --no-capture-output -n pt2onnx ...` 切换到瑞芯微修改版 Ultralytics 环境，以导出多头 ONNX；RKNN 转换阶段默认通过 `conda run --no-capture-output -n rknn311 python -m training.pipeline.stages.convert_rknn_worker ...` 切换到 `rknn311` 环境。
+当前真实 pipeline 首版优先支持 `detection`，同时保留 `obb` 与 `segmentation` 的 YOLO 任务分支；`classification` 的真实训练整理后续接入。训练阶段使用服务端当前环境（通常为 `visionops`）；ONNX 导出阶段默认通过 `conda run --no-capture-output -n pt2onnx ...` 切换到瑞芯微修改版 Ultralytics 环境，以导出多头 ONNX；RKNN 转换阶段默认通过 `conda run --no-capture-output -n rknn311 python -m training.pipeline.stages.convert_rknn_worker ...` 切换到 `rknn311` 环境。

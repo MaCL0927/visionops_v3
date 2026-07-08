@@ -22,7 +22,7 @@ class ServerConfig:
     publish_root: Path | None = None
     mlflow_uri: str = "http://127.0.0.1:5000"
     max_upload_bytes: int = 2 * 1024 * 1024 * 1024
-    allowed_task_types: tuple[str, ...] = ("detection", "classification", "obb_detection", "segmentation")
+    allowed_task_types: tuple[str, ...] = ("detection", "classification", "obb", "obb_detection", "segmentation")
     default_target_platform: str = "rk3576"
 
     @property

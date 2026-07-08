@@ -28,7 +28,7 @@ server_data/incoming/processed/
 
 - `detection`
 - `classification`
-- `obb_detection`
+- `obb`
 - `segmentation`
 
 当前已接入内置标注器。标注器会保存 `labels/`、`labels_auto/`、`annotation_classes.json` 和 `annotation_task.json`，点击“确认审核完成”后会把 batch 标记为 accepted。
@@ -70,7 +70,7 @@ model.yaml
 3. 在 dataset 下拉框中选择刚生成的数据集。
 4. 根据任务类型确认预训练权重，例如：
    - detection: `models/pretrained/yolov8n.pt`
-   - obb_detection: `models/pretrained/yolov8n-obb.pt`
+   - obb: `models/pretrained/yolov8n-obb.pt`
    - segmentation: `models/pretrained/yolov8n-seg.pt`
 5. 点击“开始训练流水线”。
 6. 在训练任务列表点击“日志”查看当前阶段。

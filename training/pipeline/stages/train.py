@@ -80,7 +80,7 @@ def run(ctx: PipelineContext, preprocess_report: dict[str, Any]) -> dict[str, An
 
 
 def _default_pretrained_model(task_type: str) -> str:
-    if task_type == "obb_detection":
+    if task_type == "obb":
         return "models/pretrained/yolov8n-obb.pt"
     if task_type == "segmentation":
         return "models/pretrained/yolov8n-seg.pt"

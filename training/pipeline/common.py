@@ -65,7 +65,14 @@ def read_yaml(path: Path, default: Any = None) -> Any:
 def write_yaml(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if yaml is not None:
-        path.write_text(yaml.safe_dump(value, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        class _NoAliasDumper(yaml.SafeDumper):
+            def ignore_aliases(self, data):  # type: ignore[no-untyped-def]
+                return True
+
+        path.write_text(
+            yaml.dump(value, Dumper=_NoAliasDumper, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
     else:
         path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -124,7 +131,7 @@ def safe_id(value: str) -> str:
 def normalize_task(task_type: str | None) -> str:
     task = str(task_type or "detection").strip().lower()
     if task in {"obb", "obb_detection", "oriented_detection", "rotated_detection"}:
-        return "obb_detection"
+        return "obb"
     if task in {"seg", "segment", "segmentation", "instance_segmentation"}:
         return "segmentation"
     if task in {"classification", "cls"}:
@@ -134,7 +141,7 @@ def normalize_task(task_type: str | None) -> str:
 
 def yolo_task(task_type: str | None) -> str:
     task = normalize_task(task_type)
-    if task == "obb_detection":
+    if task == "obb":
         return "obb"
     if task == "segmentation":
         return "segment"

@@ -340,7 +340,7 @@ class TrainingJobService:
 def normalize_task(task_type: str | None) -> str:
     task = str(task_type or "detection").strip().lower()
     if task in {"obb", "obb_detection", "oriented_detection", "rotated_detection"}:
-        return "obb_detection"
+        return "obb"
     if task in {"seg", "segment", "segmentation", "instance_segmentation", "yolo_seg"}:
         return "segmentation"
     if task in {"classification", "cls"}:
@@ -350,7 +350,7 @@ def normalize_task(task_type: str | None) -> str:
 
 def _task_for_name(task_type: str) -> str:
     task = normalize_task(task_type)
-    if task == "obb_detection":
+    if task == "obb":
         return "obb"
     if task == "segmentation":
         return "seg"
@@ -376,7 +376,7 @@ def _unique_job_id(root: Path, base: str) -> str:
 
 
 def _default_pretrained(task_type: str) -> str:
-    if task_type == "obb_detection":
+    if task_type == "obb":
         return "models/pretrained/yolov8n-obb.pt"
     if task_type == "segmentation":
         return "models/pretrained/yolov8n-seg.pt"

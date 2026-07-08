@@ -52,7 +52,7 @@ def run(ctx: PipelineContext) -> dict[str, Any]:
     }
     if task_type == "segmentation":
         data_yaml["task"] = "segment"
-    elif task_type == "obb_detection":
+    elif task_type == "obb":
         data_yaml["task"] = "obb"
     data_yaml_path = data_root / "data.yaml"
     write_yaml(data_yaml_path, data_yaml)
