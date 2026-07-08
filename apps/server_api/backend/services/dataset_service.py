@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import json
+import random
 import shutil
 import time
 from pathlib import Path
 from typing import Any
 
 from .ingest_service import BatchService, IMAGE_EXTENSIONS
+
+CLASSIFICATION_ROOT_NAMES = {"cls", "classification", "raw_classification", "classes"}
+RESERVED_DIR_NAMES = {
+    "labels", "labels_auto", "all_images", "images", "positive", "negative",
+    "quick_train", "roi_classification_sessions", "previews", "candidates",
+}
 
 
 class DatasetService:
@@ -47,15 +54,7 @@ class DatasetService:
         return meta
 
     def build_dataset(self, *, task_type: str, batch_ids: list[str] | None = None, name: str | None = None) -> dict[str, Any]:
-        """Create a dataset version from explicitly selected reviewed batches.
-
-        v3 服务端现在遵循“审核完成即生成 dataset”的流程：
-        - 第一步如果选中多个 tar.gz，BatchService 已经把它们合并成一个 batch；
-        - 第二步标注器点击“确认审核完成”后，只针对当前 batch 生成一个 dataset；
-        - 不再在第三步把所有 accepted 且任务类型一致的 batch 自动合并。
-
-        因此本方法要求调用方明确传入 ``batch_ids``。
-        """
+        """Create a dataset version from explicitly selected reviewed batches."""
         task_type = normalize_task(task_type)
         if task_type not in self.batch_service.allowed_task_types:
             raise ValueError(f"不支持的 task_type: {task_type}")
@@ -75,23 +74,28 @@ class DatasetService:
         source_device_id = _common_or_multi([str(item.get("device_id") or "") for item in normalized_selected], "multi-device")
         source_customer_id = _common_or_multi([str(item.get("customer_id") or "") for item in normalized_selected], "multi-customer")
         created_time = time.strftime("%Y%m%d_%H%M%S")
-        dataset_id = _unique_dataset_id(
-            self.datasets_root,
-            _make_dataset_id(source_device_id, source_customer_id, task_type, created_time),
-        )
+        dataset_id = _unique_dataset_id(self.datasets_root, _make_dataset_id(source_device_id, source_customer_id, task_type, created_time))
         dataset_dir = self.datasets_root / dataset_id
         dataset_dir.mkdir(parents=True, exist_ok=False)
         now = int(time.time() * 1000)
-        classes = _collect_classes(normalized_selected)
-        image_count, label_count = _count_labeled_pairs(normalized_selected)
+
+        if task_type == "classification":
+            classes = _collect_classification_classes(normalized_selected)
+            image_count, label_count = _count_classification_images(normalized_selected)
+            dataset_subdir = "cls_dataset"
+            data_path = str(dataset_dir / dataset_subdir)
+        else:
+            classes = _collect_yolo_classes(normalized_selected)
+            image_count, label_count = _count_labeled_pairs(normalized_selected)
+            dataset_subdir = "yolo_dataset"
+            data_path = str(dataset_dir / dataset_subdir / "data.yaml")
+
         if image_count <= 0:
+            if task_type == "classification":
+                raise ValueError("选中的 batch 中没有分类图片。请使用 raw/<class_name>/*.jpg 或 raw/images/<class_name>/*.jpg 格式。")
             raise ValueError("选中的 batch 中没有带非空 labels 的图片，请先完成标注审核")
 
-        source_manifests = {
-            item["batch_id"]: item.get("manifest", {})
-            for item in normalized_selected
-            if isinstance(item.get("manifest"), dict)
-        }
+        source_manifests = {item["batch_id"]: item.get("manifest", {}) for item in normalized_selected if isinstance(item.get("manifest"), dict)}
         meta = {
             "schema_version": "1.0",
             "dataset_id": dataset_id,
@@ -109,16 +113,19 @@ class DatasetService:
             "dataset_path": str(dataset_dir),
             "dataset_json": str(dataset_dir / "dataset.json"),
             "batches_json": str(dataset_dir / "batches.json"),
-            "yolo_dataset_path": str(dataset_dir / "yolo_dataset"),
-            "data_yaml": str(dataset_dir / "yolo_dataset" / "data.yaml"),
+            "yolo_dataset_path": str(dataset_dir / dataset_subdir),
+            "data_yaml": data_path,
             "source_manifests": source_manifests,
             "created_at_ms": now,
             "updated_at_ms": now,
-            "note": "v3 dataset version: reviewed batch materialized to YOLO dataset automatically after annotator review.",
+            "note": "v3 dataset version: reviewed batch materialized to Ultralytics dataset automatically after annotator review.",
         }
         _write_json(dataset_dir / "dataset.json", meta)
         _write_json(dataset_dir / "batches.json", normalized_selected)
-        _materialize_yolo_dataset(dataset_dir / "yolo_dataset", normalized_selected, classes, task_type)
+        if task_type == "classification":
+            _materialize_classification_dataset(dataset_dir / dataset_subdir, normalized_selected, classes)
+        else:
+            _materialize_yolo_dataset(dataset_dir / dataset_subdir, normalized_selected, classes, task_type)
         meta["materialized_at_ms"] = int(time.time() * 1000)
         _write_json(dataset_dir / "dataset.json", meta)
         return meta
@@ -130,7 +137,7 @@ def normalize_task(task_type: str | None) -> str:
         return "obb"
     if task in {"seg", "segment", "segmentation", "instance_segmentation", "yolo_seg"}:
         return "segmentation"
-    if task in {"classification", "cls"}:
+    if task in {"classification", "cls", "classify"}:
         return "classification"
     return "detection"
 
@@ -166,7 +173,7 @@ def _unique_dataset_id(root: Path, base: str) -> str:
     return candidate
 
 
-def _collect_classes(batches: list[dict[str, Any]]) -> list[str]:
+def _collect_yolo_classes(batches: list[dict[str, Any]]) -> list[str]:
     for batch in batches:
         raw = Path(str(batch.get("raw_path") or ""))
         data = _read_json(raw / "annotation_classes.json", {}) or {}
@@ -190,6 +197,29 @@ def _collect_classes(batches: list[dict[str, Any]]) -> list[str]:
     return [f"class_{i}" for i in range(max_class_id + 1)] if max_class_id >= 0 else ["object"]
 
 
+def _collect_classification_classes(batches: list[dict[str, Any]]) -> list[str]:
+    # Classification 类别顺序优先使用标注器保存的 annotation_classes.json，
+    # 这样 UI 中 0/1/2 的类别顺序能继续传递到 YOLOv8 cls data.yaml。
+    classes: list[str] = []
+    for batch in batches:
+        raw = Path(str(batch.get("raw_path") or ""))
+        data = _read_json(raw / "annotation_classes.json", {}) or {}
+        names = data.get("names")
+        if isinstance(names, list):
+            for name in names:
+                safe = _safe_class_name(str(name))
+                if safe and safe not in classes:
+                    classes.append(safe)
+    for batch in batches:
+        raw = Path(str(batch.get("raw_path") or ""))
+        for _, class_name in _classification_items_from_folders(raw):
+            if class_name not in classes:
+                classes.append(class_name)
+    if classes:
+        return classes
+    return _collect_yolo_classes(batches)
+
+
 def _count_labeled_pairs(batches: list[dict[str, Any]]) -> tuple[int, int]:
     count = 0
     labels = 0
@@ -205,6 +235,18 @@ def _count_labeled_pairs(batches: list[dict[str, Any]]) -> tuple[int, int]:
                 count += 1
                 labels += 1
     return count, labels
+
+
+def _count_classification_images(batches: list[dict[str, Any]]) -> tuple[int, int]:
+    count = 0
+    for batch in batches:
+        raw = Path(str(batch.get("raw_path") or ""))
+        items = _classification_items_from_folders(raw)
+        if not items:
+            classes = _collect_yolo_classes([batch])
+            items = _classification_items_from_labels(raw, batch, classes)
+        count += len(items)
+    return count, count
 
 
 def _materialize_yolo_dataset(yolo_dir: Path, batches: list[dict[str, Any]], classes: list[str], task_type: str) -> None:
@@ -227,11 +269,7 @@ def _materialize_yolo_dataset(yolo_dir: Path, batches: list[dict[str, Any]], cla
     pairs = sorted(pairs, key=lambda x: str(x[0]))
     if not pairs:
         raise ValueError("无法物化数据集：没有 image+label 配对")
-    val_count = max(1, int(round(len(pairs) * 0.2))) if len(pairs) >= 2 else 1
-    val = pairs[:val_count]
-    train = pairs[val_count:] if len(pairs) > 1 else pairs
-    if not train:
-        train = val
+    val, train = _split_items(pairs)
 
     for split, items in [("train", train), ("val", val)]:
         for image, label in items:
@@ -242,13 +280,64 @@ def _materialize_yolo_dataset(yolo_dir: Path, batches: list[dict[str, Any]], cla
     _write_data_yaml(yolo_dir / "data.yaml", yolo_dir, classes or ["object"], task_type)
 
 
+def _materialize_classification_dataset(cls_dir: Path, batches: list[dict[str, Any]], classes: list[str]) -> None:
+    if cls_dir.exists():
+        shutil.rmtree(cls_dir)
+    (cls_dir / "train").mkdir(parents=True, exist_ok=True)
+    (cls_dir / "val").mkdir(parents=True, exist_ok=True)
+
+    items: list[tuple[Path, str]] = []
+    for batch in batches:
+        raw = Path(str(batch.get("raw_path") or ""))
+        batch_items = _classification_items_from_folders(raw)
+        if not batch_items:
+            batch_items = _classification_items_from_labels(raw, batch, classes)
+        items.extend(batch_items)
+    items = sorted(items, key=lambda x: (x[1], str(x[0])))
+    if not items:
+        raise ValueError("无法物化 classification 数据集：没有分类图片")
+
+    class_names = _ordered_class_names(items, classes)
+    for class_name in class_names:
+        (cls_dir / "train" / class_name).mkdir(parents=True, exist_ok=True)
+        (cls_dir / "val" / class_name).mkdir(parents=True, exist_ok=True)
+
+    val, train = _split_items(items)
+    for split, split_items in [("train", train), ("val", val)]:
+        for image, class_name in split_items:
+            shutil.copy2(image, cls_dir / split / class_name / _unique_classification_name(image))
+
+    _write_data_yaml(cls_dir / "data.yaml", cls_dir, class_names, "classification")
+
+
+def _split_items(items: list[Any]) -> tuple[list[Any], list[Any]]:
+    items = list(items)
+    random.Random(42).shuffle(items)
+    val_count = max(1, int(round(len(items) * 0.2))) if len(items) >= 2 else 1
+    val = items[:val_count]
+    train = items[val_count:] if len(items) > 1 else items
+    if not train:
+        train = val
+    return val, train
+
+
 def _write_data_yaml(path: Path, yolo_dir: Path, classes: list[str], task_type: str) -> None:
     names_lines = "\n".join([f"  {i}: {name}" for i, name in enumerate(classes)])
-    task_line = "task: segment\n" if task_type == "segmentation" else ("task: obb\n" if task_type == "obb" else "")
+    if task_type == "segmentation":
+        task_line = "task: segment\n"
+        train_line = "train: images/train\nval: images/val\n"
+    elif task_type == "obb":
+        task_line = "task: obb\n"
+        train_line = "train: images/train\nval: images/val\n"
+    elif task_type == "classification":
+        task_line = "task: classify\n"
+        train_line = "train: train\nval: val\n"
+    else:
+        task_line = ""
+        train_line = "train: images/train\nval: images/val\n"
     path.write_text(
         f"path: {yolo_dir.as_posix()}\n"
-        "train: images/train\n"
-        "val: images/val\n"
+        f"{train_line}"
         f"{task_line}"
         f"nc: {len(classes)}\n"
         "names:\n"
@@ -268,10 +357,81 @@ def _find_images_dir(raw: Path, batch: dict[str, Any]) -> Path:
     return raw / "images"
 
 
+def _classification_items_from_folders(raw: Path) -> list[tuple[Path, str]]:
+    roots: list[Path] = []
+    roots.extend([raw / name for name in CLASSIFICATION_ROOT_NAMES])
+    roots.extend([raw / "images", raw / "all_images", raw])
+    seen: set[str] = set()
+    items: list[tuple[Path, str]] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for class_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+            if class_dir.name in RESERVED_DIR_NAMES or class_dir.name.startswith("."):
+                continue
+            images = _list_images_recursive(class_dir)
+            if not images:
+                continue
+            class_name = _safe_class_name(class_dir.name)
+            for image in images:
+                key = str(image.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    items.append((image, class_name))
+        if items:
+            return items
+    return items
+
+
+def _classification_items_from_labels(raw: Path, batch: dict[str, Any], classes: list[str]) -> list[tuple[Path, str]]:
+    images_dir = _find_images_dir(raw, batch)
+    labels_dir = raw / "labels"
+    if not images_dir.is_dir() or not labels_dir.is_dir():
+        return []
+    out: list[tuple[Path, str]] = []
+    for image in _list_images(images_dir):
+        label = labels_dir / f"{image.stem}.txt"
+        if not label.exists():
+            continue
+        class_id = _first_class_id(label)
+        if class_id is None:
+            continue
+        class_name = classes[class_id] if 0 <= class_id < len(classes) else f"class_{class_id}"
+        out.append((image, _safe_class_name(class_name)))
+    return out
+
+
+def _first_class_id(label_path: Path) -> int | None:
+    for line in label_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        parts = line.strip().split()
+        if not parts:
+            continue
+        try:
+            return int(float(parts[0]))
+        except Exception:
+            continue
+    return None
+
+
+def _ordered_class_names(items: list[tuple[Path, str]], preferred: list[str]) -> list[str]:
+    present = {name for _, name in items}
+    ordered = [_safe_class_name(name) for name in preferred if _safe_class_name(name) in present]
+    for name in sorted(present):
+        if name not in ordered:
+            ordered.append(name)
+    return ordered or ["class_0"]
+
+
 def _list_images(images_dir: Path) -> list[Path]:
     if not images_dir.exists():
         return []
     return sorted(p for p in images_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS)
+
+
+def _list_images_recursive(images_dir: Path) -> list[Path]:
+    if not images_dir.exists():
+        return []
+    return sorted(p for p in images_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS)
 
 
 def _unique_name(image_path: Path, label_path: Path) -> str:
@@ -280,6 +440,20 @@ def _unique_name(image_path: Path, label_path: Path) -> str:
     except Exception:
         batch_id = image_path.parent.name
     return f"{batch_id}__{image_path.name}"
+
+
+def _unique_classification_name(image_path: Path) -> str:
+    try:
+        batch_id = image_path.parents[2].name
+    except Exception:
+        batch_id = image_path.parent.name
+    return f"{batch_id}__{image_path.name}"
+
+
+def _safe_class_name(value: str) -> str:
+    text = str(value or "").strip().replace("\\", "_").replace("/", "_").replace("..", "_")
+    text = "_".join(text.split())
+    return text or "class_0"
 
 
 def _safe_id(value: str) -> str:

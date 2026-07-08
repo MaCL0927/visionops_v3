@@ -76,7 +76,7 @@ def _normalize_task(task_type: str | None) -> str:
         return "segmentation"
     if task in {"obb", "obb_detection", "oriented_detection", "rotated_detection"}:
         return "obb"
-    if task in {"classification", "cls"}:
+    if task in {"classification", "cls", "classify"}:
         return "classification"
     return "detection"
 
@@ -101,6 +101,25 @@ def _quick_model_for_task(task_type: str) -> str:
 
 def _non_empty_label(path: Path) -> bool:
     return path.exists() and bool(path.read_text(encoding="utf-8", errors="ignore").strip())
+
+
+def _safe_class_dir_name(value: str) -> str:
+    text = str(value or "").strip().replace("\\", "_").replace("/", "_").replace("..", "_")
+    text = "_".join(text.split())
+    if not text:
+        raise ValueError("分类类别名不能为空")
+    return text
+
+
+def _unique_destination(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem, suffix = path.stem, path.suffix
+    for i in range(2, 10000):
+        candidate = path.with_name(f"{stem}_{i:03d}{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"无法生成唯一文件名: {path}")
 
 
 class AnnotationJobManager:
@@ -263,15 +282,10 @@ class AnnotationService:
 
     def load_task(self, batch_id: str) -> str:
         data = _read_json(self.task_path(batch_id), {}) or {}
-        task = _normalize_task(data.get("task_type") or self.batch_service.get_batch(batch_id).get("task_type") or "detection")
-        if task == "classification":
-            task = "detection"
-        return task
+        return _normalize_task(data.get("task_type") or self.batch_service.get_batch(batch_id).get("task_type") or "detection")
 
     def save_task(self, batch_id: str, task_type: str) -> str:
         task = _normalize_task(task_type)
-        if task == "classification":
-            task = "detection"
         _write_json(self.task_path(batch_id), {"task_type": task, "updated_at": _now_text()})
         return task
 
@@ -281,27 +295,121 @@ class AnnotationService:
     def count_auto(self, batch_id: str) -> int:
         return sum(1 for p in self.labels_auto_dir(batch_id).glob("*.txt") if _non_empty_label(p))
 
+    # ----------------------------- classification dataset labeling -----------------------------
+    def classification_root(self, batch_id: str) -> Path:
+        # 分类任务沿用边缘端上传包格式：raw/images 下初始放未分类图片。
+        raw = self.raw_dir(batch_id)
+        p = raw / "images"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def classification_counts(self, batch_id: str) -> dict[str, int]:
+        root = self.classification_root(batch_id)
+        out: dict[str, int] = {}
+        for d in sorted(root.iterdir() if root.exists() else []):
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            out[d.name] = len(list_images(d))
+        return out
+
+    def classification_unclassified_count(self, batch_id: str) -> int:
+        return len(list_images(self.classification_root(batch_id)))
+
+    def classification_total_count(self, batch_id: str) -> int:
+        return self.classification_unclassified_count(batch_id) + sum(self.classification_counts(batch_id).values())
+
+    def classification_info(self, batch_id: str) -> dict[str, Any]:
+        root = self.classification_root(batch_id)
+        counts = self.classification_counts(batch_id)
+        return {
+            "images_dir": str(root),
+            "classes": self.load_classes(batch_id),
+            "class_counts": counts,
+            "unclassified_count": self.classification_unclassified_count(batch_id),
+            "classified_count": sum(counts.values()),
+            "total_count": self.classification_total_count(batch_id),
+        }
+
+    def assign_classification_image(self, batch_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        root = self.classification_root(batch_id)
+        filename = Path(str(payload.get("filename") or "")).name
+        if not filename:
+            raise ValueError("filename 不能为空")
+
+        classes = payload.get("classes")
+        if isinstance(classes, list):
+            classes = self.save_classes(batch_id, [str(x) for x in classes])
+        else:
+            classes = self.load_classes(batch_id)
+
+        class_name = str(payload.get("class_name") or "").strip()
+        if not class_name and payload.get("class_id") is not None:
+            class_id = int(payload.get("class_id"))
+            if class_id < 0 or class_id >= len(classes):
+                raise ValueError(f"class_id 越界: {class_id}")
+            class_name = classes[class_id]
+        class_name = _safe_class_dir_name(class_name)
+        if class_name not in classes:
+            classes.append(class_name)
+            classes = self.save_classes(batch_id, classes)
+
+        src = root / filename
+        if not src.exists():
+            # 如果用户点了已经归类过的图片，允许从任意类别目录中重新归类。
+            matches = [p for p in root.glob(f"*/{filename}") if p.is_file()]
+            if matches:
+                src = matches[0]
+            else:
+                raise FileNotFoundError(f"图片不存在或已被移动: {filename}")
+        if not src.is_file():
+            raise FileNotFoundError(f"图片不存在: {filename}")
+
+        dst_dir = root / class_name
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst = _unique_destination(dst_dir / src.name)
+        if src.resolve() != dst.resolve():
+            shutil.move(str(src), str(dst))
+
+        self.save_task(batch_id, "classification")
+        counts = self.classification_counts(batch_id)
+        return {
+            "message": f"已归类到 {class_name}",
+            "filename": dst.name,
+            "class_name": class_name,
+            "classes": classes,
+            "class_counts": counts,
+            "unclassified_count": self.classification_unclassified_count(batch_id),
+            "classified_count": sum(counts.values()),
+            "image_path": str(dst),
+            "task_type": "classification",
+        }
+
     def session_info(self, batch_id: str) -> dict[str, Any]:
         meta = self.batch_service.get_batch(batch_id)
-        images = list_images(self.images_dir(batch_id))
-        if not images:
+        task = self.load_task(batch_id)
+        images_dir = self.images_dir(batch_id)
+        images = list_images(images_dir)
+        classification = self.classification_info(batch_id)
+        if not images and task != "classification":
             raise FileNotFoundError("当前 batch 中没有图片")
+        manual_count = classification["classified_count"] if task == "classification" else self.count_manual(batch_id)
         return {
             "batch_id": batch_id,
             "device_id": meta.get("device_id", ""),
             "customer_id": meta.get("customer_id", ""),
-            "images_dir": str(self.images_dir(batch_id)),
+            "images_dir": str(images_dir),
             "labels_dir": str(self.labels_dir(batch_id)),
             "labels_auto_dir": str(self.labels_auto_dir(batch_id)),
             "classes_path": str(self.classes_path(batch_id)),
             "classes": self.load_classes(batch_id),
             "images": [p.name for p in images],
             "total": len(images),
-            "manual_label_count": self.count_manual(batch_id),
+            "manual_label_count": manual_count,
             "auto_label_count": self.count_auto(batch_id),
+            "classification": classification,
             "quick_train": _read_json(self.quick_root(batch_id) / "quick_state.json", {}) or {},
             "last_auto_label": (_read_json(self.quick_root(batch_id) / "quick_state.json", {}) or {}).get("last_auto_label", {}),
-            "default_task_type": self.load_task(batch_id),
+            "default_task_type": task,
         }
 
     def image_meta(self, batch_id: str, index: int) -> dict[str, Any]:
@@ -548,11 +656,14 @@ class AnnotationService:
     # ----------------------------- review complete -----------------------------
     def accept_reviewed(self, batch_id: str, task_type: str) -> dict[str, Any]:
         task = _normalize_task(task_type)
-        if task == "classification":
-            task = "detection"
-        # 标注器、服务端 dataset、模型包和边缘端 Runtime 统一使用 obb/segmentation/detection。
+        # 标注器、服务端 dataset、模型包和边缘端 Runtime 统一使用 detection/obb/segmentation/classification。
         batch = self.batch_service.set_status(batch_id, "accepted", "annotator_review_completed", task_type=task)
-        batch["manual_label_count"] = self.count_manual(batch_id)
+        if task == "classification":
+            info = self.classification_info(batch_id)
+            batch["manual_label_count"] = info["classified_count"]
+            batch["classification"] = info
+        else:
+            batch["manual_label_count"] = self.count_manual(batch_id)
         return {"message": "审核完成，已返回服务端控制台", "batch": batch, "redirect": "/"}
 
     # ----------------------------- ROI classification (v2-compatible subset) -----------------------------

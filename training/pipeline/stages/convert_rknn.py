@@ -68,10 +68,19 @@ def run(ctx: PipelineContext, export_report: dict[str, Any], preprocess_report: 
 
 def _make_quant_dataset(ctx: PipelineContext, preprocess_report: dict[str, Any]) -> str:
     dataset_dir = Path(str(preprocess_report.get("dataset_dir") or ""))
-    images_dir = dataset_dir / "images" / "train"
-    if not images_dir.is_dir():
-        raise FileNotFoundError(f"量化数据目录不存在: {images_dir}")
-    images = sorted(p for p in images_dir.iterdir() if p.is_file())[: int(ctx.job.get("quant_image_count", 128))]
+    task_type = str(preprocess_report.get("task_type") or ctx.job.get("task_type") or "detection").lower()
+    images: list[Path] = []
+    if task_type in {"classification", "cls", "classify"}:
+        train_root = dataset_dir / "train"
+        if not train_root.is_dir():
+            raise FileNotFoundError(f"classification 量化数据目录不存在: {train_root}")
+        images = sorted(p for p in train_root.rglob("*") if p.is_file())
+    else:
+        images_dir = dataset_dir / "images" / "train"
+        if not images_dir.is_dir():
+            raise FileNotFoundError(f"量化数据目录不存在: {images_dir}")
+        images = sorted(p for p in images_dir.iterdir() if p.is_file())
+    images = images[: int(ctx.job.get("quant_image_count", 128))]
     if not images:
         raise RuntimeError("启用量化但没有可用图片")
     dataset_txt = ctx.output_dir / "rknn_quant_dataset.txt"

@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "visionops_runtime/postprocess_detect.hpp"
+#include "visionops_runtime/postprocess_classification.hpp"
 #include "visionops_runtime/postprocess_obb.hpp"
 #include "visionops_runtime/postprocess_seg.hpp"
 
@@ -25,12 +26,12 @@ visionops::runtime::RuntimeTensor make_tensor(
 
 int main(int argc, char* argv[]) {
   if (argc != 2) {
-    std::cerr << "用法: visionops_postprocess_fixture detection|obb|segmentation\n";
+    std::cerr << "用法: visionops_postprocess_fixture detection|obb|segmentation|classification\n";
     return 2;
   }
   const std::string task = argv[1];
   const visionops::runtime::LetterboxMeta meta{1280, 720, 640, 640, 640, 360, 0.5F, 0.0F, 140.0F};
-  const visionops::runtime::PostprocessConfig config{{"tube"}, 0.5F, 0.45F, 100};
+  const visionops::runtime::PostprocessConfig config{{"tube", "bag"}, 0.5F, 0.45F, 100};
   visionops::runtime::PostprocessResult result;
   std::string output_task = task;
   if (task == "detection") {
@@ -96,6 +97,15 @@ int main(int argc, char* argv[]) {
         config2,
         meta1280);
     output_task = "obb";
+  } else if (task == "classification") {
+    result = visionops::runtime::postprocess_classification(
+        {make_tensor({1, 2}, {0.08F, 0.92F})},
+        config);
+  } else if (task == "classification_logits") {
+    result = visionops::runtime::postprocess_classification(
+        {make_tensor({1, 2}, {-2.0F, 4.0F})},
+        config);
+    output_task = "classification";
   } else if (task == "segmentation") {
     result = visionops::runtime::postprocess_segmentation(
         {

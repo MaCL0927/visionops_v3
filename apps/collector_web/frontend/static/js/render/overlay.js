@@ -69,6 +69,14 @@ export function drawInferenceOverlay(canvas, image, result) {
   const overlay = getState().config.overlay || {};
   const maskOpacity = clamp(Number(overlay.mask_opacity ?? 0.28), 0, 1);
 
+  const classifications = Array.isArray(result?.classifications) ? result.classifications : [];
+  if (classifications.length && (!Array.isArray(result?.detections) || !result.detections.length)) {
+    const top = classifications[0] || {};
+    const name = top.class_name ?? top.label ?? top.class_id ?? "class";
+    const score = Number(top.score || 0).toFixed(2);
+    drawLabel(ctx, 8, Math.max(28, Math.round(canvas.height * 0.08)), `${name} ${score}`, canvas.width);
+  }
+
   for (const detection of result?.detections || []) {
     const hasObb = Array.isArray(detection?.obb?.points) && detection.obb.points.length >= 3;
     const hasMask = Boolean(detection?.mask);

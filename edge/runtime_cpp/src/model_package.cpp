@@ -60,6 +60,7 @@ LoadedModelInfo load_model_package(const AppConfig& app_config) {
       if (!yaml.model_version.empty()) info.model_version = yaml.model_version;
       if (!yaml.task_type.empty()) info.task_type = yaml.task_type;
       if (!yaml.target_platform.empty()) info.target_platform = yaml.target_platform;
+      if (!yaml.runtime_preprocess.empty()) info.runtime_preprocess = yaml.runtime_preprocess;
       if (yaml.input_width > 0 && yaml.input_height > 0) {
         info.input_width = yaml.input_width;
         info.input_height = yaml.input_height;
@@ -80,6 +81,12 @@ LoadedModelInfo load_model_package(const AppConfig& app_config) {
   if (!is_supported_mock_task_type(info.task_type)) {
     append_error(info.model_load_error, "不支持的模型 task_type: " + info.task_type);
     info.task_type = app_config.mock_task_type;
+  }
+  if ((info.task_type == "classification" || info.task_type == "classify") &&
+      (info.runtime_preprocess.empty() || info.runtime_preprocess == "letterbox")) {
+    // Old classification packages may have been generated with letterbox.
+    // YOLOv8-cls should use direct resize on the edge side unless explicitly overridden.
+    info.runtime_preprocess = "resize";
   }
   return info;
 }

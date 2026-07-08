@@ -285,6 +285,10 @@ class ServerRequestHandler(BaseHTTPRequestHandler):
             job_id = path.rsplit("/", 1)[-1]
             self._send_json(200, service.jobs.get(service.quick_root(batch_id), job_id))
             return True
+        if path == "/api/annotator/classification/session":
+            batch_id = self._require_batch_id()
+            self._send_json(200, service.classification_info(batch_id))
+            return True
         if path == "/api/annotator/roi-cls/session":
             batch_id = self._require_batch_id()
             self._send_json(200, service.roi_session_info(batch_id, self._project_root()))
@@ -334,6 +338,10 @@ class ServerRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/annotator/confirm-auto":
             batch_id = self._require_batch_id()
             self._send_json(200, service.confirm_auto(batch_id, self._read_json_body(default={})))
+            return True
+        if path == "/api/annotator/classification/assign":
+            batch_id = self._require_batch_id()
+            self._send_json(200, service.assign_classification_image(batch_id, self._read_json_body(default={})))
             return True
         if path == "/api/annotator/quick-train":
             batch_id = self._require_batch_id()

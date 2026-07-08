@@ -14,6 +14,7 @@ struct LoadedModelInfo {
   std::string task_type{"detection"};
   std::string backend{"mock"};
   std::string target_platform;
+  std::string runtime_preprocess{"letterbox"};
   std::string rknn_path;
   std::string config_path;
   std::string labels_path;

@@ -1,4 +1,4 @@
-"""Build a materialized YOLO dataset from accepted v3 batches."""
+"""Build a materialized Ultralytics dataset from accepted v3 batches."""
 
 from __future__ import annotations
 
@@ -7,7 +7,14 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from training.pipeline.common import PipelineContext, list_images, normalize_task, read_json, write_json, write_yaml
+from training.pipeline.common import PipelineContext, IMAGE_EXTS, list_images, normalize_task, read_json, write_json, write_yaml
+
+
+CLASSIFICATION_ROOT_NAMES = {"cls", "classification", "raw_classification", "classes"}
+RESERVED_DIR_NAMES = {
+    "labels", "labels_auto", "all_images", "images", "positive", "negative",
+    "quick_train", "roi_classification_sessions", "previews", "candidates",
+}
 
 
 def run(ctx: PipelineContext) -> dict[str, Any]:
@@ -17,6 +24,12 @@ def run(ctx: PipelineContext) -> dict[str, Any]:
     if not classes:
         classes = ["object"]
 
+    if task_type == "classification":
+        return _run_classification(ctx, dataset, classes)
+    return _run_yolo_labels(ctx, dataset, task_type, classes)
+
+
+def _run_yolo_labels(ctx: PipelineContext, dataset: dict[str, Any], task_type: str, classes: list[str]) -> dict[str, Any]:
     data_root = ctx.work_dir / "yolo_dataset"
     if data_root.exists():
         shutil.rmtree(data_root)
@@ -62,6 +75,7 @@ def run(ctx: PipelineContext) -> dict[str, Any]:
         "task_type": task_type,
         "dataset_id": dataset.get("dataset_id"),
         "data_yaml": str(data_yaml_path),
+        "data_path": str(data_yaml_path),
         "dataset_dir": str(data_root),
         "classes": classes,
         "total_labeled_images": len(items),
@@ -70,6 +84,75 @@ def run(ctx: PipelineContext) -> dict[str, Any]:
     }
     write_json(ctx.output_dir / "preprocess_report.json", report)
     ctx.log(f"[preprocess] data_yaml={data_yaml_path} train={len(train_items)} val={len(val_items)} classes={classes}")
+    return report
+
+
+def _run_classification(ctx: PipelineContext, dataset: dict[str, Any], classes: list[str]) -> dict[str, Any]:
+    """Materialize an Ultralytics classification folder dataset.
+
+    Expected layout for classification source data is one of:
+      raw/<class_name>/*.jpg
+      raw/images/<class_name>/*.jpg
+      raw/all_images/<class_name>/*.jpg
+      raw/classification/<class_name>/*.jpg
+      raw/raw_classification/<class_name>/*.jpg
+
+    For compatibility, if class folders are absent but YOLO txt labels exist,
+    the first class id in each non-empty label file is used as the image class.
+    """
+    data_root = ctx.work_dir / "cls_dataset"
+    if data_root.exists():
+        shutil.rmtree(data_root)
+    (data_root / "train").mkdir(parents=True, exist_ok=True)
+    (data_root / "val").mkdir(parents=True, exist_ok=True)
+
+    items = _collect_classification_items(dataset, classes)
+    if not items:
+        raise RuntimeError(
+            "classification 数据集中没有找到分类图片。请使用 class folders 格式，例如 raw/ok/*.jpg、raw/ng/*.jpg，"
+            "或提供可从 labels 推断类别的图片。"
+        )
+
+    class_names = _ordered_class_names(items, classes)
+    rng = random.Random(int(ctx.job.get("split_seed", 42)))
+    rng.shuffle(items)
+    val_ratio = float(ctx.job.get("val_ratio", 0.2))
+    val_count = max(1, int(round(len(items) * val_ratio))) if len(items) >= 2 else 1
+    val_items = items[:val_count]
+    train_items = items[val_count:] if len(items) > 1 else items
+    if not train_items:
+        train_items = val_items
+
+    for class_name in class_names:
+        (data_root / "train" / class_name).mkdir(parents=True, exist_ok=True)
+        (data_root / "val" / class_name).mkdir(parents=True, exist_ok=True)
+
+    for split, split_items in [("train", train_items), ("val", val_items)]:
+        for image_path, class_name in split_items:
+            dst_name = _unique_classification_name(image_path)
+            shutil.copy2(image_path, data_root / split / class_name / dst_name)
+
+    # data.yaml is not used by `yolo classify train`, but writing it keeps the
+    # v3 dataset preview and downstream reports consistent with other tasks.
+    names = {idx: name for idx, name in enumerate(class_names)}
+    data_yaml_path = data_root / "data.yaml"
+    write_yaml(data_yaml_path, {"path": str(data_root), "train": "train", "val": "val", "nc": len(class_names), "names": names, "task": "classify"})
+
+    report = {
+        "status": "success",
+        "task_type": "classification",
+        "dataset_id": dataset.get("dataset_id"),
+        "data_yaml": str(data_yaml_path),
+        "data_path": str(data_root),
+        "dataset_dir": str(data_root),
+        "classes": class_names,
+        "total_labeled_images": len(items),
+        "train_images": len(train_items),
+        "val_images": len(val_items),
+        "classification_layout": "ultralytics_folder",
+    }
+    write_json(ctx.output_dir / "preprocess_report.json", report)
+    ctx.log(f"[preprocess] classification data={data_root} train={len(train_items)} val={len(val_items)} classes={class_names}")
     return report
 
 
@@ -108,6 +191,83 @@ def _collect_labeled_items(dataset: dict[str, Any]) -> list[tuple[Path, Path]]:
     return items
 
 
+def _collect_classification_items(dataset: dict[str, Any], classes: list[str]) -> list[tuple[Path, str]]:
+    items: list[tuple[Path, str]] = []
+    batches = dataset.get("batches") if isinstance(dataset.get("batches"), list) else []
+    for batch in batches:
+        raw = Path(str(batch.get("raw_path") or ""))
+        items.extend(_classification_items_from_folders(raw))
+        if items:
+            continue
+        items.extend(_classification_items_from_labels(raw, batch, classes))
+    return sorted(items, key=lambda x: (x[1], str(x[0])))
+
+
+def _classification_items_from_folders(raw: Path) -> list[tuple[Path, str]]:
+    roots: list[Path] = []
+    roots.extend([raw / name for name in CLASSIFICATION_ROOT_NAMES])
+    roots.extend([raw / "images", raw / "all_images", raw])
+    seen: set[str] = set()
+    items: list[tuple[Path, str]] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for class_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+            if class_dir.name in RESERVED_DIR_NAMES or class_dir.name.startswith("."):
+                continue
+            images = _list_images_recursive_one_level(class_dir)
+            if not images:
+                continue
+            class_name = _safe_class_name(class_dir.name)
+            for image in images:
+                key = str(image.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    items.append((image, class_name))
+        if items:
+            return items
+    return items
+
+
+def _classification_items_from_labels(raw: Path, batch: dict[str, Any], classes: list[str]) -> list[tuple[Path, str]]:
+    images_dir = _find_images_dir(raw, batch)
+    labels_dir = raw / "labels"
+    if not images_dir.is_dir() or not labels_dir.is_dir():
+        return []
+    out: list[tuple[Path, str]] = []
+    for image in list_images(images_dir):
+        label = labels_dir / f"{image.stem}.txt"
+        if not label.exists():
+            continue
+        class_id = _first_class_id(label)
+        if class_id is None:
+            continue
+        class_name = classes[class_id] if 0 <= class_id < len(classes) else f"class_{class_id}"
+        out.append((image, _safe_class_name(class_name)))
+    return out
+
+
+def _first_class_id(label_path: Path) -> int | None:
+    for line in label_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        parts = line.strip().split()
+        if not parts:
+            continue
+        try:
+            return int(float(parts[0]))
+        except Exception:
+            continue
+    return None
+
+
+def _ordered_class_names(items: list[tuple[Path, str]], preferred: list[str]) -> list[str]:
+    present = {name for _, name in items}
+    ordered = [_safe_class_name(name) for name in preferred if _safe_class_name(name) in present]
+    for name in sorted(present):
+        if name not in ordered:
+            ordered.append(name)
+    return ordered or ["class_0"]
+
+
 def _find_images_dir(raw: Path, batch: dict[str, Any]) -> Path:
     candidates = []
     if batch.get("images_path"):
@@ -119,6 +279,12 @@ def _find_images_dir(raw: Path, batch: dict[str, Any]) -> Path:
     return raw / "images"
 
 
+def _list_images_recursive_one_level(images_dir: Path) -> list[Path]:
+    if not images_dir.exists():
+        return []
+    return sorted(p for p in images_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
+
+
 def _unique_name(image_path: Path, label_path: Path) -> str:
     try:
         raw_dir = label_path.parents[1]
@@ -126,3 +292,17 @@ def _unique_name(image_path: Path, label_path: Path) -> str:
     except Exception:
         batch_id = image_path.parent.name
     return f"{batch_id}__{image_path.name}"
+
+
+def _unique_classification_name(image_path: Path) -> str:
+    try:
+        batch_id = image_path.parents[2].name
+    except Exception:
+        batch_id = image_path.parent.name
+    return f"{batch_id}__{image_path.name}"
+
+
+def _safe_class_name(value: str) -> str:
+    text = str(value or "").strip().replace("\\", "_").replace("/", "_").replace("..", "_")
+    text = "_".join(text.split())
+    return text or "class_0"

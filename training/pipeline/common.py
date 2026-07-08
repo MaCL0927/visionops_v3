@@ -134,7 +134,7 @@ def normalize_task(task_type: str | None) -> str:
         return "obb"
     if task in {"seg", "segment", "segmentation", "instance_segmentation"}:
         return "segmentation"
-    if task in {"classification", "cls"}:
+    if task in {"classification", "cls", "classify"}:
         return "classification"
     return "detection"
 

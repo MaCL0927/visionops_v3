@@ -130,6 +130,13 @@
     .class-grid { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
     .class-chip { background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; }
 
+    .cls-panel { display:none; margin-top:14px; padding:12px; background:#f8fafc; border:1px solid #e5e7eb; border-radius:12px; }
+    .cls-buttons { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0; }
+    .cls-buttons button { background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; }
+    .cls-counts { white-space:pre-wrap; background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:9px; font-size:12px; color:#475569; line-height:1.55; }
+    .hide-for-classification.classification-mode { display:none !important; }
+    .classification-empty { display:none; position:absolute; inset:0; align-items:center; justify-content:center; color:#64748b; font-size:22px; font-weight:800; background:#e9eef6; text-align:center; padding:30px; }
+
     .review-done-float { position:fixed; right:22px; bottom:22px; z-index:25; width:260px; }
     .review-done-float button { width:100%; padding:15px 16px; border-radius:14px; font-size:16px; box-shadow:0 14px 32px rgba(217,119,6,.32); }
     .review-job-msg { margin-top:8px; background:rgba(255,255,255,.96); border:1px solid #fed7aa; color:#9a3412; border-radius:12px; padding:9px 10px; font-size:12px; line-height:1.45; box-shadow:0 10px 26px rgba(15,23,42,.12); display:none; white-space:pre-wrap; }
@@ -156,6 +163,7 @@
 
     <div id="canvasWrap" class="center">
       <canvas id="canvas"></canvas>
+      <div id="classificationEmpty" class="classification-empty">分类图片已全部归类。<br>可以点击“确认审核完成”生成训练数据集。</div>
       <div id="canvasAutoWarning" class="canvas-auto-warning">自动标注待确认</div>
     </div>
 
@@ -166,30 +174,45 @@
         <option value="detection">Detection 矩形框</option>
         <option value="obb">OBB 四点框</option>
         <option value="segmentation">Segmentation 多边形</option>
+        <option value="classification">Classification 分类</option>
       </select>
 
       <div class="section-title">类别</div>
       <div id="classSummary" class="muted">还没有类别。画完第一个框后新增类别。</div>
 
-      <div class="row">
+      <div id="classificationPanel" class="cls-panel">
+        <div class="hint">
+          分类数据集制作：点击下方类别按钮，会把当前图片从 <b>raw/images/</b> 移动到 <b>raw/images/&lt;类别&gt;/</b>。
+          确认审核完成后，会自动划分为 YOLOv8 分类数据集 train/val。
+        </div>
+        <div class="section-title">分类类别</div>
+        <div id="clsButtons" class="cls-buttons"></div>
+        <div class="row">
+          <input id="clsNewClassInput" placeholder="新增分类类别，例如 ok / ng / product1" style="width:66%" />
+          <button class="gray" onclick="addClassificationClass()">新增</button>
+        </div>
+        <div id="clsCounts" class="cls-counts">分类统计：-</div>
+      </div>
+
+      <div class="row hide-for-classification">
         <button class="green" onclick="startDraw()">W 开始标注</button>
         <button class="orange" onclick="deleteSelected()">Q 删除</button>
         <button class="dark" onclick="saveCurrent(true)">S 保存</button>
         <button class="gray" onclick="finishSegmentationPolygon()">Enter 完成多边形</button>
       </div>
 
-      <div id="autoNotice" class="auto-notice">
+      <div id="autoNotice" class="auto-notice hide-for-classification">
         自动标注待确认：无误按 <b>E</b>，或点击下方按钮复制到 labels。
         <div class="row"><button class="green" onclick="confirmAutoLabel()">E 确认自动标注</button></div>
       </div>
 
-      <div class="hint">
+      <div class="hint hide-for-classification">
         A/D：上一张/下一张。W：开始标注。Q：删除。S：保存。E：确认自动标注。Esc：取消。<br>
         Detection：W 后拖拽矩形框。OBB：W 后依次点击 4 个角点。Segmentation：W 后依次点击多边形点，双击或 Enter 完成。鼠标滚轮缩放。<br>
         人工标注保存到 labels；模型预标注保存到 labels_auto。
       </div>
 
-      <div class="assist-panel">
+      <div class="assist-panel hide-for-classification">
         <h3>模型辅助</h3>
         <button class="green big" onclick="quickTrain()">快速学习</button>
         <div style="height:10px"></div>
@@ -198,7 +221,7 @@
         <div id="quickMsg" class="quick-msg">状态：未开始</div>
       </div>
 
-      <div class="roi-launch-panel">
+      <div class="roi-launch-panel hide-for-classification">
         <h3>ROI 分类数据制作</h3>
         <div class="hint">
           用 detection 模型把当前 batch 的目标整体框裁剪成分类 ROI，再人工分配类别，输出到 data/raw_classification/&lt;类别&gt;/。
@@ -206,8 +229,8 @@
         <button class="green big" onclick="openRoiModal()">打开 ROI 分类数据制作</button>
       </div>
 
-      <h3>当前标注</h3>
-      <div id="boxList" class="boxlist"></div>
+      <div class="hide-for-classification"><h3>当前标注</h3>
+      <div id="boxList" class="boxlist"></div></div>
     </div>
   </div>
 
@@ -388,6 +411,91 @@ function notifyAndReturn(message) {
   setTimeout(() => { window.location.href = '/'; }, 900);
 }
 
+function isClassificationTask() { return currentTask() === 'classification'; }
+
+function classificationInfo() {
+  return (session && session.classification) ? session.classification : {class_counts:{}, unclassified_count:0, classified_count:0, total_count:0};
+}
+
+function applyTaskUi() {
+  const isCls = isClassificationTask();
+  const panel = document.getElementById('classificationPanel');
+  if (panel) panel.style.display = isCls ? 'block' : 'none';
+  document.querySelectorAll('.hide-for-classification').forEach(el => {
+    if (isCls) el.classList.add('classification-mode');
+    else el.classList.remove('classification-mode');
+  });
+  if (isCls) {
+    drawingMode = false; dragging = false; selectedIndex = -1; annotations = [];
+    canvas.classList.remove('draw-ready');
+    renderClassificationPanel();
+  }
+}
+
+function renderClassificationPanel() {
+  const buttons = document.getElementById('clsButtons');
+  const countsEl = document.getElementById('clsCounts');
+  if (!buttons || !countsEl) return;
+  const info = classificationInfo();
+  const counts = info.class_counts || {};
+  buttons.innerHTML = classes.length
+    ? classes.map((name, i) => `<button onclick="assignClassification(${i})">${i}: ${name} (${counts[name] || 0})</button>`).join('')
+    : '<div class="muted">还没有分类类别，请先新增类别。</div>';
+  const lines = [
+    `未分类：${info.unclassified_count || 0} 张`,
+    `已分类：${info.classified_count || 0} 张`,
+    ...classes.map(name => `${name}: ${counts[name] || 0} 张`)
+  ];
+  countsEl.textContent = '分类统计：\n' + lines.join('\n');
+}
+
+async function addClassificationClass() {
+  const input = document.getElementById('clsNewClassInput');
+  const name = (input.value || '').trim();
+  if (!name) { alert('请输入分类类别名'); return; }
+  if (!classes.includes(name)) classes.push(name);
+  input.value = '';
+  await saveClassesOnly();
+  renderClassSummary();
+  renderClassificationPanel();
+}
+
+function showClassificationEmpty(show=true) {
+  const el = document.getElementById('classificationEmpty');
+  if (el) el.style.display = show ? 'flex' : 'none';
+  if (show) {
+    const {w, h} = canvasCssSize();
+    ctx.clearRect(0, 0, w, h);
+    img = new Image();
+    currentMeta = null;
+    annotations = [];
+    document.getElementById('progress').textContent = `0 / 0`;
+    document.getElementById('saveStatus').textContent = '全部已分类';
+    renderImageList();
+  }
+}
+
+async function assignClassification(classId) {
+  if (!isClassificationTask()) return;
+  if (!currentMeta || !currentMeta.filename) { alert('当前没有未分类图片。'); return; }
+  if (classId < 0 || classId >= classes.length) { alert('类别不存在，请先新增类别。'); return; }
+  const res = await fetch(withBatch('/api/annotator/classification/assign'), {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({filename: currentMeta.filename, class_id: classId, classes})
+  });
+  const data = await res.json();
+  if (!res.ok) { alert(data.detail || data.message || '分类保存失败'); return; }
+  classes = Array.isArray(data.classes) ? data.classes : classes;
+  document.getElementById('saveStatus').textContent = data.message || '已归类';
+  await refreshSession();
+  renderClassSummary();
+  renderClassificationPanel();
+  const next = Math.min(currentIndex, Math.max(0, (session.total || 0) - 1));
+  if ((session.total || 0) > 0) await loadImage(next);
+  else showClassificationEmpty(true);
+}
+
 // 主标注区编辑状态：普通模式下点击目标即可选中，随后可拖动移动、拉边缘/角点缩放。
 // ROI 分类数据制作弹窗有独立的 fineRoiState，不要与这里混用。
 let editMode = null;       // null | 'move' | 'resize' | 'point'
@@ -412,20 +520,30 @@ async function init() {
   document.getElementById('taskType').value = session.default_task_type || 'detection';
   document.getElementById('batch').textContent = 'batch: ' + session.batch_id;
   renderClassSummary();
+  applyTaskUi();
   resizeCanvas();
-  await loadImage(0);
+  if ((session.total || 0) > 0) await loadImage(0);
+  else showClassificationEmpty(isClassificationTask());
   await loadRoiClsInfo();
 }
 
 async function refreshSession() {
   const res = await fetch(withBatch('/api/annotator/session'));
   const data = await res.json();
-  if (res.ok) session = data;
+  if (res.ok) {
+    session = data;
+    classes = Array.isArray(session.classes) ? [...session.classes] : classes;
+    renderClassificationPanel();
+  }
 }
 
 function renderClassSummary() {
   const el = document.getElementById('classSummary');
-  el.textContent = classes.length ? classes.map((n, i) => `${i}: ${n}`).join('，') : '还没有类别。画完第一个框后新增类别。';
+  if (isClassificationTask()) {
+    el.textContent = classes.length ? classes.map((n, i) => `${i}: ${n}`).join('，') : '还没有分类类别，请先新增类别。';
+  } else {
+    el.textContent = classes.length ? classes.map((n, i) => `${i}: ${n}`).join('，') : '还没有类别。画完第一个框后新增类别。';
+  }
 }
 
 function imageLabelKind(name) {
@@ -436,9 +554,10 @@ function imageLabelKind(name) {
 }
 
 function renderImageList() {
-  document.getElementById('imageList').innerHTML = session.images.map((name, i) =>
+  const images = (session && Array.isArray(session.images)) ? session.images : [];
+  document.getElementById('imageList').innerHTML = images.length ? images.map((name, i) =>
     `<div class="imgitem ${i===currentIndex?'active':''}" onclick="gotoImage(${i})">${i+1}. ${name}</div>`
-  ).join('');
+  ).join('') : '<div class="muted">暂无未分类图片</div>';
 }
 
 function updateLabelSourceUI() {
@@ -447,21 +566,31 @@ function updateLabelSourceUI() {
   const canvasWarn = document.getElementById('canvasAutoWarning');
   const isAuto = labelSource === 'auto';
   el.className = 'badge';
-  if (labelSource === 'manual') el.textContent = '标注来源: 人工 labels';
+  if (isClassificationTask()) {
+    const info = classificationInfo();
+    el.textContent = `分类制作: 未分类 ${info.unclassified_count || 0} / 已分类 ${info.classified_count || 0}`;
+  }
+  else if (labelSource === 'manual') el.textContent = '标注来源: 人工 labels';
   else if (isAuto) { el.textContent = '标注来源: 自动 labels_auto，待确认'; el.className = 'badge warn'; }
   else el.textContent = '标注来源: 无';
-  notice.style.display = isAuto ? 'block' : 'none';
-  canvasWarn.style.display = isAuto ? 'block' : 'none';
+  notice.style.display = (!isClassificationTask() && isAuto) ? 'block' : 'none';
+  canvasWarn.style.display = (!isClassificationTask() && isAuto) ? 'block' : 'none';
 }
 
 async function loadImage(index) {
+  if (!session || (session.total || 0) <= 0) {
+    showClassificationEmpty(isClassificationTask());
+    return;
+  }
+  showClassificationEmpty(false);
   currentIndex = Math.max(0, Math.min(index, session.total - 1));
   const res = await fetch(withBatch('/api/annotator/image/' + currentIndex));
   const data = await res.json();
   if (!res.ok) { alert(data.detail || '加载图片失败'); return; }
   currentMeta = data;
   if (data.task_type) document.getElementById('taskType').value = data.task_type;
-  annotations = data.annotations || [];
+  applyTaskUi();
+  annotations = isClassificationTask() ? [] : (data.annotations || []);
   labelSource = data.label_source || 'none';
   dirty = false;
   selectedIndex = -1;
@@ -805,6 +934,7 @@ function markDirty(){
     : '已修改，需保存';
 }
 function startDraw(){
+  if (isClassificationTask()) { alert('Classification 分类任务不需要画框，请点击类别按钮把当前图片移动到对应类别文件夹。'); return; }
   resetEditState();
   selectedIndex=-1;
   drawingMode=true; dragging=false; startPt=null; tempPt=null; obbPoints=[]; segPoints=[]; pendingAnnotation=null;
@@ -818,7 +948,15 @@ function stopDraw(){
   resetEditState();
   draw();
 }
-async function onTaskChange(){stopDraw(); await fetch(withBatch('/api/annotator/task'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_type:currentTask()})});}
+async function onTaskChange(){
+  stopDraw();
+  await fetch(withBatch('/api/annotator/task'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_type:currentTask()})});
+  await refreshSession();
+  renderClassSummary();
+  applyTaskUi();
+  if ((session.total || 0) > 0) await loadImage(Math.min(currentIndex, session.total - 1));
+  else showClassificationEmpty(isClassificationTask());
+}
 function finishSegmentationPolygon(){
   if (currentTask() !== 'segmentation' || segPoints.length < 3) { return; }
   pendingAnnotation={type:'segmentation', class_id:-1, points:segPoints.map(p=>[p[0],p[1]])};
@@ -970,6 +1108,11 @@ function cancelClassModal(){ pendingAnnotation=null; closeClassModal(); draw(); 
 async function saveClassesOnly(){ await fetch(withBatch('/api/annotator/classes'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({classes, task_type: currentTask()})}); }
 
 async function saveCurrent(force=false){
+  if (isClassificationTask()) {
+    await saveClassesOnly();
+    dirty = false;
+    return;
+  }
   if(!currentMeta) return;
   // 自动标注未修改时，切图不会自动确认；必须按 E。
   if (labelSource === 'auto' && !dirty && !force) return;
@@ -995,10 +1138,11 @@ async function confirmAutoLabel(){
   await refreshSession();
 }
 
-async function nextImage(){await saveCurrent(false); await loadImage(currentIndex+1);}
-async function prevImage(){await saveCurrent(false); await loadImage(currentIndex-1);}
-async function gotoImage(i){await saveCurrent(false); await loadImage(i);}
+async function nextImage(){await saveCurrent(false); if ((session.total || 0) > 0) await loadImage(currentIndex+1);}
+async function prevImage(){await saveCurrent(false); if ((session.total || 0) > 0) await loadImage(currentIndex-1);}
+async function gotoImage(i){await saveCurrent(false); if ((session.total || 0) > 0) await loadImage(i);}
 function deleteSelected(){
+  if (isClassificationTask()) { alert('Classification 分类任务通过类别按钮移动图片，不使用 Q 删除标注。'); return; }
   if(!annotations.length)return;
   if(selectedIndex < 0){ alert('请先用鼠标左键点击图中的目标框/多边形，或在右侧“当前标注”列表中选择要删除的标注。'); return; }
   annotations.splice(selectedIndex,1);

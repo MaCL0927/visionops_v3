@@ -11,6 +11,7 @@ struct ModelConfigData {
   std::string model_version;
   std::string task_type;
   std::string target_platform;
+  std::string runtime_preprocess{"letterbox"};
   int input_width{0};
   int input_height{0};
   std::vector<std::string> class_names;

@@ -32,6 +32,14 @@ def run(
     shutil.copy2(rknn_src, package_dir / "model.rknn")
 
     classes = preprocess_report.get("classes") if isinstance(preprocess_report.get("classes"), list) else ["object"]
+    # For YOLOv8 classification, Ultralytics assigns class ids from the trained
+    # model metadata (usually sorted class-folder names).  The annotation UI may
+    # keep the user-created order, so using preprocess_report/classes here can
+    # produce a wrong class_id -> class_name mapping on the edge runtime.
+    # Prefer best.pt names when available, especially for classification.
+    trained_classes = _classes_from_trained_pt(train_report.get("best_pt"))
+    if task_type == "classification" and trained_classes:
+        classes = trained_classes
     version = time.strftime("%Y%m%d_%H%M%S")
     model_name = str(ctx.job.get("model_name") or f"{task_type}-{ctx.dataset.get('dataset_id', 'dataset')}")
     imgsz = int(ctx.job.get("imgsz", export_report.get("imgsz", 640) or 640))
@@ -176,11 +184,70 @@ def _make_model_yaml(
             "max_det": max_det,
         },
         "runtime": {
-            "preprocess": "letterbox",
+            "preprocess": "resize" if runtime_task == "classification" else "letterbox",
             "color": "rgb",
         },
     }
 
+
+
+def _classes_from_trained_pt(best_pt: Any) -> list[str]:
+    """Read class names from an Ultralytics trained checkpoint if possible.
+
+    This is critical for classification because YOLOv8-cls class ids are tied to
+    the class-folder order stored in best.pt.  Dataset metadata may preserve UI
+    creation order, which can differ from the trained model's actual class ids.
+    """
+    path = Path(str(best_pt or ""))
+    if not path.is_file():
+        return []
+
+    # Prefer Ultralytics because it normalizes both old and new checkpoint layouts.
+    try:
+        from ultralytics import YOLO  # type: ignore
+
+        model = YOLO(str(path))
+        names = getattr(model, "names", None)
+        ordered = _ordered_names_from_mapping(names)
+        if ordered:
+            return ordered
+    except Exception:
+        pass
+
+    # Lightweight fallback for environments where ultralytics import is not
+    # available during packaging but torch can still read the checkpoint.
+    try:
+        import torch  # type: ignore
+
+        ckpt = torch.load(str(path), map_location="cpu")
+        candidates: list[Any] = []
+        if isinstance(ckpt, dict):
+            candidates.extend([ckpt.get("names"), ckpt.get("model")])
+        else:
+            candidates.append(ckpt)
+        for item in candidates:
+            names = item
+            if hasattr(item, "names"):
+                names = getattr(item, "names")
+            ordered = _ordered_names_from_mapping(names)
+            if ordered:
+                return ordered
+    except Exception:
+        pass
+    return []
+
+
+def _ordered_names_from_mapping(names: Any) -> list[str]:
+    if isinstance(names, dict):
+        ordered: list[str] = []
+        for key in sorted(names.keys(), key=lambda x: int(x) if str(x).lstrip("-").isdigit() else str(x)):
+            value = str(names[key]).strip()
+            if value:
+                ordered.append(value)
+        return ordered
+    if isinstance(names, (list, tuple)):
+        return [str(x).strip() for x in names if str(x).strip()]
+    return []
 
 
 def _yaml_scalar(value: Any) -> str:

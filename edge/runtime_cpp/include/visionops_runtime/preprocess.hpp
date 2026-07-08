@@ -24,6 +24,7 @@ struct LetterboxMeta {
 struct PreprocessOptions {
   std::string backend{"cpu"};  // cpu, rga, auto
   std::string rga_mode{"resize_rgb"};
+  std::string mode{"letterbox"};  // letterbox, resize
 };
 
 struct PreprocessOutput {
@@ -35,6 +36,7 @@ struct PreprocessOutput {
   std::string backend{"cpu"};
   std::string backend_requested{"cpu"};
   std::string rga_mode;
+  std::string mode{"letterbox"};
   bool rga_available{false};
   bool rga_used{false};
   std::string error;

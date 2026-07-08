@@ -200,6 +200,11 @@ bool load_model_config_yaml(
           config.class_names.clear();
           collecting_class_names = true;
         }
+      } else if (key == "preprocess" || key == "preprocess_mode" || key == "resize_mode") {
+        const auto mode = unquote(value);
+        if (!mode.empty()) {
+          config.runtime_preprocess = mode;
+        }
       } else if (key == "score_threshold" || key == "conf_threshold" ||
                  key == "confidence_threshold") {
         config.score_threshold = std::stod(value);

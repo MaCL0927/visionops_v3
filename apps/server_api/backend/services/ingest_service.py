@@ -56,10 +56,11 @@ class BatchService:
     # v3/v2-compatible incoming package flow
     # ------------------------------------------------------------------
     def list_incoming_packages(self) -> list[dict[str, Any]]:
-        """列出 incoming_root 下尚未处理的 tar.gz 包，按修改时间倒序。"""
+        """列出 incoming_root 下尚未处理的 tar.gz / zip 包，按修改时间倒序。"""
         self.incoming_root.mkdir(parents=True, exist_ok=True)
         packages: list[dict[str, Any]] = []
-        for path in sorted(self.incoming_root.glob("*.tar.gz"), key=lambda p: p.stat().st_mtime, reverse=True):
+        candidates = list(self.incoming_root.glob("*.tar.gz")) + list(self.incoming_root.glob("*.zip"))
+        for path in sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True):
             if not path.is_file():
                 continue
             batch_id, device_id, customer_id, captured_at = parse_package_name(path.name)
@@ -81,7 +82,7 @@ class BatchService:
         return packages
 
     def process_incoming_packages(self, packages: list[str]) -> dict[str, Any]:
-        """处理选中的 incoming tar.gz。
+        """处理选中的 incoming tar.gz / zip。
 
         - 单包：解压为一个 batch。
         - 多包：合并为一个 batch，适合 v2 的“多包自动合并”场景。
@@ -102,7 +103,7 @@ class BatchService:
         try:
             with tempfile.TemporaryDirectory(prefix="visionops-ingest-") as tmp:
                 tmp_dir = Path(tmp)
-                _safe_extract_tar_gz(package_path, tmp_dir)
+                _safe_extract_archive(package_path, tmp_dir)
                 dataset_root = _find_package_root(tmp_dir)
                 shutil.copytree(dataset_root, raw_dir)
 
@@ -118,7 +119,7 @@ class BatchService:
                 "customer_id": customer_id,
                 "captured_at": captured_at,
                 "task_type": "unassigned",
-                "source": "incoming_tar_gz",
+                "source": "incoming_archive",
                 "source_package": package_path.name,
                 "source_package_path": str(package_path),
                 "status": "extracted",
@@ -159,7 +160,7 @@ class BatchService:
                 sub_batch_id, device_id, customer_id, captured_at = parse_package_name(package_path.name)
                 with tempfile.TemporaryDirectory(prefix="visionops-merge-") as tmp:
                     tmp_dir = Path(tmp)
-                    _safe_extract_tar_gz(package_path, tmp_dir)
+                    _safe_extract_archive(package_path, tmp_dir)
                     dataset_root = _find_package_root(tmp_dir)
                     manifest = _read_manifest(dataset_root)
                     sources.append(
@@ -201,7 +202,7 @@ class BatchService:
                 "customer_id": first_customer_id,
                 "captured_at": first_captured_at,
                 "task_type": "unassigned",
-                "source": "incoming_tar_gz_merged",
+                "source": "incoming_archive_merged",
                 "source_packages": [path.name for path in package_paths],
                 "status": "extracted",
                 "image_count": image_count,
@@ -342,8 +343,8 @@ class BatchService:
             raise ValueError(f"非法压缩包路径: {value}") from exc
         if not path.exists() or not path.is_file():
             raise FileNotFoundError(f"压缩包不存在: {value}")
-        if not path.name.endswith(".tar.gz"):
-            raise ValueError(f"只支持 .tar.gz 上传包: {path.name}")
+        if not (path.name.endswith(".tar.gz") or path.name.endswith(".zip")):
+            raise ValueError(f"只支持 .tar.gz 或 .zip 上传包: {path.name}")
         return path
 
     def _store(self, batch_id: str) -> JsonStore:
@@ -366,6 +367,13 @@ def safe_name(name: str) -> str:
     value = str(name or "").strip().replace(" ", "_")
     value = re.sub(r"[^A-Za-z0-9_.\-]+", "_", value)
     return value.strip("._") or "unknown"
+
+
+def _safe_extract_archive(package_path: Path, target_dir: Path) -> None:
+    if package_path.name.endswith(".zip") or zipfile.is_zipfile(package_path):
+        _safe_extract_zip(package_path, target_dir)
+    else:
+        _safe_extract_tar_gz(package_path, target_dir)
 
 
 def _safe_extract_tar_gz(package_path: Path, target_dir: Path) -> None:

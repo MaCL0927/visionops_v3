@@ -24,7 +24,7 @@ def normalize_model_task(task_type: str | None) -> str:
         return "obb"
     if task in {"seg", "segment", "segmentation", "instance_segmentation", "yolo_seg"}:
         return "segmentation"
-    if task in {"classification", "cls"}:
+    if task in {"classification", "cls", "classify"}:
         return "classification"
     return "detection"
 
@@ -45,6 +45,8 @@ def make_model_yaml(
     color: str = "rgb",
 ) -> dict[str, Any]:
     task_type = normalize_model_task(task_type)
+    if task_type == "classification" and preprocess == "letterbox":
+        preprocess = "resize"
     normalized_classes: list[dict[str, Any]] = []
     if classes:
         for index, item in enumerate(classes):

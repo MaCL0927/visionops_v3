@@ -10,6 +10,7 @@
 
 #include "visionops_runtime/json_utils.hpp"
 #include "visionops_runtime/postprocess_detect.hpp"
+#include "visionops_runtime/postprocess_classification.hpp"
 #include "visionops_runtime/postprocess_obb.hpp"
 #include "visionops_runtime/postprocess_seg.hpp"
 #include "visionops_runtime/preprocess.hpp"
@@ -301,6 +302,7 @@ std::string RuntimeApp::loaded_model_json() const {
          << ",\"model_name\":\"" << json_escape(model_info_.model_name) << '"'
          << ",\"model_version\":\"" << json_escape(model_info_.model_version) << '"'
          << ",\"task_type\":\"" << json_escape(model_info_.task_type) << '"'
+         << ",\"runtime_preprocess\":\"" << json_escape(model_info_.runtime_preprocess) << '"'
          << ",\"backend\":\"" << json_escape(model_info_.backend) << '"'
          << ",\"runner_loaded\":" << json_bool(rknn_runner_->is_loaded())
          << ",\"rknn_compiled\":" << json_bool(rknn_backend_compiled())
@@ -392,7 +394,10 @@ std::string RuntimeApp::infer_once() {
   }
 
   std::lock_guard<std::recursive_mutex> model_lock(model_mutex_);
-  const PreprocessOptions preprocess_options{config_.preprocess_backend, config_.rga_mode};
+  const std::string preprocess_mode = model_info_.runtime_preprocess.empty()
+      ? std::string("letterbox")
+      : model_info_.runtime_preprocess;
+  const PreprocessOptions preprocess_options{config_.preprocess_backend, config_.rga_mode, preprocess_mode};
   const auto preprocess = preprocess_image(
       frame, source_image, model_info_.input_width, model_info_.input_height, preprocess_options);
   if (!preprocess.error.empty()) {
@@ -441,6 +446,8 @@ std::string RuntimeApp::infer_once() {
       postprocess = postprocess_obb(inference.tensors, postprocess_config, preprocess.letterbox);
     } else if (model_info_.task_type == "segmentation" || model_info_.task_type == "segment") {
       postprocess = postprocess_segmentation(inference.tensors, postprocess_config, preprocess.letterbox);
+    } else if (model_info_.task_type == "classification" || model_info_.task_type == "classify") {
+      postprocess = postprocess_classification(inference.tensors, postprocess_config);
     } else {
       const auto error = inference_error_json(
           identity,
@@ -650,6 +657,7 @@ std::string RuntimeApp::inference_result_json(
            << ",\"preprocess_same_size_fast_path\":" << json_bool(preprocess.same_size_fast_path)
            << ",\"preprocess_backend_requested\":\"" << json_escape(preprocess.backend_requested) << '"'
            << ",\"preprocess_backend_active\":\"" << json_escape(preprocess.backend) << '"'
+           << ",\"preprocess_mode\":\"" << json_escape(preprocess.mode) << '"'
            << ",\"rga_mode\":\"" << json_escape(preprocess.rga_mode) << '"'
            << ",\"rga_available\":" << json_bool(preprocess.rga_available)
            << ",\"rga_used\":" << json_bool(preprocess.rga_used)
@@ -808,6 +816,7 @@ std::string RuntimeApp::inference_error_json(
   if (preprocess != nullptr) {
     stream << ",\"preprocess_backend_requested\":\"" << json_escape(preprocess->backend_requested) << '"'
            << ",\"preprocess_backend_active\":\"" << json_escape(preprocess->backend) << '"'
+           << ",\"preprocess_mode\":\"" << json_escape(preprocess->mode) << '"'
            << ",\"rga_mode\":\"" << json_escape(preprocess->rga_mode) << '"'
            << ",\"rga_available\":" << json_bool(preprocess->rga_available)
            << ",\"rga_used\":" << json_bool(preprocess->rga_used);

@@ -4,6 +4,7 @@
 
 #include "visionops_runtime/app_config.hpp"
 #include "visionops_runtime/postprocess_detect.hpp"
+#include "visionops_runtime/postprocess_classification.hpp"
 #include "visionops_runtime/postprocess_obb.hpp"
 #include "visionops_runtime/postprocess_seg.hpp"
 

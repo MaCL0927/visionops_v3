@@ -143,3 +143,26 @@ def test_training_job_delete_removes_job_dir(tmp_path: Path) -> None:
     deleted = job_service.delete_job(job["job_id"])
     assert deleted["deleted"] is True
     assert not job_path.exists()
+
+
+def test_classification_dataset_builds_ultralytics_folder_layout(tmp_path: Path) -> None:
+    batch_service = BatchService(tmp_path / "batches", ("detection", "classification"))
+    raw_zip = tmp_path / "cls_upload.zip"
+    with zipfile.ZipFile(raw_zip, "w") as archive:
+        archive.writestr("ok/a.jpg", b"fake-ok")
+        archive.writestr("ng/b.jpg", b"fake-ng")
+        archive.writestr("ng/c.jpg", b"fake-ng-2")
+    batch = batch_service.create_from_zip(raw_zip, device_id="edge-dev", task_type="classification")
+    batch_service.set_status(batch["batch_id"], "accepted", task_type="classification")
+
+    dataset_service = DatasetService(tmp_path / "datasets", batch_service)
+    dataset = dataset_service.build_dataset(task_type="classification", batch_ids=[batch["batch_id"]])
+
+    assert dataset["task_type"] == "classification"
+    assert dataset["image_count"] == 3
+    assert dataset["class_count"] == 2
+    cls_root = Path(dataset["yolo_dataset_path"])
+    assert (cls_root / "train" / "ok").is_dir()
+    assert (cls_root / "train" / "ng").is_dir()
+    assert (cls_root / "val").is_dir()
+    assert (cls_root / "data.yaml").exists()

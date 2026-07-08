@@ -8,6 +8,7 @@ set(VISIONOPS_RUNTIME_SOURCES
   src/model_package.cpp
   src/postprocess.cpp
   src/postprocess_detect.cpp
+  src/postprocess_classification.cpp
   src/postprocess_obb.cpp
   src/postprocess_seg.cpp
   src/preprocess.cpp
@@ -92,6 +93,7 @@ add_executable(visionops_postprocess_fixture
   src/json_utils.cpp
   src/postprocess.cpp
   src/postprocess_detect.cpp
+  src/postprocess_classification.cpp
   src/postprocess_obb.cpp
   src/postprocess_seg.cpp
 )
