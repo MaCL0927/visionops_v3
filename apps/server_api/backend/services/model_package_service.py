@@ -74,11 +74,85 @@ def make_model_yaml(
 
 
 def write_model_yaml(path: Path, document: dict[str, Any]) -> None:
+    """Write the v3 edge deployment model.yaml without YAML anchors.
+
+    The C++ runtime intentionally uses a lightweight parser.  In particular, it
+    expects ``input_size`` to be a plain inline list or simple block list, not a
+    YAML anchor/alias such as ``input_size: &id001``.  Use a small explicit
+    writer for this deployment contract instead of a generic PyYAML dump.
+    """
+    _write_runtime_model_yaml(path, document)
+
+
+def _yaml_quote(value: Any) -> str:
+    text = str(value)
+    escaped = text.replace("'", "''")
+    return f"'{escaped}'"
+
+
+def _yaml_scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(value)
+    return _yaml_quote(value)
+
+
+def _write_runtime_model_yaml(path: Path, doc: dict[str, Any]) -> None:
+    input_size = doc.get("input_size") or [640, 640]
+    width = int(input_size[0])
+    height = int(input_size[1])
+    model = doc.get("model") if isinstance(doc.get("model"), dict) else {}
+    post = doc.get("postprocess") if isinstance(doc.get("postprocess"), dict) else {}
+    runtime = doc.get("runtime") if isinstance(doc.get("runtime"), dict) else {}
+    classes = doc.get("classes") if isinstance(doc.get("classes"), list) else []
+    class_names = doc.get("class_names") if isinstance(doc.get("class_names"), list) else [
+        str(item.get("name")) for item in classes if isinstance(item, dict) and item.get("name") is not None
+    ]
+    if not classes:
+        classes = [{"id": i, "name": name} for i, name in enumerate(class_names or ["object"])]
+    if not class_names:
+        class_names = [str(item.get("name", f"class_{i}")) for i, item in enumerate(classes) if isinstance(item, dict)]
+
+    lines: list[str] = []
+    lines.append(f"schema_version: {_yaml_scalar(doc.get('schema_version', '1.0'))}")
+    lines.append(f"model_id: {_yaml_scalar(doc.get('model_id', ''))}")
+    lines.append(f"model_name: {_yaml_scalar(doc.get('model_name', ''))}")
+    lines.append(f"model_version: {_yaml_scalar(doc.get('model_version', ''))}")
+    lines.append(f"task_type: {_yaml_scalar(doc.get('task_type', 'detection'))}")
+    lines.append(f"target_platform: {_yaml_scalar(doc.get('target_platform', 'rk3576'))}")
+    lines.append(f"input_size: [{width}, {height}]")
+    lines.append("model:")
+    lines.append(f"  name: {_yaml_scalar(model.get('name', doc.get('model_name', '')))}")
+    lines.append(f"  version: {_yaml_scalar(model.get('version', doc.get('model_version', '')))}")
+    lines.append(f"  task: {_yaml_scalar(model.get('task', doc.get('task_type', 'detection')))}")
+    lines.append(f"  format: {_yaml_scalar(model.get('format', 'rknn'))}")
+    lines.append(f"  target_platform: {_yaml_scalar(model.get('target_platform', doc.get('target_platform', 'rk3576')))}")
+    lines.append(f"  input_size: [{width}, {height}]")
+    lines.append("classes:")
+    for index, item in enumerate(classes):
+        if isinstance(item, dict):
+            class_id = int(item.get("id", index))
+            name = str(item.get("name", f"class_{index}"))
+        else:
+            class_id = index
+            name = str(item)
+        lines.append(f"- id: {class_id}")
+        lines.append(f"  name: {_yaml_scalar(name)}")
+    lines.append("class_names:")
+    for name in class_names:
+        lines.append(f"- {_yaml_scalar(name)}")
+    lines.append("postprocess:")
+    lines.append(f"  conf_threshold: {float(post.get('conf_threshold', 0.25))}")
+    lines.append(f"  iou_threshold: {float(post.get('iou_threshold', 0.45))}")
+    lines.append(f"  max_det: {int(post.get('max_det', 100))}")
+    lines.append("runtime:")
+    lines.append(f"  preprocess: {_yaml_scalar(runtime.get('preprocess', 'letterbox'))}")
+    lines.append(f"  color: {_yaml_scalar(runtime.get('color', 'rgb'))}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    if yaml is not None:
-        path.write_text(yaml.safe_dump(document, allow_unicode=True, sort_keys=False), encoding="utf-8")
-    else:
-        path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 class ModelPackageService:

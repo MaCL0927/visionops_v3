@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from training.pipeline.common import PipelineContext, write_json, write_yaml
+from training.pipeline.common import PipelineContext, write_json
 
 
 def run(
@@ -46,7 +46,7 @@ def run(
         iou_threshold=float(ctx.job.get("iou_threshold", 0.45)),
         max_det=int(ctx.job.get("max_det", 100)),
     )
-    write_yaml(package_dir / "model.yaml", model_yaml)
+    _write_runtime_model_yaml(package_dir / "model.yaml", model_yaml)
 
     now = int(time.time() * 1000)
     package_meta = {
@@ -88,6 +88,85 @@ def run(
     write_json(ctx.output_dir / "package_v3_model_report.json", report)
     ctx.log(f"[package] model_id={model_id} package_dir={package_dir}")
     return report
+
+
+def _yaml_quote(value: Any) -> str:
+    text = str(value)
+    escaped = text.replace("'", "''")
+    return f"'{escaped}'"
+
+
+def _yaml_scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(value)
+    return _yaml_quote(value)
+
+
+def _write_runtime_model_yaml(path: Path, doc: dict[str, Any]) -> None:
+    """Write the model.yaml contract consumed by edge/runtime_cpp.
+
+    PyYAML emits anchors when the same list object is reused at top level and
+    under model.input_size, e.g. ``input_size: &id001``.  The C++ runtime parser
+    intentionally supports only a small, deployment-oriented YAML subset, so
+    anchors make input_size fail to parse.  This writer keeps the file stable and
+    anchor-free, with ``input_size: [640, 640]`` at both required locations.
+    """
+    input_size = doc.get("input_size") or [640, 640]
+    width = int(input_size[0])
+    height = int(input_size[1])
+    model = doc.get("model") if isinstance(doc.get("model"), dict) else {}
+    post = doc.get("postprocess") if isinstance(doc.get("postprocess"), dict) else {}
+    runtime = doc.get("runtime") if isinstance(doc.get("runtime"), dict) else {}
+    classes = doc.get("classes") if isinstance(doc.get("classes"), list) else []
+    class_names = doc.get("class_names") if isinstance(doc.get("class_names"), list) else [
+        str(item.get("name")) for item in classes if isinstance(item, dict) and item.get("name") is not None
+    ]
+    if not classes:
+        classes = [{"id": i, "name": name} for i, name in enumerate(class_names or ["object"])]
+    if not class_names:
+        class_names = [str(item.get("name", f"class_{i}")) for i, item in enumerate(classes) if isinstance(item, dict)]
+
+    lines: list[str] = []
+    lines.append(f"schema_version: {_yaml_scalar(doc.get('schema_version', '1.0'))}")
+    lines.append(f"model_id: {_yaml_scalar(doc.get('model_id', ''))}")
+    lines.append(f"model_name: {_yaml_scalar(doc.get('model_name', ''))}")
+    lines.append(f"model_version: {_yaml_scalar(doc.get('model_version', ''))}")
+    lines.append(f"task_type: {_yaml_scalar(doc.get('task_type', 'detection'))}")
+    lines.append(f"target_platform: {_yaml_scalar(doc.get('target_platform', 'rk3576'))}")
+    lines.append(f"input_size: [{width}, {height}]")
+    lines.append("model:")
+    lines.append(f"  name: {_yaml_scalar(model.get('name', doc.get('model_name', '')))}")
+    lines.append(f"  version: {_yaml_scalar(model.get('version', doc.get('model_version', '')))}")
+    lines.append(f"  task: {_yaml_scalar(model.get('task', doc.get('task_type', 'detection')))}")
+    lines.append(f"  format: {_yaml_scalar(model.get('format', 'rknn'))}")
+    lines.append(f"  target_platform: {_yaml_scalar(model.get('target_platform', doc.get('target_platform', 'rk3576')))}")
+    lines.append(f"  input_size: [{width}, {height}]")
+    lines.append("classes:")
+    for index, item in enumerate(classes):
+        if isinstance(item, dict):
+            class_id = int(item.get("id", index))
+            name = str(item.get("name", f"class_{index}"))
+        else:
+            class_id = index
+            name = str(item)
+        lines.append(f"- id: {class_id}")
+        lines.append(f"  name: {_yaml_scalar(name)}")
+    lines.append("class_names:")
+    for name in class_names:
+        lines.append(f"- {_yaml_scalar(name)}")
+    lines.append("postprocess:")
+    lines.append(f"  conf_threshold: {float(post.get('conf_threshold', 0.25))}")
+    lines.append(f"  iou_threshold: {float(post.get('iou_threshold', 0.45))}")
+    lines.append(f"  max_det: {int(post.get('max_det', 100))}")
+    lines.append("runtime:")
+    lines.append(f"  preprocess: {_yaml_scalar(runtime.get('preprocess', 'letterbox'))}")
+    lines.append(f"  color: {_yaml_scalar(runtime.get('color', 'rgb'))}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _default_model_id(ctx: PipelineContext) -> str:
