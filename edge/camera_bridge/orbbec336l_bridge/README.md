@@ -5,7 +5,7 @@
 本版新增：
 
 - `GET /stream/profiles`：从 Orbbec SDK 实时枚举 Color / Depth 支持的 `(width, height, fps, format)` 组合。
-- Collector Web 设置 API 可读取该 profile 列表，写入 `orbbec336l_bridge.env` 并重启 `visionops-orbbec336l-bridge.service`。
+- Collector Web 设置 API 可读取该 profile 列表，写入 `orbbec336l_bridge.env`（由 `orbbec336l_bridge.env.example` 初始化） 并重启 `visionops-orbbec336l-bridge.service`。
 
 安装/更新：
 

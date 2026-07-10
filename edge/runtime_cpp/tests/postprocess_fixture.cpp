@@ -36,39 +36,42 @@ int main(int argc, char* argv[]) {
   std::string output_task = task;
   if (task == "detection") {
     result = visionops::runtime::postprocess_detection(
-        {make_tensor({1, 2, 5}, {320, 320, 160, 120, 0.9F, 322, 322, 160, 120, 0.4F})},
+        {make_tensor({1, 2, 6}, {
+            320, 320, 160, 120, 0.9F, 0.1F,
+            322, 322, 160, 120, 0.4F, 0.2F})},
         config,
         meta);
   } else if (task == "detection_split") {
     std::vector<float> box(64, 0.0F);
-    std::vector<float> classes{0.9F};
+    std::vector<float> classes{20.0F, -20.0F};
     result = visionops::runtime::postprocess_detection(
         {
             make_tensor({1, 64, 1, 1}, box),
-            make_tensor({1, 1, 1, 1}, classes),
+            make_tensor({1, 2, 1, 1}, classes),
         },
         config,
         meta);
     output_task = "detection";
   } else if (task == "obb") {
     result = visionops::runtime::postprocess_obb(
-        {make_tensor({1, 1, 6}, {320, 320, 180, 80, 0.92F, 0.25F})},
+        {make_tensor({1, 1, 7}, {320, 320, 180, 80, 0.92F, 0.08F, 0.25F})},
         config,
         meta);
   } else if (task == "obb_rockchip") {
-    std::vector<float> head(65, -20.0F);
+    std::vector<float> head(66, -20.0F);
     // 64 个 DFL 通道 + 1 个类别通道，单个 1x1 网格。
     // DFL 每个 side 的第 5 个 bin 最高，得到较稳定的旋转框宽高。
     for (int side = 0; side < 4; ++side) {
       head[side * 16 + 5] = 20.0F;
     }
     head[64] = 20.0F;
+    head[65] = -20.0F;
     std::vector<float> angle(3, 0.5F);
     result = visionops::runtime::postprocess_obb(
         {
-            make_tensor({1, 65, 1, 1}, head),
-            make_tensor({1, 65, 1, 1}, head),
-            make_tensor({1, 65, 1, 1}, head),
+            make_tensor({1, 66, 1, 1}, head),
+            make_tensor({1, 66, 1, 1}, head),
+            make_tensor({1, 66, 1, 1}, head),
             make_tensor({1, 1, 3}, angle),
         },
         config,
@@ -109,7 +112,7 @@ int main(int argc, char* argv[]) {
   } else if (task == "segmentation") {
     result = visionops::runtime::postprocess_segmentation(
         {
-            make_tensor({1, 1, 7}, {320, 320, 180, 120, 0.93F, 1.0F, -1.0F}),
+            make_tensor({1, 1, 8}, {320, 320, 180, 120, 0.93F, 0.07F, 1.0F, -1.0F}),
             make_tensor({1, 2, 2, 2}, {1, 0, 0, 1, 0, 1, 1, 0}),
         },
         config,

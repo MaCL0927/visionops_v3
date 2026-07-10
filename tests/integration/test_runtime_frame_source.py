@@ -1,4 +1,4 @@
-"""Runtime M10 帧源接口的无真实相机集成测试。"""
+"""Runtime 帧源接口的无真实相机集成测试。"""
 
 from __future__ import annotations
 
@@ -38,24 +38,8 @@ def _request_json(url: str, method: str = "GET") -> tuple[int, dict]:
 
 
 @pytest.fixture(scope="session")
-def runtime_frame_source_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    build_dir = tmp_path_factory.mktemp("runtime-frame-source-build")
-    subprocess.run(
-        ["cmake", "-S", str(PROJECT_ROOT), "-B", str(build_dir)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(
-        ["cmake", "--build", str(build_dir), "-j4", "--target", "visionops_runtime_mock"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    binary = build_dir / "edge/runtime_cpp/visionops_runtime_mock"
-    assert binary.is_file()
-    return binary
-
+def runtime_frame_source_binary(shared_runtime_binary: Path) -> Path:
+    return shared_runtime_binary
 
 @contextmanager
 def _running_runtime(binary: Path, extra_args: list[str] | None = None):

@@ -25,9 +25,7 @@ class HoldingRegisterBank:
 
     def __init__(self, definitions: Iterable[RegisterDefinition] | None = None) -> None:
         if definitions is None:
-            from edge.gateway_adapter.register_map import DEFAULT_REGISTER_MAP
-
-            definitions = DEFAULT_REGISTER_MAP
+            raise ValueError("寄存器定义不能为空；请由具体生产协议显式传入")
         ordered = sorted(definitions, key=lambda item: item.address)
         if not ordered:
             raise ValueError("寄存器定义不能为空")

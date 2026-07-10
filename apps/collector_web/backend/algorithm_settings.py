@@ -1,6 +1,6 @@
 """Collector Web 算法设置读写。
 
-M15.1 规则：
+算法设置规则：
 - 模型包固定为 models/<model_dir>/model.rknn + model.yaml。
 - model.yaml 是算法阈值的唯一写入目标。
 - 只写当前模型 YAML 中与 Runtime 已支持的公共阈值：score/conf 与 nms。

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""用于 M5 验证的最小 Modbus TCP 测试客户端。"""
+"""最小 Modbus-TCP FC03/FC06/FC16 测试客户端。"""
 
 from __future__ import annotations
 

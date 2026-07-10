@@ -1,81 +1,103 @@
-# 本地环境与密钥
+# -----------------------------------------------------------------------------
+# Local environment, secrets and device-private configuration
+# -----------------------------------------------------------------------------
 .env
 .env.*
-!.env.example
+*.env
+!*.env.example
+!**/*.env.example
+secrets/
 *.pem
 *.key
 *.p12
-secrets/
+*.crt
 
+# -----------------------------------------------------------------------------
 # Python
+# -----------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
+*$py.class
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 .venv/
 venv/
+env/
 
-# C/C++ 构建产物
+# -----------------------------------------------------------------------------
+# C / C++ build outputs
+# -----------------------------------------------------------------------------
 build/
-build-rknn/
-bin/
+build-*/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
+cmake_install.cmake
 compile_commands.json
 *.o
+*.obj
 *.a
 *.so
+*.so.*
 *.out
+bin/
 
-
-# 服务端运行数据（仅保留目录占位）
-server_data/*
-!server_data/.gitkeep
-!server_data/batches/
-server_data/batches/*
-!server_data/batches/.gitkeep
-!server_data/datasets/
-server_data/datasets/*
-!server_data/datasets/.gitkeep
-!server_data/jobs/
-server_data/jobs/*
-!server_data/jobs/.gitkeep
-!server_data/model_packages/
-server_data/model_packages/*
-!server_data/model_packages/.gitkeep
-!server_data/registry/
-server_data/registry/*
-!server_data/registry/.gitkeep
-published_models/
-
-# 模型、训练结果与运行时制品
+# -----------------------------------------------------------------------------
+# Models, training outputs and generated packages
+# -----------------------------------------------------------------------------
+/models/**
+!/models/README.md
 *.pt
 *.pth
 *.onnx
 *.rknn
 *.engine
 *.weights
-models/
 runs/
 mlruns/
 artifacts/
 checkpoints/
+training/export/generated/
+published_models/
 
-# 数据集、采集文件与媒体
-data/
-datasets/
+# -----------------------------------------------------------------------------
+# Runtime data, datasets and debug outputs
+# -----------------------------------------------------------------------------
+/server_data/**
+!/server_data/.gitkeep
+/var/
+/data/
+/datasets/
+logs/
+Log/
+diagnostics/
+**/latest/
+**/debug_output/
+
+# Generated runtime configuration
+/configs/runtime/generated/
+/configs/runtime/*.env
+*.env.bak*
+*.bak
+*.tmp
+
+# -----------------------------------------------------------------------------
+# Media and large local artifacts
+# -----------------------------------------------------------------------------
 *.jpg
 *.jpeg
 *.png
 *.bmp
 *.webp
+*.tif
+*.tiff
 *.mp4
 *.avi
 *.mkv
-
-# 压缩包、日志与诊断包
+*.mov
 *.zip
 *.tar
 *.tar.gz
@@ -83,33 +105,18 @@ datasets/
 *.tar.xz
 *.7z
 *.log
-logs/
-diagnostics/
 
-# 生成的运行时配置
-config/
-configs/runtime/*.env
-configs/runtime/generated/
-*.env.bak*
-*.bak
-Log/
+# Keep versioned calibration assets even when their extensions are ignored.
+!/production/**/assets/*.png
+!/production/**/assets/*.jpg
 
-# 编辑器与系统文件
+# -----------------------------------------------------------------------------
+# Editors and operating systems
+# -----------------------------------------------------------------------------
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
 .DS_Store
 Thumbs.db
-
-# 重新允许服务端占位目录被纳入仓库（覆盖通用 datasets/ 等规则）
-!server_data/
-!server_data/.gitkeep
-!server_data/batches/
-!server_data/batches/.gitkeep
-!server_data/datasets/
-!server_data/datasets/.gitkeep
-!server_data/jobs/
-!server_data/jobs/.gitkeep
-!server_data/model_packages/
-!server_data/model_packages/.gitkeep
-!server_data/registry/
-!server_data/registry/.gitkeep

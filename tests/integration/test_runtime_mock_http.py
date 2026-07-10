@@ -102,24 +102,8 @@ def _running_runtime(binary: Path, task_type: str, extra_args: list[str] | None 
 
 
 @pytest.fixture(scope="session")
-def runtime_mock_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    build_dir = tmp_path_factory.mktemp("runtime-mock-build")
-    subprocess.run(
-        ["cmake", "-S", str(PROJECT_ROOT), "-B", str(build_dir)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(
-        ["cmake", "--build", str(build_dir), "-j4", "--target", "visionops_runtime_mock"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    binary = build_dir / "edge/runtime_cpp/visionops_runtime_mock"
-    assert binary.is_file()
-    return binary
-
+def runtime_mock_binary(shared_runtime_binary: Path) -> Path:
+    return shared_runtime_binary
 
 @pytest.fixture
 def runtime_server(runtime_mock_binary: Path):

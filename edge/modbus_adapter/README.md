@@ -1,27 +1,16 @@
-# Modbus TCP Mock
+# Modbus Adapter
 
-`edge/modbus_adapter/` 提供 M5 阶段的内存 Holding Register Bank、最小 Modbus TCP Server 和测试客户端。该实现不连接真实 PLC，不支持 Modbus RTU，不用于生产现场。
+该目录提供可复用的：
 
-## 协议范围
+- 线程安全 Holding Register Bank；
+- Modbus-TCP FC03 / FC06 / FC16 Server；
+- 独立测试客户端。
 
-- 默认监听 `0.0.0.0:1502`，避免使用需特权的标准端口 `502`。
-- 支持 FC03 Read Holding Registers。
-- 支持 FC06 Write Single Register。
-- 支持 FC16 Write Multiple Registers。
-- 接受任意 Unit ID，数据只存在于进程内存。
-- 非法 function code、地址或参数返回 Modbus exception。
+通用适配层不提供默认寄存器表。每条生产线必须显式传入自己的 `RegisterDefinition`，避免不同任务共享隐式地址。
 
-寄存器值严格限制为 `0..65535`。浮点业务值必须根据 register definition 的 `scale` 转换为整数后写入，不直接把浮点数放入单个 Holding Register。
+当前生产使用方：
 
-## 测试客户端
-
-```bash
-python -m edge.modbus_adapter.modbus_test_client \
-  --host 127.0.0.1 \
-  --port 1502 \
-  --read-start 0 \
-  --read-count 20 \
-  --print-registers
+```text
+production/carton_line/gateway/register_bank.py
+production/carton_line/gateway/service.py
 ```
-
-默认 register map 只表达心跳、序号、决策、几何、耗时和 ID 摘要，不传输图片或大块 JSON。专用现场映射应由 Gateway app 层以独立契约扩展。

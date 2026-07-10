@@ -1,1 +1,1 @@
-"""VisionOps v3 Modbus TCP Mock。"""
+"""Reusable Holding Register and Modbus-TCP server components."""

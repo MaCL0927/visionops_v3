@@ -1,0 +1,16 @@
+[Unit]
+Description=VisionOps v3 Carton Line - Partition Web
+After=network-online.target visionops-v3-runtime-partition.service visionops-v3-robot-gateway.service
+Wants=network-online.target visionops-v3-runtime-partition.service visionops-v3-robot-gateway.service
+
+[Service]
+Type=simple
+User=neardi
+WorkingDirectory=/opt/visionops_v3
+EnvironmentFile=-/etc/visionops_v3/carton_line.env
+ExecStart=/opt/visionops_v3/production/carton_line/scripts/start_collector.sh partition
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

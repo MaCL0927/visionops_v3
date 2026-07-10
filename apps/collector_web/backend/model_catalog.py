@@ -1,6 +1,6 @@
 """Collector Web 模型目录扫描与受控选择。
 
-M15 模型包规则固定为：
+模型包规则固定为：
 
     models/<model_dir>/model.rknn
     models/<model_dir>/model.yaml
@@ -52,7 +52,7 @@ class ModelCatalogItem:
             "input_size": self.input_size,
             "rknn_file": self.rknn_file,
             "yaml_file": self.yaml_file,
-            # M15 后不再要求 labels.txt；保留字段是为了前端/旧测试不会因缺字段报错。
+            # 标准模型包不再要求 labels.txt；保留字段是为了兼容已有前端与测试。
             "labels_file": self.labels_file,
             "rknn_size_bytes": self.rknn_size_bytes,
             "labels_count": self.labels_count,

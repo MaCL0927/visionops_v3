@@ -29,15 +29,8 @@ def _json(url: str, method: str = "GET") -> dict:
 
 
 @pytest.fixture(scope="session")
-def rknn_error_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    build_dir = tmp_path_factory.mktemp("runtime-rknn-error-build")
-    subprocess.run(["cmake", "-S", str(PROJECT_ROOT), "-B", str(build_dir)], check=True)
-    subprocess.run(
-        ["cmake", "--build", str(build_dir), "-j4", "--target", "visionops_runtime_mock"],
-        check=True,
-    )
-    return build_dir / "edge/runtime_cpp/visionops_runtime_mock"
-
+def rknn_error_binary(shared_runtime_binary: Path) -> Path:
+    return shared_runtime_binary
 
 @contextmanager
 def _runtime(binary: Path, arguments: list[str]):

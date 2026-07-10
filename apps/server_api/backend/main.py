@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
-import shutil
 import signal
 import subprocess
 import tempfile
@@ -37,8 +36,6 @@ class VisionOpsServer(ThreadingHTTPServer):
         super().__init__((config.host, config.port), ServerRequestHandler)
         self.config = config
         self.started_at = time.monotonic()
-        self._system_stats_cache: dict[str, Any] = {}
-        self._system_stats_cache_at = 0.0
         self.batch_service = BatchService(config.batches_root, config.allowed_task_types, incoming_root=config.incoming_packages_root)
         self.dataset_service = DatasetService(config.datasets_root, self.batch_service)
         self.model_package_service = ModelPackageService(config.model_packages_root, config.publish_root)
@@ -459,130 +456,10 @@ class ServerRequestHandler(BaseHTTPRequestHandler):
                     "publish_root": str(config.publish_root) if config.publish_root else None,
                     "mlflow_uri": config.mlflow_uri,
                     "allowed_task_types": list(config.allowed_task_types),
-                    "system_stats": self._system_stats(),
                     "time_ms": int(time.time() * 1000),
                 },
             ),
         )
-
-    def _system_stats(self) -> dict[str, Any]:
-        """Return lightweight host/system usage stats for the server dashboard.
-
-        Directory-size scanning can be expensive when server_data/models are large,
-        so the result is cached for a short interval.
-        """
-        now = time.monotonic()
-        if self.server._system_stats_cache and now - self.server._system_stats_cache_at < 10.0:
-            return dict(self.server._system_stats_cache)
-        config = self.server.config
-        project_root = Path(__file__).resolve().parents[3]
-        stats = {
-            "project_root": str(project_root),
-            "visionops_size_bytes": self._directory_size(project_root),
-            "disk": self._disk_stats(project_root),
-            "memory": self._memory_stats(),
-            "cpu": self._cpu_stats(),
-            "gpu": self._gpu_stats(),
-            "data_root": str(config.data_root),
-            "publish_root": str(config.publish_root) if config.publish_root else "",
-        }
-        self.server._system_stats_cache = dict(stats)
-        self.server._system_stats_cache_at = now
-        return stats
-
-    def _directory_size(self, root: Path) -> int:
-        total = 0
-        try:
-            for current, dirs, files in os.walk(root):
-                # Avoid double-counting or wasting time on git/cache metadata.
-                dirs[:] = [d for d in dirs if d not in {".git", "__pycache__", ".pytest_cache"}]
-                for name in files:
-                    try:
-                        path = Path(current) / name
-                        if not path.is_symlink():
-                            total += path.stat().st_size
-                    except OSError:
-                        continue
-        except OSError:
-            return 0
-        return int(total)
-
-    def _disk_stats(self, path: Path) -> dict[str, Any]:
-        try:
-            usage = shutil.disk_usage(path)
-            return {
-                "total_bytes": int(usage.total),
-                "used_bytes": int(usage.used),
-                "free_bytes": int(usage.free),
-                "percent": round(usage.used * 100.0 / usage.total, 1) if usage.total else None,
-            }
-        except OSError:
-            return {"total_bytes": 0, "used_bytes": 0, "free_bytes": 0, "percent": None}
-
-    def _memory_stats(self) -> dict[str, Any]:
-        try:
-            import psutil  # type: ignore
-
-            mem = psutil.virtual_memory()
-            return {"total_bytes": int(mem.total), "used_bytes": int(mem.used), "available_bytes": int(mem.available), "percent": float(mem.percent)}
-        except Exception:
-            return self._memory_stats_proc()
-
-    def _memory_stats_proc(self) -> dict[str, Any]:
-        values: dict[str, int] = {}
-        try:
-            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
-                key, raw = line.split(":", 1)
-                parts = raw.strip().split()
-                if parts:
-                    values[key] = int(parts[0]) * 1024
-        except Exception:
-            return {"total_bytes": 0, "used_bytes": 0, "available_bytes": 0, "percent": None}
-        total = values.get("MemTotal", 0)
-        available = values.get("MemAvailable", 0)
-        used = max(0, total - available)
-        percent = round(used * 100.0 / total, 1) if total else None
-        return {"total_bytes": total, "used_bytes": used, "available_bytes": available, "percent": percent}
-
-    def _cpu_stats(self) -> dict[str, Any]:
-        try:
-            import psutil  # type: ignore
-
-            return {"percent": float(psutil.cpu_percent(interval=0.0)), "count": int(psutil.cpu_count() or 0)}
-        except Exception:
-            try:
-                load1, load5, load15 = os.getloadavg()
-                count = os.cpu_count() or 1
-                return {"percent": round(min(100.0, load1 * 100.0 / count), 1), "load1": load1, "load5": load5, "load15": load15, "count": count}
-            except Exception:
-                return {"percent": None, "count": os.cpu_count() or 0}
-
-    def _gpu_stats(self) -> dict[str, Any]:
-        # NVIDIA desktop/server GPUs.  On machines without nvidia-smi this stays unknown.
-        try:
-            proc = subprocess.run(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=utilization.gpu,memory.used,memory.total",
-                    "--format=csv,noheader,nounits",
-                ],
-                text=True,
-                capture_output=True,
-                timeout=2,
-            )
-            if proc.returncode != 0 or not proc.stdout.strip():
-                return {"available": False, "percent": None}
-            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-            values = []
-            for line in lines:
-                parts = [x.strip() for x in line.split(",")]
-                if len(parts) >= 3:
-                    values.append({"percent": float(parts[0]), "memory_used_mb": float(parts[1]), "memory_total_mb": float(parts[2])})
-            if not values:
-                return {"available": False, "percent": None}
-            return {"available": True, "percent": max(item["percent"] for item in values), "gpus": values}
-        except Exception:
-            return {"available": False, "percent": None}
 
     def _serve_static(self, request_path: str) -> None:
         relative = request_path[len("/static/"):]

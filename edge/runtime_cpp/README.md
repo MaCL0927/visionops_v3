@@ -2,7 +2,7 @@
 
 > 总体项目入口请优先阅读仓库根目录 `README.md`。本文档聚焦 Runtime 的构建、启动、模型包与 HTTP API。
 
-本目录已经不只是早期 M3 的 HTTP Mock。当前 Runtime 已进入 `RK3576 / LB3576` 真机联调阶段，支持：
+本目录已从早期 HTTP Mock 演进为可在 `RK3576 / LB3576` 上运行的 Runtime，支持：
 
 - `mock` backend：用于 x86 开发、接口契约验证和无硬件环境调试。
 - `rknn` backend：用于 RK3576 / RK3588 上的真实模型加载、RKNN 推理与标准 `inference_result` 输出。
@@ -56,7 +56,7 @@ cmake --build build-rknn -j4
 - `VISIONOPS_ENABLE_RKNN=ON` 时才编译真实 RKNN Runner。
 - `VISIONOPS_ENABLE_OPENCV=ON` 后，HP60C JPEG 可解码为 `RGB888` 进入 RKNN 推理。
 
-## RGA 预处理与 M13.1 优化
+## RGA 预处理与性能优化
 
 当前 Runtime 已接入：
 
@@ -161,7 +161,7 @@ MODEL_DIR=/opt/visionops_v3/models/test_rknn_model
 
 支持读取：
 
-- `--model-dir <path>`：M15 标准模型目录，目录内必须包含 `model.rknn` 和 `model.yaml`。
+- `--model-dir <path>`：标准模型目录，目录内必须包含 `model.rknn` 和 `model.yaml`。
 
 `loaded_model` 与 `inference_result.model` 会优先使用模型包中的：
 
@@ -218,7 +218,7 @@ OBB RKNN split-DFL 后处理现在不再写死 640 输入或固定 8400 candidat
 
 其中 `33600 = 160*160 + 80*80 + 40*40`。如果 head 比 `64 + labels_count` 多 1 个辅助通道，后处理会使用配置中的类别通道并忽略额外辅助通道，避免误判为不支持。
 
-## M13 耗时字段说明
+## 耗时字段说明
 
 `POST /api/runtime/infer_once` 当前会返回两组耗时信息。
 

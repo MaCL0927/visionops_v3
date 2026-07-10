@@ -593,7 +593,7 @@ RuntimeApiResult RuntimeApp::switch_model(const std::string& request_body) {
             config_.device_id,
             config_.component,
             "MODEL_SWITCH_FAILED",
-            "新模型包不是 M15 标准模型目录，必须包含 model.rknn 和 model.yaml",
+            "新模型包不是标准模型目录，必须包含 model.rknn 和 model.yaml",
             true),
     };
   }

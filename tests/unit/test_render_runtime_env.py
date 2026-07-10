@@ -15,10 +15,7 @@ EDGE_FILES = [
     PROJECT_ROOT / "configs/edge/rk3576.example.yaml",
 ]
 TASK_FILE = PROJECT_ROOT / "configs/task/roi_classification.example.yaml"
-APP_FILES = [
-    PROJECT_ROOT / "configs/app/collector.example.yaml",
-    PROJECT_ROOT / "configs/app/gateway_modbus.example.yaml",
-]
+APP_FILES = [PROJECT_ROOT / "configs/app/collector.example.yaml"]
 
 
 def test_rendered_env_contains_metadata_and_key_values(tmp_path: Path) -> None:

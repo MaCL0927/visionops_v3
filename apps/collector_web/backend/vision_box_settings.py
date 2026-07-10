@@ -1,6 +1,6 @@
 """VisionOps v3 视觉盒子设置读写。
 
-M16 约定：
+视觉盒子设置约定：
 - 启动命令固定的 URL、Device ID、端口和目录只展示，不从 Web 修改。
 - Web 可修改默认启动模式、状态刷新 FPS、磁盘告警阈值和服务端上传配置。
 - 配置持久化到 /opt/visionops_v3/config/vision_box_settings.json，可通过环境变量覆盖。

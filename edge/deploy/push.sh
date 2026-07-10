@@ -50,7 +50,8 @@ usage() {
   edge/
   interfaces/
   configs/
-  deploy/
+  production/
+  scripts/
   tools/
   README.md
   AGENTS.md
@@ -172,7 +173,8 @@ SYNC_ITEMS=(
   "edge"
   "interfaces"
   "configs"
-  "deploy"
+  "production"
+  "scripts"
   "tools"
   "README.md"
   "AGENTS.md"
@@ -181,7 +183,7 @@ SYNC_ITEMS=(
 )
 
 if [[ "${SYNC_DOCS}" == "true" ]]; then
-  SYNC_ITEMS+=("docs/architecture" "docs/handoff" "docs/migration")
+  SYNC_ITEMS+=("docs/architecture" "docs/migration")
 fi
 
 log_info "本次同步内容："

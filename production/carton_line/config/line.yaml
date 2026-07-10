@@ -1,0 +1,163 @@
+schema_version: "1.0"
+kind: production_line
+line_id: carton_line
+device_id: lb3576-production
+component: carton_line_gateway
+
+service:
+  listen_host: 127.0.0.1
+  listen_port: 19090
+  partition_app_port: 19120
+  tube_app_port: 19110
+  poll_interval_ms: 50
+  request_timeout_ms: 5000
+
+modbus:
+  enabled: true
+  host: 0.0.0.0
+  port: 5046
+  unit_id: 1
+  single_slave: true
+  address_base: 0
+  register_count: 200
+  heartbeat_interval_ms: 500
+  heartbeat_max: 1000
+
+camera_bridge:
+  base_url: http://127.0.0.1:18182
+  snapshot_path: /stream/snapshot.jpg
+  health_path: /health
+  depth_url: http://127.0.0.1:18182/stream/depth.png
+
+runtimes:
+  partition:
+    url: http://127.0.0.1:28081
+    model_dir: models/carton_partition_check/current
+    device_id: lb3576-partition
+    component: rknn_runtime_partition
+    accepted_task_types: [detection, detect]
+    accepted_model_ids: []
+    accepted_model_names: []
+  tube:
+    url: http://127.0.0.1:28082
+    model_dir: models/carton_tube_check/current
+    device_id: lb3576-tube
+    component: rknn_runtime_tube
+    accepted_task_types: [obb, obb_detection]
+    accepted_model_ids: []
+    accepted_model_names: []
+
+collectors:
+  partition:
+    listen_host: 0.0.0.0
+    listen_port: 18091
+    device_id: lb3576-partition
+    component: collector_partition
+    models_root: models/carton_partition_check
+    snapshot_refresh_interval_ms: 200
+    status_refresh_interval_ms: 2000
+  tube:
+    listen_host: 0.0.0.0
+    listen_port: 18092
+    device_id: lb3576-tube
+    component: collector_tube
+    models_root: models/carton_tube_check
+    snapshot_refresh_interval_ms: 200
+    status_refresh_interval_ms: 2000
+
+partition:
+  template_path: production/carton_line/tasks/carton_partition_check/assets/partition_template.json
+  algorithm:
+    class_ids: [0]
+    class_names: [cell, paper_cell]
+    min_confidence: 0.50
+    nms_iou: 0.30
+    expected_rows: 5
+    expected_cols: 8
+    expected_count: 40
+    strict_count: true
+    thresholds:
+      max_mean_center_error_px: 22.0
+      max_p95_center_error_px: 38.0
+      max_center_error_px: 24.0
+      max_edge_cell_error_px: 20.0
+      max_row_angle_diff_max_deg: 1.0
+      max_row_angle_std_diff_deg: 0.70
+      max_grid_center_offset_px: 35.0
+      max_row_angle_diff_deg: 5.0
+      max_col_angle_diff_deg: 5.0
+      max_affine_rotation_deg: 5.0
+      max_affine_shear: 0.18
+    size_check:
+      enabled: false
+      min_ratio: 0.55
+      max_ratio: 1.80
+      max_bad_count: 6
+
+tube:
+  algorithm:
+    stand_class_ids: [0]
+    lying_class_ids: [1]
+    stand_names: [stand]
+    lying_names: [lying]
+    min_confidence: 0.80
+    min_stand_count:
+      default: 1
+      left: 1
+      right: 1
+      all: 1
+    grid:
+      rows: 5
+      cols: 8
+      slot_order: col_major
+      left_col_start: 0
+      left_col_end: 3
+      right_col_start: 4
+      right_col_end: 7
+      region_split_x: 0
+    depth:
+      roi_radius_px: 12
+      percentile: 50
+      min_valid_pixels: 30
+      min_depth_mm: 100
+      max_depth_mm: 3000
+      normal_depth_mm: 0
+      baseline_mode: row_median
+      height_threshold_mm: 30
+
+coordinates:
+  output_frame: robot
+  register_order: column
+  always_ok: true
+  partial_update_enabled: true
+  partial_match_max_distance_px: 22.0
+  partial_min_confidence: 0.10
+  template_path: production/carton_line/tasks/carton_partition_check/assets/partition_template.json
+  dual_arm_enabled: true
+  left_columns: [0, 3]
+  right_columns: [4, 7]
+  single_affine:
+    a00: 1.0
+    a01: 0.0
+    a10: 0.0
+    a11: 1.0
+    b0: 0.0
+    b1: 0.0
+  left_affine:
+    a00: 0.02143055
+    a01: -1.49495102
+    a10: -1.47967273
+    a11: -0.00292085
+    b0: 946.29821487
+    b1: 994.16131507
+  right_affine:
+    a00: 0.00178128555
+    a01: -1.50294475
+    a10: -1.48032737
+    a11: 0.000000792093091
+    b0: 966.00553481
+    b1: 994.4879298
+
+debug:
+  save_every_trigger: true
+  save_root: /var/lib/visionops_v3/carton_line/latest

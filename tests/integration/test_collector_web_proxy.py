@@ -112,22 +112,8 @@ def _managed_process(command: list[str]):
 
 
 @pytest.fixture(scope="session")
-def runtime_mock_binary_for_collector(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    build_dir = tmp_path_factory.mktemp("collector-runtime-build")
-    subprocess.run(
-        ["cmake", "-S", str(PROJECT_ROOT), "-B", str(build_dir)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(
-        ["cmake", "--build", str(build_dir), "-j4", "--target", "visionops_runtime_mock"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return build_dir / "edge/runtime_cpp/visionops_runtime_mock"
-
+def runtime_mock_binary_for_collector(shared_runtime_binary: Path) -> Path:
+    return shared_runtime_binary
 
 def _collector_command(
     port: int,
@@ -291,51 +277,6 @@ def test_collector_proxies_runtime_mock(
             assert status == 200
             assert combined["runtime"]["reachable"] is True
             assert combined["runtime"]["health"] == "ok"
-
-
-def test_collector_proxies_gateway_registers() -> None:
-    collector_port = _free_port()
-    gateway_port = _free_port()
-    gateway_modbus_port = _free_port()
-    unavailable_runtime_port = _free_port()
-    unavailable_app_port = _free_port()
-    gateway_command = [
-        sys.executable,
-        "-m",
-        "edge.gateway_adapter.gateway_mock_service",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        str(gateway_port),
-        "--upstream-url",
-        f"http://127.0.0.1:{unavailable_runtime_port}",
-        "--upstream-kind",
-        "runtime",
-        "--modbus-host",
-        "127.0.0.1",
-        "--modbus-port",
-        str(gateway_modbus_port),
-        "--poll-interval-ms",
-        "5000",
-    ]
-    collector_url = f"http://127.0.0.1:{collector_port}"
-    with _managed_process(gateway_command) as gateway:
-        _wait_for_health(gateway, f"http://127.0.0.1:{gateway_port}/health")
-        command = _collector_command(
-            collector_port,
-            f"http://127.0.0.1:{unavailable_runtime_port}",
-            f"http://127.0.0.1:{gateway_port}",
-            f"http://127.0.0.1:{unavailable_app_port}",
-        )
-        with _managed_process(command) as collector:
-            _wait_for_health(collector, f"{collector_url}/health")
-            status, gateway_status = _request_json(f"{collector_url}/api/gateway/status")
-            assert status == 200
-            assert gateway_status["message_type"] == "gateway_status"
-            status, registers = _request_json(f"{collector_url}/api/gateway/registers")
-            assert status == 200
-            assert registers["message_type"] == "holding_register_snapshot"
-            assert len(registers["registers"]) == 20
 
 
 def test_collector_lists_models_and_rejects_arbitrary_switch_path(

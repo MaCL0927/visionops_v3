@@ -1,4 +1,4 @@
-"""Collector Web 的 M1 YAML 与命令行配置加载。"""
+"""Collector Web 的 YAML 与命令行配置加载。"""
 
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ def _load_yaml(path: str | None) -> dict:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="VisionOps v3 Collector Web 后端")
-    parser.add_argument("--config", help="M1 Collector app YAML 配置")
+    parser.add_argument("--config", help="Collector app YAML 配置")
     parser.add_argument("--host", help="监听地址，默认 0.0.0.0")
     parser.add_argument("--port", type=_port, help="监听端口，默认 8090")
     parser.add_argument(

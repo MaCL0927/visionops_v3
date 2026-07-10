@@ -27,19 +27,6 @@ function formatTime(ms) {
   if (!ms) return '-';
   try { return new Date(Number(ms)).toLocaleString(); } catch { return '-'; }
 }
-function formatBytes(bytes) {
-  const value = Number(bytes || 0);
-  if (!Number.isFinite(value) || value <= 0) return '-';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let current = value;
-  let index = 0;
-  while (current >= 1024 && index < units.length - 1) { current /= 1024; index += 1; }
-  return `${current.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
-}
-function formatPercent(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? `${n.toFixed(1)}%` : '-';
-}
 function badgeClass(status) {
   if (['ok', 'ready', 'success', 'accepted', 'connect', 'connected', 'synced'].includes(status)) return '';
   if (['failed', 'rejected', 'error', 'fail', 'sync_failed'].includes(status)) return 'danger';
@@ -113,27 +100,9 @@ function renderStatus() {
     badge.className = 'badge ' + (h.status === 'ok' ? '' : 'danger');
   }
   if ($('mlflowLink')) $('mlflowLink').href = h.mlflow_uri || '#';
-  renderSystemStats(h.system_stats || {});
   if ($('publishRootInput') && !$('publishRootInput').dataset.touched && !$('publishRootInput').value && h.publish_root) {
     $('publishRootInput').placeholder = h.publish_root;
   }
-}
-
-function renderSystemStats(stats) {
-  const root = $('systemStats');
-  if (!root) return;
-  const disk = stats.disk || {};
-  const memory = stats.memory || {};
-  const cpu = stats.cpu || {};
-  const gpu = stats.gpu || {};
-  const gpuText = gpu.available ? formatPercent(gpu.percent) : 'N/A';
-  root.innerHTML = `
-    <span title="visionops_v3 目录占用">VisionOps ${formatBytes(stats.visionops_size_bytes)}</span>
-    <span title="当前分区磁盘使用率">磁盘 ${formatPercent(disk.percent)}</span>
-    <span title="内存使用率">内存 ${formatPercent(memory.percent)}</span>
-    <span title="CPU 使用率">CPU ${formatPercent(cpu.percent)}</span>
-    <span title="GPU 使用率">GPU ${gpuText}</span>
-  `;
 }
 
 function renderIncomingPackages() {

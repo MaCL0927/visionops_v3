@@ -1,157 +1,34 @@
 # 从 VisionOps v2 迁移到 v3
 
-## 1. 迁移目标
+## 1. 原则
 
-迁移的目标是保留已经验证的业务能力和现场经验，同时摆脱 v2 的历史目录、隐式耦合、本机路径和重复运行链路。v3 不追求源码级兼容，也不以“先全部搬过来再整理”为策略。
+1. 按能力迁移，不按旧目录复制。
+2. C++ Runtime、Collector、Camera Bridge 和 Modbus 基础库保持平台通用。
+3. 现场算法、PLC 协议和标定参数放入 `production/<line_id>/`。
+4. 不保留无调用方脚本、一次性调试入口、旧服务副本和历史 `.env`。
+5. 模型、数据、日志和设备私密配置不进入仓库。
 
-## 2. 核心原则
+## 2. 当前纸箱产线迁移结果
 
-1. **按能力迁移，不按目录迁移。** 每项能力先定义输入、输出、依赖和验收标准，再决定是否重新实现。
-2. **只迁移必要模块。** 没有明确调用方、现场价值或验收方式的代码不进入 v3。
-3. **默认重新实现。** 可以参考 v2 的算法和故障经验，但不直接复制大文件或整个模块。
-4. **接口先行。** 跨语言、跨进程能力先在 `interfaces/` 定义契约。
-5. **一次只迁移一条可验证能力。** 每次迁移都应能独立测试、部署和回滚。
-6. **配置重新建模。** 不继承 v2 的绝对路径、默认凭据、混合命名和隐式覆盖规则。
-7. **制品不迁入 Git。** 模型、数据、日志、压缩包和设备私密配置留在外部存储。
+v2 中经现场验证的能力已按职责拆分：
 
-## 3. 优先迁移能力
+- 小方格模板判断 -> `production/carton_line/tasks/carton_partition_check/`；
+- 纸筒 RGB-Depth 高度判断 -> `production/carton_line/tasks/carton_tube_check/`；
+- PLC 触发、统一寄存器和双任务调度 -> `production/carton_line/gateway/`；
+- 阈值、端口和坐标参数 -> `production/carton_line/config/line.yaml`；
+- systemd 和启动脚本 -> `production/carton_line/deploy/`、`scripts/`。
 
-建议按以下顺序评估和迁移：
+没有迁移 v2 的旧 Web、旧 Python 推理主链路、重复 Modbus Server 或散落的网络请求代码。
 
-1. 标准化接口和模型包清单。
-2. C++ Camera Bridge 的最小稳定取流能力。
-3. C++ RKNN Runtime 的单模型加载、推理、后处理和指标。
-4. Collector Web 的状态、配置和单帧验证能力。
-5. Gateway 与 Modbus/PLC 的标准化结果适配。
-6. 模型部署、切换、健康检查和回滚。
-7. 服务端数据接收、标注审核和训练流水线。
-8. 多任务、双模型或复杂 ROI 等扩展能力。
+## 3. 后续迁移要求
 
-顺序可以根据现场项目调整，但不得先迁移大而全的旧控制台来反向决定底层接口。
+新增业务时必须先明确：
 
-## 4. 明确不作为 v3 主链路的旧实现
+- 标准 Runtime 输出；
+- 任务算法输入输出；
+- PLC 触发和寄存器；
+- 模型目录和类别映射；
+- 相机与深度依赖；
+- 可重复的测试样例和真机验收方式。
 
-以下内容先进入 `docs/legacy_notes/`，仅记录背景、已知问题和可复用经验：
-
-- 旧 Python camera 链路。
-- 旧 Python RKNN 推理链路。
-- 旧 ROS1 bridge。
-
-它们不得成为 v3 默认服务、生产依赖或回退主链路。若未来确有兼容需求，应作为独立适配项目提出，说明生命周期和退出计划。
-
-旧 Collector/Web 代码同样不按页面或目录整体迁移。v3 Collector 应根据标准 Runtime HTTP 契约重新实现，并遵守：
-
-- 只承担配置、状态、低频预览、诊断和 Runtime 代理。
-- 不直接连接相机，不复用旧 Python camera 链路。
-- 不加载模型，不复用旧 Python RKNN 推理链路。
-- 前端只访问 Collector，不直接访问 Runtime 或设备内部其他端口。
-- Runtime Mock 仅作为真实 C++ RKNN Runtime 的接口替身，迁移验收不能把 Mock 当作硬件推理结论。
-
-M7 已按 v3 边界重建 Capture、Validate 和 Production 三个核心 Web 页面。迁移仅参考 v2 的页签位置、预览工作区和状态展示意图，没有复制旧巨型 `app.js`、旧相机请求、旧模型加载或旧业务判断。
-
-M7.1 进一步确认：旧版的界面结构和现场用词属于可保留的用户习惯。v3 恢复“校验、采集上传、模型验证、设置、切换生产模式”顶部导航，并参考左侧步骤、大预览区和状态卡片布局。但所有 JavaScript 按 ES modules 重新实现，不复制 v2 `app.js`。
-
-迁移时必须把“界面习惯”与“旧数据通路”分开：可以保留按钮名称、页面层级和工位操作顺序；不得恢复浏览器直连相机/Runtime/Gateway、Python 推理、前端业务判断或旧配置写入方式。
-
-后续 Web 功能迁移必须继续遵守：页面经 Collector 后端访问 Runtime/Gateway/App；推理留在 C++ Runtime；纸筒、隔板等决策留在 Gateway app 层；不得因为前端便利而重新引入跨端口直连。
-
-M8 对 v3 C++ Runtime 做的是内部结构拆分，不是把 v2 `edge/inference_cpp/src/main.cpp` 搬入新仓库。v2 入口文件只可用于识别取流、预处理、RKNN、后处理、状态和服务控制等功能边界，不得原样复制其控制流、硬编码路径或设备依赖。
-
-M8 已固定以下迁移落点：
-
-1. `main.cpp` 保持薄入口，不维护 Frame ID、Result ID、计数器或业务 JSON。
-2. 真实 RKNN 能力在后续 M9.2 进入 `rknn_runner`，并通过标准后处理输出 M2 `inference_result`。
-3. 真实相机能力在后续 M10 进入 `stream_worker`，不让 HTTP 层直接读设备。
-4. `RuntimeApp` 负责能力编排，`RuntimeState` 负责线程安全状态，`HttpServer` 只负责协议。
-5. 在真实硬件迁入前，M3 的 HTTP 路径和 Mock 行为继续作为 Collector、Gateway 与业务 App 的兼容基线。
-
-禁止为了快速迁移而把 v2 的 RKNN 初始化、相机循环、全局状态和 HTTP 处理重新合并到一个入口文件中。
-
-M9.1 仅迁移“描述模型”的配置能力，不迁移 v2 的模型加载和推理代码。v3 使用独立 manifest、YAML 和标签文本形成 `LoadedModelInfo`，允许在 x86 环境验证模型名称、版本、任务类型、输入尺寸、阈值和文件路径。示例模型包只用于文本解析测试，manifest 中的 `model.rknn` 是占位引用，仓库中不存在该文件。
-
-M9.2 已迁移 RKNN Runner 的生命周期外壳，但没有迁移 v2 的完整推理主循环和后处理。v2 C++ `main.cpp` 仍只作为功能参考；模型读取、Context 初始化、输入设置、执行、输出获取和释放被约束在 `RknnRunnerReal` 内，不允许反向侵入 `RuntimeApp`、HTTP 层或入口文件。
-
-默认构建不依赖 RKNN SDK。只有 RK3576/RK3588 部署构建显式开启 `VISIONOPS_ENABLE_RKNN` 时，才允许从部署环境注入头文件和 Runtime 库路径。未启用 SDK 时选择 `rknn` backend 必须可诊断地降级，不能崩溃或静默改用生产推理结论。
-
-M9.3 从 v2 只提取了必要的 letterbox、DFL、NMS、坐标回映和 OBB 几何经验，并重新分配到 `Preprocess` 与三个 `Postprocess` 模块。v2 的 HTTP 主程序、相机线程、生产循环、分散配置和 Gateway 逻辑均未迁入。
-
-真实 RKNN 路径默认关闭，只能在 RK3576/RK3588 部署环境显式注入 SDK。detect 已兼容单输出和 Rockchip split-DFL；OBB/seg 先支持可独立验证的单输出布局，不支持的现场导出 shape 必须以 fixture 驱动扩展，不能用猜测解析。真实 `.rknn/.pt/.onnx`、测试图片、原始 tensor、模型数据和完整发布包继续禁止进入 Git。
-
-M10 接入真实取流时，只能向现有 `ImageBuffer -> Preprocess -> Runner -> Postprocess` 链路提供帧，不得把相机 SDK、重连循环或设备状态写回 Runner 和后处理模块。
-
-旧 Gateway/Modbus 服务不得原样复制。v3 先以标准 `inference_result -> gateway_message -> register map` 重新建立边界：
-
-- M5 Gateway / Modbus Mock 只用于本机契约联调，不连接真实 PLC。
-- Mock 默认使用 Modbus TCP `1502` 端口，不使用 `502`。
-- Gateway 只消费标准推理结果，不继承 v2 对模型张量、文件路径或进程内部状态的隐式依赖。
-- Modbus 寄存器只表达心跳和业务结果，不承载图片或大块 JSON。
-- `carton_tube_check`、`carton_partition_check` 等应用按业务契约重建专用 register map，并单独验收 PLC 握手、字节序、超时和故障安全值。
-
-M6 仅重新实现两个业务的 Mock 规则与契约，不迁移 v2 的取图、深度、模板文件、系统服务、`.env` 或 Modbus 实现。可保留的只是经业务方重新确认的行为经验，例如 signed int16 寄存器编码、数量异常和缺陷优先级。
-
-后续迁移真实 `carton_tube_check` 或 `carton_partition_check` 时，应：
-
-1. 先用真实 Runtime/Collector 的标准 `latest_result` 替换 `file` Mock upstream。
-2. 使用标注样例重新校准阈值，不沿用 v2 `.env` 默认值。
-3. 单独定义 PLC 触发、应答、超时和故障安全值。
-4. 保持 AppDecision 和 GatewayMessage 契约，避免把业务判断回填到 C++ Runtime 或 Collector Web。
-
-## 5. 禁止迁移的历史残留
-
-- 未使用脚本、重复入口和一次性修复文件。
-- 开发者机器绝对路径、Conda 环境路径和固定 IP。
-- 默认密码、SSH 参数、Token 和真实设备配置。
-- `__pycache__`、构建目录、日志、运行结果和诊断包。
-- `.pt`、`.onnx`、`.rknn` 等模型制品。
-- 数据集、采集图片、视频和压缩包。
-- 无版本说明的第三方 SDK、二进制库和复制源码。
-- 同一能力的多套并行实现，除非有明确的平台适配边界。
-
-## 6. 单模块迁移流程
-
-每个待迁移模块应完成以下步骤：
-
-1. 写明业务场景和当前调用方。
-2. 从 v2 提取可观察行为，而不是直接提取代码。
-3. 定义 v3 接口、错误语义、配置和指标。
-4. 列出 v2 中必须保留的算法或现场修复经验。
-5. 在 v3 最小化实现，并补充测试。
-6. 使用固定样例或真机进行新旧结果对比。
-7. 验证部署、停止、重启和失败恢复。
-8. 文档记录迁移结论和未覆盖差异。
-
-## 7. 迁移验收标准
-
-模块只有在以下条件满足后才视为完成迁移：
-
-- 在 v3 中有清晰所有权和目录位置。
-- 不依赖 v2 目录或运行环境。
-- 输入输出契约已版本化。
-- 配置无硬编码设备私密信息。
-- 关键路径有自动测试或明确真机验证记录。
-- 日志、指标和故障行为可诊断。
-- 可以独立部署、停止和回滚。
-
-## 8. Legacy Notes 的使用
-
-`docs/legacy_notes/` 只保存历史事实和迁移参考，例如旧链路拓扑、现场故障、性能数据和放弃原因。不得在该目录维护仍会被生产启动的代码，也不得让当前架构文档依赖 legacy 内容才能解释系统行为。
-
-## M10 真实取流迁移说明
-
-M10 没有把 v2 的相机循环、全局状态或 C++ 主程序搬入 v3，而是把真实输入限制在 `FrameSource / StreamWorker` 边界。v3 Runtime 当前支持 `mock/test_image/v4l2` 三类输入，其中 V4L2 用于第一阶段真机验证。
-
-从 v2 继续迁移 HP60C SDK 或 RTSP 时，应只实现新的 FrameSource：
-
-1. 打开设备并输出统一 `ImageBuffer`；
-2. 在 status 中报告设备状态和最近错误；
-3. 保持 `infer_once`、`latest_result` 和 `snapshot.jpg` HTTP 契约不变；
-4. 不把相机 SDK 逻辑写入 `RknnRunner`、后处理、Gateway 或 Collector Web；
-5. 不提交真实图片、视频、模型、IP 或密钥。
-
-M10.1 已在 `SnapshotProvider` 中加入轻量 JPEG 编码：当 `StreamWorker` 已缓存最新 RGB888 帧时，`snapshot.jpg` 返回真实帧 JPEG；没有最新帧时才回退内置 Mock JPEG。Collector Web 仍然只通过 Runtime HTTP API 获取快照，不能直接访问 `/dev/videoX`。
-
-## M11 业务闭环迁移说明
-
-M11 已将 `carton_tube_check` 和 `carton_partition_check` 从 M6 Mock 层推进为可消费真实 Runtime/Collector `inference_result` 的业务 App。v2 的两个目录只作为业务经验参考：纸筒检测的类别、数量和 ROI 规则，以及隔板检测的 cell/defect 计数和网格结构思想。v3 不原样复制 v2 服务，也不让业务判断进入 C++ Runtime。
-
-同一块 3576 上同时运行纸筒和隔板任务时，推荐启动两套 Runtime/Collector/App 端口组合：纸筒使用 18081/8091/19110，隔板使用 18082/8092/19120。这样两个模型和 latest_result 互不干扰。
+然后在对应产线目录内完成，不得重新向根目录增加任务专用配置和启动脚本。

@@ -15,15 +15,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture(scope="session")
-def postprocess_fixture_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    build_dir = tmp_path_factory.mktemp("postprocess-fixture-build")
-    subprocess.run(["cmake", "-S", str(PROJECT_ROOT), "-B", str(build_dir)], check=True)
-    subprocess.run(
-        ["cmake", "--build", str(build_dir), "-j4", "--target", "visionops_postprocess_fixture"],
-        check=True,
-    )
-    return build_dir / "edge/runtime_cpp/visionops_postprocess_fixture"
-
+def postprocess_fixture_binary(shared_postprocess_fixture_binary: Path) -> Path:
+    return shared_postprocess_fixture_binary
 
 @pytest.mark.parametrize(
     ("fixture_task", "expected_task"),

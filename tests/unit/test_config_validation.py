@@ -20,14 +20,13 @@ EDGE_BASE = PROJECT_ROOT / "configs/edge/base.example.yaml"
 EDGE_RK3588 = PROJECT_ROOT / "configs/edge/rk3588.example.yaml"
 TASK_DETECTION = PROJECT_ROOT / "configs/task/detection.example.yaml"
 APP_COLLECTOR = PROJECT_ROOT / "configs/app/collector.example.yaml"
-APP_GATEWAY_MODBUS = PROJECT_ROOT / "configs/app/gateway_modbus.example.yaml"
 
 
 def valid_configuration():
     return load_configuration(
         [EDGE_BASE, EDGE_RK3588],
         TASK_DETECTION,
-        [APP_COLLECTOR, APP_GATEWAY_MODBUS],
+        [APP_COLLECTOR],
     )
 
 
@@ -48,7 +47,7 @@ def test_missing_required_field_fails() -> None:
 def test_plaintext_sensitive_field_fails() -> None:
     edge, task, apps = valid_configuration()
     invalid_apps = deepcopy(apps)
-    invalid_apps[1]["gateway"]["password"] = "example-plaintext"
+    invalid_apps[0]["collector"]["password"] = "example-plaintext"
 
     with pytest.raises(ConfigValidationError, match="敏感字段"):
         validate_configuration(edge, task, invalid_apps)

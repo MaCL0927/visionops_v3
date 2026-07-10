@@ -177,17 +177,17 @@ bash apps/collector_web/tests/smoke_test.sh
 
 `Runtime / Gateway / Business App` 的真实联调仍需在 3576 真机上验证。
 
-## M14 设置界面
+## 设置界面
 
 Collector Web 的设置弹窗已拆分为“相机设置 / 视觉盒子设置 / 算法设置”三页。当前保存方式为浏览器 localStorage，用于前端刷新间隔和模型验证页可视化开关；真实后端配置保存接口后续接入。
 
 算法设置页中的可视化开关会立即影响模型验证页 overlay，例如关闭 OBB 外接水平框、保留 OBB 旋转框，或控制 segmentation bbox / mask polygon 显示。
 
-## M14.1 SDK Bridge 相机设置页
+## SDK Bridge 相机设置页
 
 设置中心的相机页已改为 SDK Bridge 通用配置入口，面向 HP60C 与 Orbbec Gemini 336L 两类 SDK + HTTP Bridge。固定的服务 URL、快照路径和深度图路径不再作为用户可编辑项展示；页面只保留相机型号、画面帧率、RGB/Depth profile、JPEG 质量、翻转、RGB 顺序、深度单位等现场配置入口。当前所有设置仍保存到浏览器 localStorage，后续再接入后端配置 API 写入对应 bridge env 并重启服务。
 
-## M14 Orbbec 336L 设置 API
+## Orbbec 336L 设置 API
 
 Collector Web 提供 Orbbec 336L SDK Bridge 设置接口：
 
@@ -215,7 +215,7 @@ curl -s -X POST http://127.0.0.1:18091/api/settings/sdk_bridge/orbbec336l \
 
 该接口会写入 Orbbec Bridge env 并重启 `visionops-orbbec336l-bridge.service`。如果 Collector 不是 root 运行，需要配置受限 sudo 权限。
 
-## M16 视觉盒子设置
+## 视觉盒子设置
 
 Collector Web 增加视觉盒子设置 API：
 
@@ -225,7 +225,7 @@ curl -s http://127.0.0.1:18091/api/settings/vision_box | python3 -m json.tool
 
 配置默认保存到 `/opt/visionops_v3/config/vision_box_settings.json`，可通过 `VISIONOPS_VISION_BOX_SETTINGS_FILE` 覆盖。Runtime/Gateway/Business App URL、Device ID、目录和端口为启动参数/部署固定值，页面只展示；可写字段包括默认启动模式、状态刷新 FPS、磁盘告警阈值和服务端上传配置。
 
-## M16.1 采集上传 API
+## 采集上传 API
 
 Collector Web 提供边缘端数据集采集、打包与上传接口：
 

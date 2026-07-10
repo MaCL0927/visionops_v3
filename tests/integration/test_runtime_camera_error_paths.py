@@ -1,4 +1,4 @@
-"""Runtime M10 V4L2 错误路径测试，不依赖真实摄像头。"""
+"""Runtime V4L2 错误路径测试，不依赖真实摄像头。"""
 
 from __future__ import annotations
 
@@ -35,24 +35,8 @@ def _request_json(url: str, method: str = "GET") -> dict:
 
 
 @pytest.fixture(scope="session")
-def runtime_camera_error_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    build_dir = tmp_path_factory.mktemp("runtime-camera-error-build")
-    subprocess.run(
-        ["cmake", "-S", str(PROJECT_ROOT), "-B", str(build_dir)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(
-        ["cmake", "--build", str(build_dir), "-j4", "--target", "visionops_runtime_mock"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    binary = build_dir / "edge/runtime_cpp/visionops_runtime_mock"
-    assert binary.is_file()
-    return binary
-
+def runtime_camera_error_binary(shared_runtime_binary: Path) -> Path:
+    return shared_runtime_binary
 
 @contextmanager
 def _running_v4l2_missing_device(binary: Path):

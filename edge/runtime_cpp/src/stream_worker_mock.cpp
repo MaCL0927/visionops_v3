@@ -631,7 +631,7 @@ bool StreamWorkerMock::open_v4l2(std::string& error) {
   }
   const std::string normalized = normalize_pixel_format(config_.camera_pixel_format);
   if (normalized != "YUYV") {
-    error = "当前 M10 一期仅支持 V4L2 YUYV；请求格式: " + normalized;
+    error = "当前仅支持 V4L2 YUYV；请求格式: " + normalized;
     opened_ = false;
     return false;
   }

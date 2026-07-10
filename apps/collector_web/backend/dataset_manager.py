@@ -1,6 +1,6 @@
 """VisionOps v3 数据集采集、打包与上传管理。
 
-M16.1 约定：
+采集数据约定：
 - 图片保存到 /opt/visionops_v3/data/images。
 - 上传包保存到 /opt/visionops_v3/data/upload_packages。
 - Web 列表分页读取，避免一次性加载大量图片造成页面卡顿。

@@ -24,13 +24,17 @@ sudo mkdir -p "$DST_DIR" "$BIN_DIR"
 if [[ "$SRC_DIR" != "$DST_DIR" ]]; then
   sudo cp -f "$SRC_DIR/visionops_orbbec336l_bridge.cpp" "$DST_DIR/"
   sudo cp -f "$SRC_DIR/CMakeLists.txt" "$DST_DIR/"
-  sudo cp -f "$SRC_DIR/orbbec336l_bridge.env" "$DST_DIR/"
+  sudo cp -f "$SRC_DIR/orbbec336l_bridge.env.example" "$DST_DIR/"
   sudo cp -f "$SRC_DIR/README.md" "$DST_DIR/" 2>/dev/null || true
   sudo cp -f "$SRC_DIR/install_orbbec336l_bridge_service.sh" "$DST_DIR/"
 else
   log "SRC_DIR and DST_DIR are the same; skip file self-copy."
 fi
 sudo chmod +x "$DST_DIR/install_orbbec336l_bridge_service.sh"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  sudo cp "$SRC_DIR/orbbec336l_bridge.env.example" "$ENV_FILE"
+fi
 
 if [[ ! -f "$ENV_FILE" ]]; then
   err "missing env file: $ENV_FILE"
