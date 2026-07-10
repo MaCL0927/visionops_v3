@@ -8,6 +8,9 @@ conversion to a small worker process via `conda run -n rknn311 ...` by default.
 
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -40,23 +43,38 @@ def run(ctx: PipelineContext, export_report: dict[str, Any], preprocess_report: 
     ctx.log(f"[convert_rknn] onnx={onnx_path} target={target_platform} quant={do_quantization}")
     ctx.log(f"[convert_rknn] env={env_name or 'current'}")
 
-    if env_name and env_name.lower() not in {"current", "none", "base", "false", "0"}:
-        command = conda_run_prefix(ctx, env_name) + [
-            "python",
-            "-m",
-            "training.pipeline.stages.convert_rknn_worker",
-            "--config",
-            str(worker_config),
-        ]
-        run_command(command, cwd=ctx.project_root, log_file=ctx.log_file)
-        report = read_json(report_path, {}) or {}
-    else:
-        # Useful for unit tests or machines where the parent process itself is
-        # already running inside rknn311.
-        from training.pipeline.stages.convert_rknn_worker import convert_with_rknn
+    scratch_dir = Path(tempfile.mkdtemp(prefix="rknn_build_", dir=str(ctx.output_dir)))
+    try:
+        if env_name and env_name.lower() not in {"current", "none", "base", "false", "0"}:
+            command = conda_run_prefix(ctx, env_name) + [
+                "python",
+                "-m",
+                "training.pipeline.stages.convert_rknn_worker",
+                "--config",
+                str(worker_config),
+            ]
+            pythonpath = str(ctx.project_root)
+            if os.environ.get("PYTHONPATH"):
+                pythonpath = pythonpath + os.pathsep + os.environ["PYTHONPATH"]
+            # rknn-toolkit2 may emit intermediate check*.onnx files in the
+            # current working directory. Run the worker in a temporary scratch
+            # directory instead of the project root, then remove it afterwards.
+            run_command(command, cwd=scratch_dir, log_file=ctx.log_file, env={"PYTHONPATH": pythonpath})
+            report = read_json(report_path, {}) or {}
+        else:
+            # Useful for unit tests or machines where the parent process itself is
+            # already running inside rknn311.
+            from training.pipeline.stages.convert_rknn_worker import convert_with_rknn
 
-        report = convert_with_rknn(payload)
-        write_json(report_path, report)
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(scratch_dir)
+                report = convert_with_rknn(payload)
+            finally:
+                os.chdir(old_cwd)
+            write_json(report_path, report)
+    finally:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
 
     if report.get("status") != "success":
         raise RuntimeError(f"RKNN 转换失败: {report}")

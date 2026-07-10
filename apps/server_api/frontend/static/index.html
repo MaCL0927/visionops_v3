@@ -8,10 +8,11 @@
 </head>
 <body>
   <header class="topbar simple-topbar">
-    <div>
+    <div class="topbar-title-block">
       <h1>VisionOps 数据闭环控制台</h1>
       <p>接收数据 → 标注与审核 → 训练与模型状态 → 模型部署</p>
     </div>
+    <div id="systemStats" class="system-stats">系统占用加载中...</div>
   </header>
 
   <main class="page">
@@ -53,7 +54,7 @@
           <div class="section-head incoming-panel-head">
             <div>
               <h3>待处理上传包</h3>
-              <span class="badge muted">*.tar.gz</span>
+              <span class="badge muted">*.tar.gz / *.zip</span>
             </div>
           </div>
           <div id="incomingPackages" class="list empty incoming-list">正在加载 incoming 目录...</div>
@@ -122,8 +123,14 @@
       </div>
       <div class="two-col">
         <div class="panel">
-          <h3>模型包</h3>
-          <label>发布目录 publish_root，可留空使用服务端启动参数
+          <div class="section-head compact-section-head">
+            <h3>模型包</h3>
+          </div>
+          <label>
+            <span class="label-row">
+              <span>发布目录 publish_root，可留空使用服务端启动参数</span>
+              <button id="openPublishRootBtn" type="button" class="secondary small-button">打开发布目录</button>
+            </span>
             <input id="publishRootInput" placeholder="例如 /home/pc/Sync/models/share_models" />
           </label>
           <div id="models" class="list empty">暂无模型包。</div>

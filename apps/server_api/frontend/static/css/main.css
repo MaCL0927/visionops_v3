@@ -234,3 +234,49 @@ pre { background: #0b1020; color: #d1e7ff; border-radius: 14px; padding: 14px; m
 .training-start-panel .check-label { align-self: center; }
 .training-jobs-panel .training-job-list { min-height: 132px; }
 .device-list .item-title .badge { margin-left: 6px; }
+
+/* Header system usage summary. */
+.simple-topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+.topbar-title-block { min-width: 0; }
+.system-stats {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 720px;
+  color: #334155;
+  font-size: 12px;
+}
+.system-stats span {
+  border: 1px solid #dbeafe;
+  background: #eff6ff;
+  color: #1e3a8a;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.small-button {
+  min-height: 30px;
+  padding: 6px 10px;
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+.compact-section-head { margin-bottom: 2px; }
+@media (max-width: 980px) {
+  .simple-topbar { flex-direction: column; }
+  .system-stats { justify-content: flex-start; }
+  .label-row { align-items: flex-start; flex-direction: column; }
+}

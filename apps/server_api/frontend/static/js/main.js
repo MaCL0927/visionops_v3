@@ -27,6 +27,19 @@ function formatTime(ms) {
   if (!ms) return '-';
   try { return new Date(Number(ms)).toLocaleString(); } catch { return '-'; }
 }
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) return '-';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let current = value;
+  let index = 0;
+  while (current >= 1024 && index < units.length - 1) { current /= 1024; index += 1; }
+  return `${current.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+function formatPercent(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? `${n.toFixed(1)}%` : '-';
+}
 function badgeClass(status) {
   if (['ok', 'ready', 'success', 'accepted', 'connect', 'connected', 'synced'].includes(status)) return '';
   if (['failed', 'rejected', 'error', 'fail', 'sync_failed'].includes(status)) return 'danger';
@@ -100,6 +113,27 @@ function renderStatus() {
     badge.className = 'badge ' + (h.status === 'ok' ? '' : 'danger');
   }
   if ($('mlflowLink')) $('mlflowLink').href = h.mlflow_uri || '#';
+  renderSystemStats(h.system_stats || {});
+  if ($('publishRootInput') && !$('publishRootInput').dataset.touched && !$('publishRootInput').value && h.publish_root) {
+    $('publishRootInput').placeholder = h.publish_root;
+  }
+}
+
+function renderSystemStats(stats) {
+  const root = $('systemStats');
+  if (!root) return;
+  const disk = stats.disk || {};
+  const memory = stats.memory || {};
+  const cpu = stats.cpu || {};
+  const gpu = stats.gpu || {};
+  const gpuText = gpu.available ? formatPercent(gpu.percent) : 'N/A';
+  root.innerHTML = `
+    <span title="visionops_v3 目录占用">VisionOps ${formatBytes(stats.visionops_size_bytes)}</span>
+    <span title="当前分区磁盘使用率">磁盘 ${formatPercent(disk.percent)}</span>
+    <span title="内存使用率">内存 ${formatPercent(memory.percent)}</span>
+    <span title="CPU 使用率">CPU ${formatPercent(cpu.percent)}</span>
+    <span title="GPU 使用率">GPU ${gpuText}</span>
+  `;
 }
 
 function renderIncomingPackages() {
@@ -244,21 +278,38 @@ function renderDevices() {
 
 function refreshSelects() {
   const datasetSelect = $('datasetSelect');
+  const previousDataset = datasetSelect ? datasetSelect.value : '';
   const datasets = [...state.datasets].sort((a, b) => Number(b.created_at_ms || 0) - Number(a.created_at_ms || 0));
-  datasetSelect.innerHTML = datasets.length
-    ? datasets.map(d => `<option value="${escapeHtml(d.dataset_id)}" data-task="${escapeHtml(d.task_type)}">${escapeHtml(d.dataset_id)} (${escapeHtml(d.task_type)})</option>`).join('')
-    : '<option value="">请先完成标注审核生成 dataset</option>';
-  datasetSelect.disabled = !datasets.length;
+  if (datasetSelect) {
+    datasetSelect.innerHTML = datasets.length
+      ? datasets.map(d => `<option value="${escapeHtml(d.dataset_id)}" data-task="${escapeHtml(d.task_type)}">${escapeHtml(d.dataset_id)} (${escapeHtml(d.task_type)})</option>`).join('')
+      : '<option value="">请先完成标注审核生成 dataset</option>';
+    datasetSelect.disabled = !datasets.length;
+    if (previousDataset && datasets.some(d => d.dataset_id === previousDataset)) datasetSelect.value = previousDataset;
+  }
 
-  $('assignDeviceSelect').innerHTML = state.devices.length
-    ? state.devices.map(d => {
-        const status = d.collector_status || 'unknown';
-        return `<option value="${escapeHtml(d.device_id)}">${escapeHtml(d.device_id)} (${escapeHtml(status)})</option>`;
-      }).join('')
-    : '<option value="">请先登记设备</option>';
-  $('assignModelSelect').innerHTML = state.models.length
-    ? state.models.map(m => `<option value="${escapeHtml(m.model_id)}">${escapeHtml(m.model_id)}</option>`).join('')
-    : '<option value="">请先生成模型包</option>';
+  const deviceSelect = $('assignDeviceSelect');
+  const previousDevice = deviceSelect ? deviceSelect.value : '';
+  if (deviceSelect) {
+    deviceSelect.innerHTML = state.devices.length
+      ? state.devices.map(d => {
+          const status = d.collector_status || 'unknown';
+          return `<option value="${escapeHtml(d.device_id)}">${escapeHtml(d.device_id)} (${escapeHtml(status)})</option>`;
+        }).join('')
+      : '<option value="">请先登记设备</option>';
+    deviceSelect.disabled = !state.devices.length;
+    if (previousDevice && state.devices.some(d => d.device_id === previousDevice)) deviceSelect.value = previousDevice;
+  }
+
+  const modelSelect = $('assignModelSelect');
+  const previousModel = modelSelect ? modelSelect.value : '';
+  if (modelSelect) {
+    modelSelect.innerHTML = state.models.length
+      ? state.models.map(m => `<option value="${escapeHtml(m.model_id)}">${escapeHtml(m.model_id)}</option>`).join('')
+      : '<option value="">请先生成模型包</option>';
+    modelSelect.disabled = !state.models.length;
+    if (previousModel && state.models.some(m => m.model_id === previousModel)) modelSelect.value = previousModel;
+  }
 }
 
 function taskFromDatasetId(datasetId) {
@@ -295,6 +346,13 @@ async function openModelFolder(modelId) {
   const model = state.models.find(x => x.model_id === modelId);
   if (!model) return showToast('模型包不存在', 'error');
   await openPath(model.package_path);
+}
+async function openPublishRoot() {
+  const manual = $('publishRootInput') ? $('publishRootInput').value.trim() : '';
+  const configured = state.health && state.health.publish_root ? state.health.publish_root : '';
+  const target = manual || configured;
+  if (!target) return showToast('publish_root 为空，请先在启动参数或输入框中设置发布目录。', 'error');
+  await openPath(target);
 }
 
 async function processSelectedPackages() {
@@ -377,6 +435,8 @@ if ($('modalClose')) $('modalClose').onclick = () => { $('modal').style.display 
 if ($('modal')) $('modal').onclick = (event) => { if (event.target.id === 'modal') $('modal').style.display = 'none'; };
 if ($('refreshIncomingBtn')) $('refreshIncomingBtn').onclick = () => refresh().catch(err => showToast(err.message, 'error'));
 if ($('processIncomingBtn')) $('processIncomingBtn').onclick = () => processSelectedPackages().catch(err => showToast(err.message, 'error'));
+if ($('publishRootInput')) $('publishRootInput').addEventListener('input', () => { $('publishRootInput').dataset.touched = '1'; });
+if ($('openPublishRootBtn')) $('openPublishRootBtn').onclick = () => openPublishRoot().catch(err => showToast(err.message, 'error'));
 
 if ($('jobForm')) $('jobForm').onsubmit = async (event) => {
   event.preventDefault();
