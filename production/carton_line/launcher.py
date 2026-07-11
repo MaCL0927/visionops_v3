@@ -21,8 +21,8 @@ def _config_path(value: str | None) -> str:
 
 
 def _task(value: str) -> str:
-    if value not in {"partition", "tube"}:
-        raise argparse.ArgumentTypeError("task 必须是 partition 或 tube")
+    if value not in {"partition", "tube", "pick"}:
+        raise argparse.ArgumentTypeError("task 必须是 partition、tube 或 pick")
     return value
 
 
@@ -71,9 +71,17 @@ def _collector(task: str, config: dict) -> int:
     gateway_host = str(config["service"]["listen_host"])
     if gateway_host in {"0.0.0.0", "::"}:
         gateway_host = "127.0.0.1"
-    gateway_url = f"http://{gateway_host}:{config['service']['listen_port']}"
-    app_port = config["service"]["partition_app_port" if task == "partition" else "tube_app_port"]
-    business_url = f"http://{gateway_host}:{app_port}"
+    if task == "pick":
+        pick_http = config["pick"]["tcp"]["http"]
+        pick_host = str(pick_http["listen_host"])
+        if pick_host in {"0.0.0.0", "::"}:
+            pick_host = "127.0.0.1"
+        gateway_url = f"http://{pick_host}:{pick_http['listen_port']}"
+        business_url = gateway_url
+    else:
+        gateway_url = f"http://{gateway_host}:{config['service']['listen_port']}"
+        app_port = config["service"]["partition_app_port" if task == "partition" else "tube_app_port"]
+        business_url = f"http://{gateway_host}:{app_port}"
 
     command = [
         sys.executable,
@@ -105,6 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     collector.add_argument("task", type=_task)
 
     subparsers.add_parser("gateway", help="启动统一 Robot Protocol Gateway")
+    subparsers.add_parser("tcp-pick", help="启动纸筒抓取点 TCP Client 服务")
     subparsers.add_parser("show-config", help="输出解析后的统一配置")
     return parser
 
@@ -120,6 +129,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "gateway":
         from production.carton_line.gateway.service import main as gateway_main
         return gateway_main(["--config", path])
+    if args.command == "tcp-pick":
+        from production.carton_line.tasks.tube_pick_vision.service import main as pick_main
+        return pick_main(["--config", path])
     print(json.dumps(config, ensure_ascii=False, indent=2))
     return 0
 

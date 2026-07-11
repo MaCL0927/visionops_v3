@@ -80,6 +80,10 @@ def test_unified_line_config_resolves_all_task_paths() -> None:
     assert Path(config["partition"]["template_path"]).is_file()
     assert Path(config["runtimes"]["partition"]["model_dir"]).is_absolute()
     assert config["collectors"]["partition"]["listen_port"] != config["collectors"]["tube"]["listen_port"]
+    assert Path(config["runtimes"]["pick"]["model_dir"]).is_absolute()
+    assert config["runtimes"]["pick"]["url"].endswith(":28083")
+    assert config["collectors"]["pick"]["listen_port"] == 18093
+    assert config["pick"]["tcp"]["server_port"] == 10000
 
 
 def test_unified_line_config_rejects_duplicate_ports(tmp_path: Path) -> None:

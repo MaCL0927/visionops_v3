@@ -10,8 +10,8 @@ VisionOps v3 面向 `RK3576 / LB3576 / RK3588` 工业视觉盒子，覆盖数据
 Camera Bridge
   -> C++ RKNN Runtime
   -> Collector Web
-  -> Production Line Gateway / Modbus-TCP
-  -> PLC / 上位机
+  -> Production Line Gateway / Modbus-TCP or task TCP client
+  -> PLC / 机器人调度系统 / 上位机
 ```
 
 平台代码与现场业务代码严格分开：
@@ -69,7 +69,7 @@ visionops_v3/
 - 纸筒站立/倒伏与 RGB-Depth 高度判断；
 - 双机械手坐标转换；
 - 统一 Robot Protocol Gateway；
-- 两套 Runtime、两套 Collector 和一个 Modbus-TCP 服务；
+- 三套 Runtime、三套 Collector、一个 Modbus-TCP 服务和一个机器人调度 TCP Client；
 - 单一产线配置文件和 systemd 部署文件。
 
 完整说明见：
@@ -93,6 +93,7 @@ models/<task>/<model_version>/
 ```text
 models/carton_partition_check/current/
 models/carton_tube_check/current/
+models/tube_pick_vision/current/
 ```
 
 `model.yaml` 是模型任务类型、类别、输入尺寸和模型标识的唯一元信息来源。
@@ -140,9 +141,12 @@ cd /opt/visionops_v3
 
 ./production/carton_line/scripts/start_runtime.sh partition
 ./production/carton_line/scripts/start_runtime.sh tube
+./production/carton_line/scripts/start_runtime.sh pick
 ./production/carton_line/scripts/start_gateway.sh
+./production/carton_line/scripts/start_tcp_pick.sh
 ./production/carton_line/scripts/start_collector.sh partition
 ./production/carton_line/scripts/start_collector.sh tube
+./production/carton_line/scripts/start_collector.sh pick
 ```
 
 唯一主配置：

@@ -52,6 +52,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "snapshot_path": "/stream/snapshot.jpg",
         "health_path": "/health",
         "depth_url": "http://127.0.0.1:18182/stream/depth.png",
+        "depth_meta_url": "http://127.0.0.1:18182/stream/depth_meta",
     },
     "runtimes": {
         "partition": {
@@ -72,6 +73,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "accepted_model_ids": [],
             "accepted_model_names": [],
         },
+        "pick": {
+            "url": "http://127.0.0.1:28083",
+            "model_dir": _project_path("models", "tube_pick_vision", "current"),
+            "device_id": "lb3576-tube-pick",
+            "component": "rknn_runtime_tube_pick",
+            "accepted_task_types": ["detection", "detect"],
+            "accepted_model_ids": [],
+            "accepted_model_names": [],
+        },
     },
     "collectors": {
         "partition": {
@@ -89,6 +99,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "device_id": "lb3576-tube",
             "component": "collector_tube",
             "models_root": _project_path("models", "carton_tube_check"),
+            "snapshot_refresh_interval_ms": 200,
+            "status_refresh_interval_ms": 2000,
+        },
+        "pick": {
+            "listen_host": "0.0.0.0",
+            "listen_port": 18093,
+            "device_id": "lb3576-tube-pick",
+            "component": "collector_tube_pick",
+            "models_root": _project_path("models", "tube_pick_vision"),
             "snapshot_refresh_interval_ms": 200,
             "status_refresh_interval_ms": 2000,
         },
@@ -157,6 +176,48 @@ DEFAULT_CONFIG: dict[str, Any] = {
             },
         },
     },
+    "pick": {
+        "tcp": {
+            "server_host": "127.0.0.1",
+            "server_port": 10000,
+            "connect_timeout_ms": 3000,
+            "read_timeout_ms": 1000,
+            "reconnect_initial_ms": 1000,
+            "reconnect_max_ms": 10000,
+            "max_frame_bytes": 1048576,
+            "response_cache_size": 32,
+            "response_function": "tube_pick_result",
+            "camera_id": 0,
+            "accepted_functions": [],
+            "accepted_cameras": [],
+            "accepted_task_ids": [],
+            "http": {"listen_host": "127.0.0.1", "listen_port": 19130},
+        },
+        "algorithm": {
+            "classes": {
+                "product_ids": [0],
+                "separator_ids": [1],
+                "product_names": ["tube_product", "product", "tube"],
+                "separator_names": ["large_separator", "separator", "partition"],
+                "product_min_confidence": 0.50,
+                "separator_min_confidence": 0.50,
+                "output_order": "row_major",
+            },
+            "depth": {
+                "roi_radius_px": 4,
+                "percentile": 50,
+                "min_valid_pixels": 3,
+                "min_depth_mm": 100,
+                "max_depth_mm": 5000,
+                "max_age_ms": 1500,
+                "fail_on_invalid_depth": True,
+            },
+        },
+        "debug": {
+            "save_every_trigger": True,
+            "save_root": "/tmp/visionops_v3/carton_line/tube_pick_vision/latest",
+        },
+    },
     "coordinates": {
         "output_frame": "robot",
         "register_order": "column",
@@ -184,7 +245,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "debug": {
         "save_every_trigger": True,
-        "save_root": "/var/lib/visionops_v3/carton_line/latest",
+        "save_root": "/tmp/visionops_v3/carton_line/latest",
     },
 }
 
@@ -243,8 +304,16 @@ def load_config(path: str | None) -> dict[str, Any]:
         service[key] = _port(service[key], f"service.{key}")
     modbus["port"] = _port(modbus["port"], "modbus.port")
 
-    used_ports = [service["listen_port"], service["partition_app_port"], service["tube_app_port"], modbus["port"]]
-    for task in ("partition", "tube"):
+    pick_tcp = config["pick"]["tcp"]
+    pick_http = pick_tcp["http"]
+    pick_http["listen_port"] = _port(pick_http["listen_port"], "pick.tcp.http.listen_port")
+    pick_tcp["server_port"] = _port(pick_tcp["server_port"], "pick.tcp.server_port")
+
+    used_ports = [
+        service["listen_port"], service["partition_app_port"], service["tube_app_port"],
+        modbus["port"], pick_http["listen_port"],
+    ]
+    for task in ("partition", "tube", "pick"):
         runtime = config["runtimes"][task]
         runtime["url"] = _valid_url(runtime["url"], f"runtimes.{task}.url")
         runtime_port = urlparse(runtime["url"]).port or (443 if runtime["url"].startswith("https:") else 80)
@@ -285,7 +354,64 @@ def load_config(path: str | None) -> dict[str, Any]:
     bridge = config["camera_bridge"]
     bridge["base_url"] = _valid_url(bridge["base_url"], "camera_bridge.base_url")
     bridge["depth_url"] = _valid_url(bridge["depth_url"], "camera_bridge.depth_url")
+    bridge["depth_meta_url"] = _valid_url(bridge["depth_meta_url"], "camera_bridge.depth_meta_url")
     config["partition"]["template_path"] = _project_relative_path(config["partition"]["template_path"])
     config["coordinates"]["template_path"] = _project_relative_path(config["coordinates"]["template_path"])
     config["debug"]["save_root"] = str(Path(config["debug"]["save_root"]).expanduser())
+
+    if not str(pick_tcp.get("server_host") or "").strip():
+        raise ValueError("pick.tcp.server_host 不能为空")
+    for key in (
+        "connect_timeout_ms", "read_timeout_ms", "reconnect_initial_ms", "reconnect_max_ms",
+        "max_frame_bytes", "response_cache_size",
+    ):
+        pick_tcp[key] = int(pick_tcp[key])
+        if pick_tcp[key] <= 0:
+            raise ValueError(f"pick.tcp.{key} 必须大于 0")
+    if pick_tcp["reconnect_max_ms"] < pick_tcp["reconnect_initial_ms"]:
+        raise ValueError("pick.tcp.reconnect_max_ms 不得小于 reconnect_initial_ms")
+    for key in ("accepted_functions", "accepted_cameras", "accepted_task_ids"):
+        values = pick_tcp.get(key, [])
+        if not isinstance(values, list):
+            raise ValueError(f"pick.tcp.{key} 必须是数组")
+        pick_tcp[key] = [str(value) for value in values if str(value)]
+    pick_http["listen_host"] = str(pick_http.get("listen_host") or "127.0.0.1")
+    pick_tcp["camera_id"] = int(pick_tcp.get("camera_id", 0))
+    pick_tcp["response_function"] = str(pick_tcp.get("response_function") or "").strip()
+    if not pick_tcp["response_function"]:
+        raise ValueError("pick.tcp.response_function 不能为空")
+
+    pick_algorithm = config["pick"]["algorithm"]
+    class_config = pick_algorithm["classes"]
+    product_ids = {int(value) for value in class_config.get("product_ids", [])}
+    separator_ids = {int(value) for value in class_config.get("separator_ids", [])}
+    if not product_ids or not separator_ids:
+        raise ValueError("pick.algorithm.classes 的 product_ids 和 separator_ids 不能为空")
+    if product_ids & separator_ids:
+        raise ValueError("pick.algorithm.classes 的 product_ids 和 separator_ids 不得重叠")
+    class_config["product_ids"] = sorted(product_ids)
+    class_config["separator_ids"] = sorted(separator_ids)
+    for key in ("product_min_confidence", "separator_min_confidence"):
+        class_config[key] = float(class_config[key])
+        if not 0.0 <= class_config[key] <= 1.0:
+            raise ValueError(f"pick.algorithm.classes.{key} 必须位于 0..1")
+    class_config["output_order"] = str(class_config.get("output_order", "row_major")).lower()
+    if class_config["output_order"] not in {"row_major", "column_major", "confidence"}:
+        raise ValueError("pick.algorithm.classes.output_order 必须是 row_major/column_major/confidence")
+
+    depth_config = pick_algorithm["depth"]
+    for key in ("roi_radius_px", "min_valid_pixels", "min_depth_mm", "max_depth_mm", "max_age_ms"):
+        depth_config[key] = int(depth_config[key])
+    depth_config["percentile"] = float(depth_config["percentile"])
+    if depth_config["roi_radius_px"] < 0 or depth_config["min_valid_pixels"] <= 0:
+        raise ValueError("pick.algorithm.depth 的 roi_radius_px/min_valid_pixels 非法")
+    if depth_config["min_depth_mm"] < 0 or depth_config["max_depth_mm"] <= depth_config["min_depth_mm"]:
+        raise ValueError("pick.algorithm.depth 的深度范围非法")
+    if not 0.0 <= depth_config["percentile"] <= 100.0:
+        raise ValueError("pick.algorithm.depth.percentile 必须位于 0..100")
+    if depth_config["max_age_ms"] < 0:
+        raise ValueError("pick.algorithm.depth.max_age_ms 不得为负")
+    depth_config["fail_on_invalid_depth"] = bool(depth_config.get("fail_on_invalid_depth", True))
+
+    config["pick"]["debug"]["save_root"] = str(Path(config["pick"]["debug"]["save_root"]).expanduser())
     return config

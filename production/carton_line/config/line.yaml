@@ -28,6 +28,7 @@ camera_bridge:
   snapshot_path: /stream/snapshot.jpg
   health_path: /health
   depth_url: http://127.0.0.1:18182/stream/depth.png
+  depth_meta_url: http://127.0.0.1:18182/stream/depth_meta
 
 runtimes:
   partition:
@@ -46,6 +47,14 @@ runtimes:
     accepted_task_types: [obb, obb_detection]
     accepted_model_ids: []
     accepted_model_names: []
+  pick:
+    url: http://127.0.0.1:28083
+    model_dir: models/tube_pick_vision/current
+    device_id: lb3576-tube-pick
+    component: rknn_runtime_tube_pick
+    accepted_task_types: [detection, detect]
+    accepted_model_ids: []
+    accepted_model_names: []
 
 collectors:
   partition:
@@ -62,6 +71,14 @@ collectors:
     device_id: lb3576-tube
     component: collector_tube
     models_root: models/carton_tube_check
+    snapshot_refresh_interval_ms: 200
+    status_refresh_interval_ms: 2000
+  pick:
+    listen_host: 0.0.0.0
+    listen_port: 18093
+    device_id: lb3576-tube-pick
+    component: collector_tube_pick
+    models_root: models/tube_pick_vision
     snapshot_refresh_interval_ms: 200
     status_refresh_interval_ms: 2000
 
@@ -125,6 +142,50 @@ tube:
       baseline_mode: row_median
       height_threshold_mm: 30
 
+pick:
+  tcp:
+    # Vision box is TCP Client; change this to the robot scheduler server IP.
+    server_host: 127.0.0.1
+    server_port: 10000
+    connect_timeout_ms: 3000
+    read_timeout_ms: 1000
+    reconnect_initial_ms: 1000
+    reconnect_max_ms: 10000
+    max_frame_bytes: 1048576
+    response_cache_size: 32
+    response_function: tube_pick_result
+    camera_id: 0
+    # The scheduler broadcasts triggers to all clients. Fill these lists when
+    # multiple visual clients share the same server; empty means accept all.
+    accepted_functions: []
+    accepted_cameras: []
+    accepted_task_ids: []
+    http:
+      listen_host: 127.0.0.1
+      listen_port: 19130
+  algorithm:
+    classes:
+      product_ids: [0]
+      separator_ids: [1]
+      product_names: [tube_product, product, tube]
+      separator_names: [large_separator, separator, partition]
+      product_min_confidence: 0.50
+      separator_min_confidence: 0.50
+      output_order: row_major
+    depth:
+      # Orbbec bridge already uses ALIGN_D2C_SW_MODE. x/y remain color-image
+      # pixels; z is sampled from the aligned 16UC1 depth image in millimetres.
+      roi_radius_px: 4
+      percentile: 50
+      min_valid_pixels: 3
+      min_depth_mm: 100
+      max_depth_mm: 5000
+      max_age_ms: 1500
+      fail_on_invalid_depth: true
+  debug:
+    save_every_trigger: true
+    save_root: /tmp/visionops_v3/carton_line/tube_pick_vision/latest
+
 coordinates:
   output_frame: robot
   register_order: column
@@ -160,4 +221,4 @@ coordinates:
 
 debug:
   save_every_trigger: true
-  save_root: /var/lib/visionops_v3/carton_line/latest
+  save_root: /tmp/visionops_v3/carton_line/latest

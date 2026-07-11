@@ -13,4 +13,5 @@ models/<task>/<version>/
 ```text
 models/carton_partition_check/current/
 models/carton_tube_check/current/
+models/tube_pick_vision/current/
 ```
