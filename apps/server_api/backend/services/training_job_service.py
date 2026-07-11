@@ -89,6 +89,10 @@ class TrainingJobService:
             "dataset_json": str(Path(str(dataset.get("dataset_json") or dataset.get("dataset_path"))) / "dataset.json")
             if dataset.get("dataset_json") is None else str(dataset.get("dataset_json")),
             "dataset_batches_json": str(Path(str(dataset.get("dataset_path"))) / "batches.json"),
+            "dataset_path": str(dataset.get("dataset_path") or ""),
+            "training_data_path": str(dataset.get("training_data_path") or dataset.get("data_yaml") or ""),
+            "dataset_access_mode": "shared_reference",
+            "job_dataset_copy": False,
             "model_packages_root": str(self.model_package_service.model_packages_root),
             "created_at_ms": now,
             "updated_at_ms": now,
@@ -100,6 +104,7 @@ class TrainingJobService:
             job["model_name"] = str(payload["model_name"])
         self._write_job(job_id, job)
         _write_json(job_dir / "job_config.json", job)
+        self.dataset_service.acquire_training_reference(dataset_id, job_id, job_dir)
         run_inline = bool(payload.get("run_inline", False))
         if runner == "mock":
             if run_inline:
@@ -158,6 +163,8 @@ class TrainingJobService:
         job["updated_at_ms"] = int(time.time() * 1000)
         self._write_job(job["job_id"], job)
         self._append_log(job["job_id"], "任务已标记为 canceled。")
+        # The worker releases the dataset reference in its finally block after
+        # the child process has actually exited, avoiding a delete/read race.
         return job
 
     def delete_job(self, job_id: str) -> dict[str, Any]:
@@ -171,6 +178,7 @@ class TrainingJobService:
         job_dir = Path(job.get("job_path") or (self.jobs_root / job["job_id"]))
         if not job_dir.is_dir():
             raise FileNotFoundError(f"训练任务目录不存在: {job_dir}")
+        self.dataset_service.release_training_reference(job["dataset_id"], job["job_id"])
         shutil.rmtree(job_dir)
         job["deleted"] = True
         job["deleted_at_ms"] = int(time.time() * 1000)
@@ -218,11 +226,13 @@ class TrainingJobService:
                     log_file.flush()
                     self._sync_pipeline_status_by_id(job_id)
                 return_code = proc.wait()
-            with self._lock:
-                self._processes.pop(job_id, None)
             self._finish_from_pipeline_result(job_id, return_code)
         except Exception as error:  # pragma: no cover - background thread safety
             self._mark_failed(job_id, error)
+        finally:
+            with self._lock:
+                self._processes.pop(job_id, None)
+            self._release_job_dataset_reference(job_id)
 
     def _finish_from_pipeline_result(self, job_id: str, return_code: int) -> None:
         job = self.get_job(job_id)
@@ -307,6 +317,8 @@ class TrainingJobService:
             self._append_log(job_id, f"模型包已生成: {package.get('model_id')}")
         except Exception as error:  # pragma: no cover
             self._mark_failed(job_id, error)
+        finally:
+            self._release_job_dataset_reference(job_id)
 
     def _mark_failed(self, job_id: str, error: Exception) -> None:
         try:
@@ -320,6 +332,15 @@ class TrainingJobService:
         job["updated_at_ms"] = job["finished_at_ms"]
         self._write_job(job_id, job)
         self._append_log(job_id, f"[ERROR] {error}")
+
+    def _release_job_dataset_reference(self, job_id: str) -> None:
+        try:
+            job = _read_json(self.jobs_root / _safe_id(job_id) / "job.json", {})
+            dataset_id = str(job.get("dataset_id") or "")
+            if dataset_id:
+                self.dataset_service.release_training_reference(dataset_id, job_id)
+        except Exception:
+            pass
 
     def _write_job(self, job_id: str, value: dict[str, Any]) -> None:
         job_id = _safe_id(job_id)

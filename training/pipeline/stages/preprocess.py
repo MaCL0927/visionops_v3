@@ -24,9 +24,98 @@ def run(ctx: PipelineContext) -> dict[str, Any]:
     if not classes:
         classes = ["object"]
 
+    shared = _reuse_materialized_dataset(ctx, dataset, task_type, classes)
+    if shared is not None:
+        return shared
+
+    # Backward-compatible fallback for legacy dataset.json files that predate
+    # dataset materialization metadata. New datasets never enter this path.
+    ctx.log("[preprocess] legacy dataset metadata detected; rebuilding a job-local dataset copy")
     if task_type == "classification":
         return _run_classification(ctx, dataset, classes)
     return _run_yolo_labels(ctx, dataset, task_type, classes)
+
+
+def _reuse_materialized_dataset(
+    ctx: PipelineContext,
+    dataset: dict[str, Any],
+    task_type: str,
+    classes: list[str],
+) -> dict[str, Any] | None:
+    """Use the immutable dataset under server_data/datasets directly.
+
+    The old pipeline copied every image into ``jobs/<job_id>/work``. The
+    dataset service already created the Ultralytics layout, so repeating that
+    work consumed a full extra dataset per training job. This path validates
+    the materialized dataset and writes only a small preprocess report.
+    """
+
+    dataset_dir_raw = str(dataset.get("yolo_dataset_path") or "").strip()
+    if not dataset_dir_raw:
+        return None
+    dataset_dir = Path(dataset_dir_raw).expanduser().resolve()
+    if not dataset_dir.is_dir():
+        return None
+
+    if task_type == "classification":
+        train_dir = dataset_dir / "train"
+        val_dir = dataset_dir / "val"
+        if not train_dir.is_dir() or not val_dir.is_dir():
+            return None
+        train_images = _count_images_recursive(train_dir)
+        val_images = _count_images_recursive(val_dir)
+        if train_images <= 0 and val_images <= 0:
+            return None
+        data_path = dataset_dir
+        data_yaml = dataset_dir / "data.yaml"
+    else:
+        train_dir = dataset_dir / "images" / "train"
+        val_dir = dataset_dir / "images" / "val"
+        data_yaml_raw = str(dataset.get("data_yaml") or dataset.get("training_data_path") or "").strip()
+        data_yaml = Path(data_yaml_raw).expanduser().resolve() if data_yaml_raw else dataset_dir / "data.yaml"
+        if not train_dir.is_dir() or not val_dir.is_dir() or not data_yaml.is_file():
+            return None
+        train_images = _count_images_recursive(train_dir)
+        val_images = _count_images_recursive(val_dir)
+        if train_images <= 0 and val_images <= 0:
+            return None
+        data_path = data_yaml
+
+    # A stale job-local copy may exist if an older job is manually resumed
+    # with the new code. It is safe to remove because this report now points to
+    # the canonical dataset directory.
+    for stale_name in ("yolo_dataset", "cls_dataset"):
+        stale = ctx.work_dir / stale_name
+        if stale.is_dir() and stale.resolve() != dataset_dir:
+            shutil.rmtree(stale)
+
+    report = {
+        "status": "success",
+        "task_type": task_type,
+        "dataset_id": dataset.get("dataset_id"),
+        "data_yaml": str(data_yaml),
+        "data_path": str(data_path),
+        "dataset_dir": str(dataset_dir),
+        "classes": classes,
+        "total_labeled_images": train_images + val_images,
+        "train_images": train_images,
+        "val_images": val_images,
+        "storage_mode": "shared_dataset_reference",
+        "source_dataset_path": str(dataset.get("dataset_path") or dataset_dir.parent),
+        "job_dataset_copy_created": False,
+    }
+    if task_type == "classification":
+        report["classification_layout"] = "ultralytics_folder"
+    write_json(ctx.output_dir / "preprocess_report.json", report)
+    ctx.log(
+        f"[preprocess] reuse dataset={dataset_dir} train={train_images} "
+        f"val={val_images} storage=shared_reference"
+    )
+    return report
+
+
+def _count_images_recursive(root: Path) -> int:
+    return sum(1 for path in root.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_EXTS)
 
 
 def _run_yolo_labels(ctx: PipelineContext, dataset: dict[str, Any], task_type: str, classes: list[str]) -> dict[str, Any]:

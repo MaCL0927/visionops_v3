@@ -166,3 +166,84 @@ def test_classification_dataset_builds_ultralytics_folder_layout(tmp_path: Path)
     assert (cls_root / "train" / "ng").is_dir()
     assert (cls_root / "val").is_dir()
     assert (cls_root / "data.yaml").exists()
+
+
+def test_dataset_materialization_hardlinks_images_but_copies_labels(tmp_path: Path) -> None:
+    from apps.server_api.backend.services.storage_utils import same_inode
+
+    batch_service = BatchService(tmp_path / "batches", ("detection",))
+    batch = batch_service.create_from_zip(_sample_zip(tmp_path / "upload.zip"), device_id="edge-dev", task_type="detection")
+    batch_service.set_status(batch["batch_id"], "accepted")
+    dataset_service = DatasetService(tmp_path / "datasets", batch_service)
+    dataset = dataset_service.build_dataset(task_type="detection", batch_ids=[batch["batch_id"]])
+
+    source_image = Path(batch["images_path"]) / "a.jpg"
+    source_label = Path(batch["raw_path"]) / "labels" / "a.txt"
+    dataset_root = Path(dataset["yolo_dataset_path"])
+    dataset_image = next((dataset_root / "images").rglob("*.jpg"))
+    dataset_label = next((dataset_root / "labels").rglob("*.txt"))
+
+    assert same_inode(source_image, dataset_image)
+    assert not same_inode(source_label, dataset_label)
+    assert dataset["storage_mode"] == "hardlink_images_copy_labels"
+    assert dataset["storage"]["estimated_saved_bytes"] == dataset["storage"]["image_bytes"]
+    assert dataset["storage"]["physical_image_bytes_added"] == 0
+
+
+def test_pipeline_preprocess_reuses_dataset_without_job_copy(tmp_path: Path) -> None:
+    from training.pipeline.common import PipelineContext
+    from training.pipeline.stages import preprocess
+
+    batch_service = BatchService(tmp_path / "batches", ("detection",))
+    batch = batch_service.create_from_zip(_sample_zip(tmp_path / "upload.zip"), device_id="edge-dev", task_type="detection")
+    batch_service.set_status(batch["batch_id"], "accepted")
+    dataset_service = DatasetService(tmp_path / "datasets", batch_service)
+    dataset = dataset_service.build_dataset(task_type="detection", batch_ids=[batch["batch_id"]])
+    dataset["batches"] = json.loads(Path(dataset["batches_json"]).read_text(encoding="utf-8"))
+
+    job_dir = tmp_path / "jobs" / "job-1"
+    work_dir = job_dir / "work"
+    output_dir = job_dir / "outputs"
+    work_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+    ctx = PipelineContext(
+        project_root=tmp_path,
+        job={"job_id": "job-1", "task_type": "detection"},
+        dataset=dataset,
+        job_dir=job_dir,
+        work_dir=work_dir,
+        output_dir=output_dir,
+    )
+
+    report = preprocess.run(ctx)
+    assert report["storage_mode"] == "shared_dataset_reference"
+    assert report["job_dataset_copy_created"] is False
+    assert Path(report["dataset_dir"]).resolve() == Path(dataset["yolo_dataset_path"]).resolve()
+    assert not (work_dir / "yolo_dataset").exists()
+
+
+def test_active_training_reference_blocks_dataset_delete(tmp_path: Path) -> None:
+    batch_service = BatchService(tmp_path / "batches", ("detection",))
+    batch = batch_service.create_from_zip(_sample_zip(tmp_path / "upload.zip"), device_id="edge-dev", task_type="detection")
+    batch_service.set_status(batch["batch_id"], "accepted")
+    dataset_service = DatasetService(tmp_path / "datasets", batch_service)
+    dataset = dataset_service.build_dataset(task_type="detection", batch_ids=[batch["batch_id"]])
+
+    job_dir = tmp_path / "jobs" / "active-job"
+    job_dir.mkdir(parents=True)
+    (job_dir / "job.json").write_text(
+        json.dumps({"job_id": "active-job", "dataset_id": dataset["dataset_id"], "status": "running"}),
+        encoding="utf-8",
+    )
+    dataset_service.acquire_training_reference(dataset["dataset_id"], "active-job", job_dir)
+
+    try:
+        dataset_service.delete_dataset(dataset["dataset_id"])
+    except ValueError as error:
+        assert "正在被训练任务引用" in str(error)
+    else:
+        raise AssertionError("active dataset reference should block deletion")
+
+    dataset_service.release_training_reference(dataset["dataset_id"], "active-job")
+    deleted = dataset_service.delete_dataset(dataset["dataset_id"])
+    assert deleted["status"] == "deleted"

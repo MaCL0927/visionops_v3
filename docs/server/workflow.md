@@ -42,11 +42,13 @@ server_data/datasets/<device_id>_<customer_id>_<task>_<yyyymmdd_hhmmss>/dataset.
 server_data/datasets/<device_id>_<customer_id>_<task>_<yyyymmdd_hhmmss>/batches.json
 ```
 
-当前会从所有已审核且任务类型匹配的 batch 构建 dataset，并物化 YOLO 训练目录。未手动传入 batch_ids 时，扫描规则是：选择 `status=accepted` 且 `task_type` 等于当前选择任务类型的全部 batch。
+审核完成后会自动从指定 batch 构建 dataset，并物化 Ultralytics 训练目录。为避免重复占用空间，dataset 图片优先与 batches 原图建立硬链接，标签文件独立复制；因此标注数据仍可在 batches 中浏览，dataset 也可以独立删除和训练，但图片数据块通常只保存一份。
 
 ## 4. 训练任务
 
-当前 training job 已接入真实 stage 化 pipeline：`preprocess -> train -> evaluate -> export_onnx -> convert_rknn -> package_v3_model`。其中 train 使用当前服务端环境；export_onnx 默认进入 `pt2onnx`；convert_rknn 默认进入 `rknn311`。
+当前 training job 已接入真实 stage 化 pipeline：`preprocess -> train -> evaluate -> export_onnx -> convert_rknn -> package_v3_model`。preprocess 只校验并引用 `datasets/<dataset_id>`，不会再把训练数据复制到 `jobs/<job_id>/work`。其中 train 使用当前服务端环境；export_onnx 默认进入 `pt2onnx`；convert_rknn 默认进入 `rknn311`。
+
+完整存储策略和已有数据迁移方法见 [storage_optimization.md](storage_optimization.md)。
 
 ## 5. 模型包发布
 

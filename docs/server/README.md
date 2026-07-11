@@ -94,8 +94,8 @@ server_data/incoming/processed/         # 已处理的原始 tar.gz
 
 当前版本已把第三步从 mock runner 替换为 v3 stage 化训练流水线。服务端控制台中的“训练与模型状态”分为两步：
 
-1. **从已审核数据构建数据集**：扫描 `server_data/batches/<batch_id>/raw` 下的图片与 `labels`，生成数据集版本，并物化 YOLO 数据目录。
-2. **启动训练流水线**：执行 `preprocess -> train -> evaluate -> export_onnx -> convert_rknn -> package_v3_model`，最终生成 v3 标准模型包。
+1. **从已审核数据构建数据集**：扫描 `server_data/batches/<batch_id>/raw` 下的图片与 `labels`，生成数据集版本。图片优先通过硬链接复用 batches 的数据块，标签独立复制。
+2. **启动训练流水线**：直接引用 datasets 下已经物化的训练目录，执行 `preprocess -> train -> evaluate -> export_onnx -> convert_rknn -> package_v3_model`，不再在 jobs 下复制数据集。
 
 数据集目录示例：
 
@@ -119,7 +119,7 @@ server_data/jobs/<device_id>_<customer_id>_<task>_job_<yyyymmdd_hhmmss>/
   job_config.json
   <job_id>.log
   pipeline_status.json
-  work/
+  work/                       # 训练 runs 和临时模型，不包含数据集副本
   outputs/
 ```
 
@@ -137,3 +137,6 @@ server_data/model_packages/<model_id>/
 ```
 
 当前真实 pipeline 首版优先支持 `detection`，同时保留 `obb` 与 `segmentation` 的 YOLO 任务分支；`classification` 的真实训练整理后续接入。训练阶段使用服务端当前环境（通常为 `visionops`）；ONNX 导出阶段默认通过 `conda run --no-capture-output -n pt2onnx ...` 切换到瑞芯微修改版 Ultralytics 环境，以导出多头 ONNX；RKNN 转换阶段默认通过 `conda run --no-capture-output -n rknn311 python -m training.pipeline.stages.convert_rknn_worker ...` 切换到 `rknn311` 环境。
+
+
+服务端空间优化与已有数据迁移见 [`storage_optimization.md`](storage_optimization.md)。

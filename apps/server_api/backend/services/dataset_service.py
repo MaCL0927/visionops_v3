@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .ingest_service import BatchService, IMAGE_EXTENSIONS
+from .storage_utils import link_or_copy_immutable
 
 CLASSIFICATION_ROOT_NAMES = {"cls", "classification", "raw_classification", "classes"}
 RESERVED_DIR_NAMES = {
@@ -46,12 +47,74 @@ class DatasetService:
     def delete_dataset(self, dataset_id: str) -> dict[str, Any]:
         dataset_id = _safe_id(dataset_id)
         meta = self.get_dataset(dataset_id)
+        active_refs = self.active_training_references(dataset_id)
+        if active_refs:
+            job_ids = ", ".join(str(item.get("job_id") or "unknown") for item in active_refs)
+            raise ValueError(f"数据集正在被训练任务引用，不能删除: {job_ids}")
         dataset_dir = self.datasets_root / dataset_id
         if dataset_dir.exists():
             shutil.rmtree(dataset_dir)
         meta["status"] = "deleted"
         meta["deleted_at_ms"] = int(time.time() * 1000)
         return meta
+
+    def acquire_training_reference(self, dataset_id: str, job_id: str, job_path: Path) -> None:
+        """Protect a dataset while a training process is actively using it."""
+
+        dataset_id = _safe_id(dataset_id)
+        job_id = _safe_id(job_id)
+        dataset_dir = self.datasets_root / dataset_id
+        if not (dataset_dir / "dataset.json").is_file():
+            raise FileNotFoundError(f"数据集不存在: {dataset_id}")
+        ref = {
+            "dataset_id": dataset_id,
+            "job_id": job_id,
+            "job_path": str(Path(job_path)),
+            "job_json": str(Path(job_path) / "job.json"),
+            "created_at_ms": int(time.time() * 1000),
+        }
+        _write_json(dataset_dir / ".active_job_refs" / f"{job_id}.json", ref)
+
+    def release_training_reference(self, dataset_id: str, job_id: str) -> None:
+        dataset_id = _safe_id(dataset_id)
+        job_id = _safe_id(job_id)
+        ref_path = self.datasets_root / dataset_id / ".active_job_refs" / f"{job_id}.json"
+        try:
+            ref_path.unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            ref_path.parent.rmdir()
+        except OSError:
+            pass
+
+    def active_training_references(self, dataset_id: str) -> list[dict[str, Any]]:
+        """Return live pending/running references and prune stale markers."""
+
+        dataset_id = _safe_id(dataset_id)
+        refs_root = self.datasets_root / dataset_id / ".active_job_refs"
+        if not refs_root.is_dir():
+            return []
+        active: list[dict[str, Any]] = []
+        for ref_path in sorted(refs_root.glob("*.json")):
+            ref = _read_json(ref_path, {})
+            job_json = Path(str(ref.get("job_json") or ""))
+            # The marker itself is authoritative. A canceled job may still be
+            # shutting down and reading the dataset; its worker removes the
+            # marker only after the child process has exited. Prune only truly
+            # orphaned markers whose job directory no longer exists.
+            if job_json.is_file():
+                active.append(ref)
+                continue
+            try:
+                ref_path.unlink()
+            except OSError:
+                pass
+        try:
+            refs_root.rmdir()
+        except OSError:
+            pass
+        return active
 
     def build_dataset(self, *, task_type: str, batch_ids: list[str] | None = None, name: str | None = None) -> dict[str, Any]:
         """Create a dataset version from explicitly selected reviewed batches."""
@@ -115,17 +178,20 @@ class DatasetService:
             "batches_json": str(dataset_dir / "batches.json"),
             "yolo_dataset_path": str(dataset_dir / dataset_subdir),
             "data_yaml": data_path,
+            "training_data_path": data_path,
             "source_manifests": source_manifests,
             "created_at_ms": now,
             "updated_at_ms": now,
-            "note": "v3 dataset version: reviewed batch materialized to Ultralytics dataset automatically after annotator review.",
+            "note": "Reviewed batch materialized once under datasets; image bytes are hard-linked from batches when possible, and training jobs reference this dataset directly.",
         }
         _write_json(dataset_dir / "dataset.json", meta)
         _write_json(dataset_dir / "batches.json", normalized_selected)
         if task_type == "classification":
-            _materialize_classification_dataset(dataset_dir / dataset_subdir, normalized_selected, classes)
+            storage = _materialize_classification_dataset(dataset_dir / dataset_subdir, normalized_selected, classes)
         else:
-            _materialize_yolo_dataset(dataset_dir / dataset_subdir, normalized_selected, classes, task_type)
+            storage = _materialize_yolo_dataset(dataset_dir / dataset_subdir, normalized_selected, classes, task_type)
+        meta["storage"] = storage
+        meta["storage_mode"] = storage.get("storage_mode")
         meta["materialized_at_ms"] = int(time.time() * 1000)
         _write_json(dataset_dir / "dataset.json", meta)
         return meta
@@ -249,7 +315,7 @@ def _count_classification_images(batches: list[dict[str, Any]]) -> tuple[int, in
     return count, count
 
 
-def _materialize_yolo_dataset(yolo_dir: Path, batches: list[dict[str, Any]], classes: list[str], task_type: str) -> None:
+def _materialize_yolo_dataset(yolo_dir: Path, batches: list[dict[str, Any]], classes: list[str], task_type: str) -> dict[str, Any]:
     if yolo_dir.exists():
         shutil.rmtree(yolo_dir)
     for sub in ["images/train", "images/val", "labels/train", "labels/val"]:
@@ -271,16 +337,21 @@ def _materialize_yolo_dataset(yolo_dir: Path, batches: list[dict[str, Any]], cla
         raise ValueError("无法物化数据集：没有 image+label 配对")
     val, train = _split_items(pairs)
 
+    storage = _new_storage_report()
     for split, items in [("train", train), ("val", val)]:
         for image, label in items:
             name = _unique_name(image, label)
-            shutil.copy2(image, yolo_dir / "images" / split / name)
-            shutil.copy2(label, yolo_dir / "labels" / split / f"{Path(name).stem}.txt")
+            _materialize_image(image, yolo_dir / "images" / split / name, storage)
+            label_dst = yolo_dir / "labels" / split / f"{Path(name).stem}.txt"
+            shutil.copy2(label, label_dst)
+            storage["label_files"] += 1
+            storage["label_bytes"] += int(label.stat().st_size)
 
     _write_data_yaml(yolo_dir / "data.yaml", yolo_dir, classes or ["object"], task_type)
+    return _finalize_storage_report(storage)
 
 
-def _materialize_classification_dataset(cls_dir: Path, batches: list[dict[str, Any]], classes: list[str]) -> None:
+def _materialize_classification_dataset(cls_dir: Path, batches: list[dict[str, Any]], classes: list[str]) -> dict[str, Any]:
     if cls_dir.exists():
         shutil.rmtree(cls_dir)
     (cls_dir / "train").mkdir(parents=True, exist_ok=True)
@@ -302,12 +373,59 @@ def _materialize_classification_dataset(cls_dir: Path, batches: list[dict[str, A
         (cls_dir / "train" / class_name).mkdir(parents=True, exist_ok=True)
         (cls_dir / "val" / class_name).mkdir(parents=True, exist_ok=True)
 
+    storage = _new_storage_report()
     val, train = _split_items(items)
     for split, split_items in [("train", train), ("val", val)]:
         for image, class_name in split_items:
-            shutil.copy2(image, cls_dir / split / class_name / _unique_classification_name(image))
+            _materialize_image(image, cls_dir / split / class_name / _unique_classification_name(image), storage)
 
     _write_data_yaml(cls_dir / "data.yaml", cls_dir, class_names, "classification")
+    return _finalize_storage_report(storage)
+
+
+def _new_storage_report() -> dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "image_files": 0,
+        "image_bytes": 0,
+        "hardlinked_images": 0,
+        "copied_images": 0,
+        "label_files": 0,
+        "label_bytes": 0,
+        "estimated_saved_bytes": 0,
+        "fallback_errors": [],
+    }
+
+
+def _materialize_image(src: Path, dst: Path, storage: dict[str, Any]) -> None:
+    result = link_or_copy_immutable(src, dst)
+    size = int(result.get("size_bytes") or 0)
+    storage["image_files"] += 1
+    storage["image_bytes"] += size
+    if result.get("mode") == "hardlink":
+        storage["hardlinked_images"] += 1
+        storage["estimated_saved_bytes"] += size
+    else:
+        storage["copied_images"] += 1
+        error = str(result.get("fallback_error") or "")
+        if error and error not in storage["fallback_errors"] and len(storage["fallback_errors"]) < 5:
+            storage["fallback_errors"].append(error)
+
+
+def _finalize_storage_report(storage: dict[str, Any]) -> dict[str, Any]:
+    image_files = int(storage.get("image_files") or 0)
+    hardlinks = int(storage.get("hardlinked_images") or 0)
+    copies = int(storage.get("copied_images") or 0)
+    if image_files and hardlinks == image_files:
+        mode = "hardlink_images_copy_labels"
+    elif image_files and copies == image_files:
+        mode = "copy_fallback"
+    else:
+        mode = "mixed_hardlink_copy"
+    storage["storage_mode"] = mode
+    storage["physical_image_bytes_added"] = int(storage.get("image_bytes") or 0) - int(storage.get("estimated_saved_bytes") or 0)
+    storage["physical_bytes_added_estimate"] = int(storage["physical_image_bytes_added"]) + int(storage.get("label_bytes") or 0)
+    return storage
 
 
 def _split_items(items: list[Any]) -> tuple[list[Any], list[Any]]:
