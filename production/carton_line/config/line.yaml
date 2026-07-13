@@ -23,6 +23,13 @@ modbus:
   heartbeat_interval_ms: 500
   heartbeat_max: 1000
 
+runtime_recovery:
+  # Runtime 内部自动重连。正常取流时不产生额外等待；只有连续失败后才退避重连。
+  stale_frame_timeout_ms: 3000
+  failure_threshold: 3
+  initial_backoff_ms: 200
+  max_backoff_ms: 2000
+
 camera_bridge:
   base_url: http://127.0.0.1:18182
   snapshot_path: /stream/snapshot.jpg

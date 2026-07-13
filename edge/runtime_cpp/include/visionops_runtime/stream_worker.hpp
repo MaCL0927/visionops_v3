@@ -33,6 +33,10 @@ struct FrameSourceConfig {
   bool enable_camera_thread{true};
   int camera_open_timeout_ms{3000};
   int camera_read_timeout_ms{1000};
+  int stale_frame_timeout_ms{3000};
+  int reconnect_failure_threshold{3};
+  int reconnect_initial_ms{200};
+  int reconnect_max_ms{2000};
 };
 
 struct FrameSourceStatus {
@@ -49,6 +53,12 @@ struct FrameSourceStatus {
   std::string last_error;
   std::string snapshot_encoder{"mock_jpeg"};
   std::uint64_t frames_captured{0};
+  std::uint64_t latest_frame_age_ms{0};
+  bool stale{false};
+  bool thread_alive{false};
+  std::uint64_t consecutive_read_errors{0};
+  std::uint64_t reconnect_count{0};
+  std::uint64_t last_reconnect_timestamp_ms{0};
 };
 
 struct FrameReadResult {
@@ -79,8 +89,9 @@ class StreamWorkerMock {
   FrameSourceStatus status() const;
 
  private:
-  void set_error(std::string error);
+  void set_error(std::string error, bool mark_closed = true);
   void clear_error();
+  bool frame_is_fresh_locked(std::uint64_t now_ms) const;
   ImageBuffer make_mock_image_for_sequence(std::uint64_t sequence) const;
   bool open_source(std::string& error);
   void close_source();
@@ -104,7 +115,11 @@ class StreamWorkerMock {
   std::uint64_t latest_sequence_{0};
   double measured_fps_{0.0};
   std::atomic_bool stop_thread_{false};
+  std::atomic_bool camera_thread_alive_{false};
   std::thread camera_thread_;
+  std::uint64_t consecutive_read_errors_{0};
+  std::uint64_t reconnect_count_{0};
+  std::uint64_t last_reconnect_timestamp_ms_{0};
 
 #ifdef __linux__
   struct MmapBuffer {

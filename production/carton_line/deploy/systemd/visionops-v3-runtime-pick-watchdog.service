@@ -1,0 +1,10 @@
+[Unit]
+Description=VisionOps v3 Tube Pick Runtime Frame Watchdog
+After=network-online.target visionops-orbbec336l-bridge.service visionops-v3-runtime-pick.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/visionops_v3/carton_line.env
+ExecStart=/opt/visionops_v3/production/carton_line/scripts/watch_pick_runtime.sh
+TimeoutStartSec=30

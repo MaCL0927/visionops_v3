@@ -80,6 +80,14 @@ CliArgs parse_cli_args(int argc, char* argv[]) {
       args.config.camera_open_timeout_ms = std::stoi(require_value(argc, argv, index));
     } else if (argument == "--camera-read-timeout-ms") {
       args.config.camera_read_timeout_ms = std::stoi(require_value(argc, argv, index));
+    } else if (argument == "--stale-frame-timeout-ms") {
+      args.config.stale_frame_timeout_ms = std::stoi(require_value(argc, argv, index));
+    } else if (argument == "--camera-reconnect-failure-threshold") {
+      args.config.reconnect_failure_threshold = std::stoi(require_value(argc, argv, index));
+    } else if (argument == "--camera-reconnect-initial-ms") {
+      args.config.reconnect_initial_ms = std::stoi(require_value(argc, argv, index));
+    } else if (argument == "--camera-reconnect-max-ms") {
+      args.config.reconnect_max_ms = std::stoi(require_value(argc, argv, index));
     } else {
       throw std::invalid_argument("未知参数: " + argument);
     }
@@ -122,6 +130,10 @@ std::string cli_help_text(const std::string& program) {
          "  --enable-camera-thread <true/false> 是否开启取流线程，默认 true\n"
          "  --camera-open-timeout-ms <毫秒> 摄像头打开超时占位参数\n"
          "  --camera-read-timeout-ms <毫秒> 摄像头读取超时，默认 1000\n"
+         "  --stale-frame-timeout-ms <毫秒> 实时帧过期阈值，默认 3000\n"
+         "  --camera-reconnect-failure-threshold <次数> 连续失败多少次后重建帧源，默认 3\n"
+         "  --camera-reconnect-initial-ms <毫秒> 自动重连初始退避，默认 200\n"
+         "  --camera-reconnect-max-ms <毫秒> 自动重连最大退避，默认 2000\n"
          "  --help                    显示帮助\n";
 }
 

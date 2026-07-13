@@ -33,6 +33,10 @@ struct AppConfig {
   bool enable_camera_thread{true};
   int camera_open_timeout_ms{3000};
   int camera_read_timeout_ms{1000};
+  int stale_frame_timeout_ms{3000};
+  int reconnect_failure_threshold{3};
+  int reconnect_initial_ms{200};
+  int reconnect_max_ms{2000};
 };
 
 bool is_supported_mock_task_type(const std::string& task_type);

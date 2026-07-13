@@ -13,6 +13,7 @@
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <utility>
 
 #include "visionops_runtime/json_utils.hpp"
 
@@ -53,6 +54,7 @@ std::string status_reason(int status_code) {
     case 405: return "Method Not Allowed";
     case 413: return "Payload Too Large";
     case 500: return "Internal Server Error";
+    case 503: return "Service Unavailable";
     default: return "Error";
   }
 }
@@ -319,10 +321,22 @@ HttpResponse HttpServer::route(const HttpRequest& request) {
     if (request.method != "GET" && request.method != "HEAD") {
       return method_not_allowed("GET, HEAD");
     }
+    auto snapshot = app_.snapshot_jpeg();
+    if (snapshot.empty()) {
+      auto response = error_response(
+          503,
+          "Service Unavailable",
+          "CAMERA_FRAME_STALE",
+          "实时画面暂不可用，Runtime 正在自动重连帧源",
+          true);
+      response.headers.emplace_back("X-Frame-Id", app_.snapshot_frame_id());
+      response.headers.emplace_back("Cache-Control", "no-store");
+      return response;
+    }
     HttpResponse response;
     response.content_type = "image/jpeg";
     if (request.method == "GET") {
-      response.body = app_.snapshot_jpeg();
+      response.body = std::move(snapshot);
     }
     response.headers.emplace_back("X-Frame-Id", app_.snapshot_frame_id());
     response.headers.emplace_back("X-Timestamp-Ms", std::to_string(now_timestamp_ms()));

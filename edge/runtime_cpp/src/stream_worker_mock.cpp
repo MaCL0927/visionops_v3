@@ -76,6 +76,19 @@ bool is_hp60c_source(const std::string& type) {
   return type == "hp60c_bridge" || type == "hp60c";
 }
 
+bool is_live_source(const std::string& type) {
+  return type == "v4l2" || is_hp60c_source(type);
+}
+
+void sleep_interruptible(const std::atomic_bool& stop_requested, int total_ms) {
+  int remaining = std::max(0, total_ms);
+  while (remaining > 0 && !stop_requested.load()) {
+    const int slice = std::min(remaining, 50);
+    std::this_thread::sleep_for(std::chrono::milliseconds(slice));
+    remaining -= slice;
+  }
+}
+
 struct HttpUrlParts {
   std::string host{"127.0.0.1"};
   int port{80};
@@ -273,15 +286,24 @@ StreamWorkerMock::StreamWorkerMock(FrameSourceConfig config)
 
 StreamWorkerMock::~StreamWorkerMock() { stop_preview(); }
 
-void StreamWorkerMock::set_error(std::string error) {
+void StreamWorkerMock::set_error(std::string error, bool mark_closed) {
   std::lock_guard<std::mutex> lock(mutex_);
   last_error_ = std::move(error);
-  opened_ = false;
+  if (mark_closed) opened_ = false;
 }
 
 void StreamWorkerMock::clear_error() {
   std::lock_guard<std::mutex> lock(mutex_);
   last_error_.clear();
+}
+
+bool StreamWorkerMock::frame_is_fresh_locked(std::uint64_t now_ms) const {
+  if (!is_live_source(config_.type)) return true;
+  const std::uint64_t timestamp =
+      latest_image_.timestamp_ms > 0 ? latest_image_.timestamp_ms : latest_jpeg_timestamp_ms_;
+  if (timestamp == 0) return false;
+  if (now_ms < timestamp) return true;
+  return now_ms - timestamp <= static_cast<std::uint64_t>(config_.stale_frame_timeout_ms);
 }
 
 ImageBuffer StreamWorkerMock::make_mock_image_for_sequence(std::uint64_t sequence) const {
@@ -303,30 +325,35 @@ void StreamWorkerMock::start_preview() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (preview_running_) return;
     preview_running_ = true;
+    consecutive_read_errors_ = 0;
   }
+
   std::string error;
-  if (!open_source(error)) {
+  const bool opened = open_source(error);
+  if (!opened) {
+    // 首次打开失败不能让 preview 永久卡在“running 但没有采集线程”的状态。
+    // 保留错误信息，同时仍启动后台线程，由 camera_loop 按退避策略自动重连。
     set_error(error);
-    return;
-  }
-  clear_error();
-  // 启动预览后先同步抓取一帧，避免 status/snapshot 在首次访问时仍显示 mock_jpeg。
-  if (config_.type == "v4l2" || is_hp60c_source(config_.type)) {
-    ImageBuffer initial_image;
-    std::string initial_error;
-    double capture_ms = 0.0;
-    double decode_ms = 0.0;
-    if (read_frame_once(initial_image, capture_ms, decode_ms, initial_error)) {
-      update_latest(std::move(initial_image));
-      clear_error();
-    } else if (!is_hp60c_source(config_.type)) {
-      // V4L2 首帧失败通常意味着设备不可读；HP60C 在未启用 OpenCV 时可能已经缓存 JPEG，
-      // 但不能解码成 RGB，此时不应影响 snapshot.jpg 输出。
-      set_error(initial_error);
+  } else {
+    clear_error();
+    // 正常情况下仍同步抓取首帧，使 start_preview 返回后页面能尽快显示画面。
+    if (is_live_source(config_.type)) {
+      ImageBuffer initial_image;
+      std::string initial_error;
+      double capture_ms = 0.0;
+      double decode_ms = 0.0;
+      if (read_frame_once(initial_image, capture_ms, decode_ms, initial_error)) {
+        update_latest(std::move(initial_image));
+        clear_error();
+      } else if (!is_hp60c_source(config_.type)) {
+        set_error(initial_error, false);
+      }
     }
   }
-  if ((config_.type == "v4l2" || is_hp60c_source(config_.type)) && config_.enable_camera_thread) {
+
+  if (is_live_source(config_.type) && config_.enable_camera_thread) {
     stop_thread_.store(false);
+    camera_thread_alive_.store(true);
     camera_thread_ = std::thread(&StreamWorkerMock::camera_loop, this);
   }
 }
@@ -357,6 +384,7 @@ bool StreamWorkerMock::preview_running() const {
 bool StreamWorkerMock::latest_frame(ImageBuffer& image) const {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!image_buffer_valid_rgb(latest_image_)) return false;
+  if (!frame_is_fresh_locked(static_cast<std::uint64_t>(now_timestamp_ms()))) return false;
   image = latest_image_;
   return true;
 }
@@ -364,6 +392,7 @@ bool StreamWorkerMock::latest_frame(ImageBuffer& image) const {
 bool StreamWorkerMock::latest_snapshot_jpeg(std::vector<std::uint8_t>& jpeg) const {
   std::lock_guard<std::mutex> lock(mutex_);
   if (latest_jpeg_.empty()) return false;
+  if (!frame_is_fresh_locked(static_cast<std::uint64_t>(now_timestamp_ms()))) return false;
   jpeg = latest_jpeg_;
   return true;
 }
@@ -373,10 +402,22 @@ FrameSourceStatus StreamWorkerMock::status() const {
   FrameSourceStatus status;
   status.type = config_.type;
   status.device = config_.camera_device;
-  status.opened = opened_;
+  const auto now_ms = static_cast<std::uint64_t>(now_timestamp_ms());
+  const auto frame_timestamp =
+      latest_image_.timestamp_ms > 0 ? latest_image_.timestamp_ms : latest_jpeg_timestamp_ms_;
+  status.latest_frame_age_ms =
+      frame_timestamp > 0 && now_ms >= frame_timestamp ? now_ms - frame_timestamp : 0;
+  status.stale = is_live_source(config_.type) && !frame_is_fresh_locked(now_ms);
+  status.opened = opened_ && !status.stale;
+  status.thread_alive = camera_thread_alive_.load();
+  status.consecutive_read_errors = consecutive_read_errors_;
+  status.reconnect_count = reconnect_count_;
+  status.last_reconnect_timestamp_ms = last_reconnect_timestamp_ms_;
   status.width = config_.type == "mock" ? 1920 : config_.camera_width;
   status.height = config_.type == "mock" ? 1080 : config_.camera_height;
-  status.fps = measured_fps_ > 0.0 ? measured_fps_ : (config_.type == "mock" ? 15.0 : config_.camera_fps);
+  status.fps = status.stale
+      ? 0.0
+      : (measured_fps_ > 0.0 ? measured_fps_ : (config_.type == "mock" ? 15.0 : config_.camera_fps));
   status.pixel_format = config_.type == "v4l2" ? normalize_pixel_format(config_.camera_pixel_format) : "RGB888";
   if (is_hp60c_source(config_.type)) status.pixel_format = "JPEG/RGB888";
   status.latest_timestamp_ms = latest_image_.timestamp_ms > 0 ? latest_image_.timestamp_ms : latest_jpeg_timestamp_ms_;
@@ -440,7 +481,8 @@ FrameReadResult StreamWorkerMock::next_frame(std::uint64_t sequence) {
 
     // 只有 preview 线程运行时，latest_image_ 才可以认为是持续更新的实时缓存。
     // 未启动 preview 时，next_frame 应主动从帧源读取新图，避免 infer_once/snapshot 永远使用首帧。
-    if (preview_running_ && latest_image_.data.size() > 0 && latest_image_.width > 0) {
+    if (preview_running_ && latest_image_.data.size() > 0 && latest_image_.width > 0 &&
+        frame_is_fresh_locked(static_cast<std::uint64_t>(now_timestamp_ms()))) {
       result.image = latest_image_;
       result.from_cache = true;
       result.frame.width = result.image.width;
@@ -497,28 +539,89 @@ void StreamWorkerMock::close_source() {
 }
 
 void StreamWorkerMock::camera_loop() {
+  camera_thread_alive_.store(true);
   std::uint64_t frames = 0;
-  const auto started_at = std::chrono::steady_clock::now();
+  auto fps_window_started = std::chrono::steady_clock::now();
+  int consecutive_failures = 0;
+  int reconnect_backoff_ms = config_.reconnect_initial_ms;
+
   while (!stop_thread_.load()) {
+    bool source_opened = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      source_opened = opened_;
+    }
+
+    if (!source_opened) {
+      std::string open_error;
+      if (!open_source(open_error)) {
+        ++consecutive_failures;
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          consecutive_read_errors_ = static_cast<std::uint64_t>(consecutive_failures);
+        }
+        set_error(open_error);
+        sleep_interruptible(stop_thread_, reconnect_backoff_ms);
+        reconnect_backoff_ms = std::min(reconnect_backoff_ms * 2, config_.reconnect_max_ms);
+        continue;
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++reconnect_count_;
+        last_reconnect_timestamp_ms_ = static_cast<std::uint64_t>(now_timestamp_ms());
+      }
+    }
+
     ImageBuffer image;
     std::string error;
     double capture_ms = 0.0;
     double decode_ms = 0.0;
     if (read_frame_once(image, capture_ms, decode_ms, error)) {
+      const bool recovered_after_error = consecutive_failures > 0;
+      if (recovered_after_error) {
+        frames = 0;
+        fps_window_started = std::chrono::steady_clock::now();
+      }
       ++frames;
+      consecutive_failures = 0;
+      reconnect_backoff_ms = config_.reconnect_initial_ms;
       update_latest(std::move(image));
-      const auto elapsed = std::chrono::duration<double>(
-          std::chrono::steady_clock::now() - started_at).count();
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        consecutive_read_errors_ = 0;
+      }
+      const auto now = std::chrono::steady_clock::now();
+      const auto elapsed = std::chrono::duration<double>(now - fps_window_started).count();
       if (elapsed > 0.5) {
         std::lock_guard<std::mutex> lock(mutex_);
         measured_fps_ = frames / elapsed;
       }
       clear_error();
-    } else {
-      set_error(error);
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      continue;
     }
+
+    ++consecutive_failures;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      consecutive_read_errors_ = static_cast<std::uint64_t>(consecutive_failures);
+    }
+
+    if (consecutive_failures < config_.reconnect_failure_threshold) {
+      set_error(error, false);
+      sleep_interruptible(stop_thread_, 50);
+      continue;
+    }
+
+    // 连续失败达到阈值后，彻底关闭并重建帧源。HTTP Bridge 模式下
+    // 这会重新执行 /health 检查；V4L2 模式下会重新 open/STREAMON。
+    set_error(error);
+    close_source();
+    sleep_interruptible(stop_thread_, reconnect_backoff_ms);
+    reconnect_backoff_ms = std::min(reconnect_backoff_ms * 2, config_.reconnect_max_ms);
   }
+
+  camera_thread_alive_.store(false);
 }
 
 bool StreamWorkerMock::read_frame_once(
@@ -544,6 +647,7 @@ void StreamWorkerMock::update_latest(ImageBuffer image) {
   latest_sequence_ = std::max(latest_sequence_, image.sequence);
   latest_image_ = std::move(image);
   opened_ = true;
+  consecutive_read_errors_ = 0;
 }
 
 

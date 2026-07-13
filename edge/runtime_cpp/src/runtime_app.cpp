@@ -195,6 +195,10 @@ FrameSourceConfig make_frame_source_config(const AppConfig& config) {
   frame_config.enable_camera_thread = config.enable_camera_thread;
   frame_config.camera_open_timeout_ms = config.camera_open_timeout_ms;
   frame_config.camera_read_timeout_ms = config.camera_read_timeout_ms;
+  frame_config.stale_frame_timeout_ms = config.stale_frame_timeout_ms;
+  frame_config.reconnect_failure_threshold = config.reconnect_failure_threshold;
+  frame_config.reconnect_initial_ms = config.reconnect_initial_ms;
+  frame_config.reconnect_max_ms = config.reconnect_max_ms;
   return frame_config;
 }
 
@@ -212,6 +216,12 @@ std::string frame_source_json(const FrameSourceStatus& frame_source) {
          << (frame_source.latest_frame_id.empty() ? "null" : '"' + json_escape(frame_source.latest_frame_id) + '"')
          << ",\"latest_timestamp_ms\":" << frame_source.latest_timestamp_ms
          << ",\"snapshot_encoder\":\"" << json_escape(frame_source.snapshot_encoder) << '"'
+         << ",\"latest_frame_age_ms\":" << frame_source.latest_frame_age_ms
+         << ",\"stale\":" << json_bool(frame_source.stale)
+         << ",\"thread_alive\":" << json_bool(frame_source.thread_alive)
+         << ",\"consecutive_read_errors\":" << frame_source.consecutive_read_errors
+         << ",\"reconnect_count\":" << frame_source.reconnect_count
+         << ",\"last_reconnect_timestamp_ms\":" << frame_source.last_reconnect_timestamp_ms
          << ",\"last_error\":"
          << (frame_source.last_error.empty() ? "null" : '"' + json_escape(frame_source.last_error) + '"')
          << '}';
@@ -232,8 +242,13 @@ RuntimeApp::RuntimeApp(AppConfig config)
 bool RuntimeApp::runtime_degraded() const {
   std::lock_guard<std::recursive_mutex> lock(model_mutex_);
   const auto frame_source = stream_worker_.status();
-  return model_info_.degraded() || !rknn_runner_->is_loaded() ||
-         (config_.frame_source == "v4l2" && !frame_source.last_error.empty());
+  const bool live_preview_unhealthy =
+      stream_worker_.preview_running() &&
+      (config_.frame_source == "v4l2" || config_.frame_source == "hp60c_bridge" ||
+       config_.frame_source == "hp60c") &&
+      (!frame_source.opened || frame_source.stale || !frame_source.thread_alive ||
+       !frame_source.last_error.empty());
+  return model_info_.degraded() || !rknn_runner_->is_loaded() || live_preview_unhealthy;
 }
 
 std::string RuntimeApp::health_json() const {
@@ -259,7 +274,10 @@ std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
   const auto now = now_timestamp_ms();
   const auto frame_source = stream_worker_.status();
   const double inference_fps = snapshot.running && snapshot.mode == "detect" ? 1.0 : 0.0;
-  const double snapshot_fps = snapshot.running && snapshot.mode == "preview" ? frame_source.fps : 0.0;
+  const double snapshot_fps =
+      snapshot.running && snapshot.mode == "preview" && !frame_source.stale
+          ? frame_source.fps
+          : 0.0;
   std::ostringstream stream;
   stream << std::fixed << std::setprecision(3)
          << "{\"schema_version\":\"1.0\",\"message_type\":\"runtime_status\""
@@ -274,7 +292,8 @@ std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
          << json_escape(runtime_degraded() ? "degraded" : snapshot.health) << '"'
          << ",\"uptime_s\":" << snapshot.uptime_s
          << ",\"loaded_model\":" << loaded_model_json()
-         << ",\"camera_connected\":" << json_bool(frame_source.opened && frame_source.last_error.empty())
+         << ",\"camera_connected\":"
+         << json_bool(frame_source.opened && !frame_source.stale && frame_source.last_error.empty())
          << ",\"frame_source\":" << frame_source_json(frame_source)
          << ",\"preprocess\":{\"backend_requested\":\"" << json_escape(config_.preprocess_backend)
          << "\",\"backend_active\":\"" << json_escape(config_.preprocess_backend == "auto" && rga_backend_compiled() ? "rga" : config_.preprocess_backend)
@@ -861,6 +880,13 @@ std::vector<std::uint8_t> RuntimeApp::snapshot_jpeg() {
   ImageBuffer image;
   if (stream_worker_.latest_frame(image)) {
     return snapshot_provider_.snapshot_jpeg(&image);
+  }
+
+  if (config_.frame_source == "v4l2" || config_.frame_source == "hp60c_bridge" ||
+      config_.frame_source == "hp60c") {
+    // 实时帧源不可用或缓存已过期时返回空，让 HTTP 层明确返回 503，
+    // 避免把数分钟前的旧图或 mock 占位图伪装成实时画面。
+    return {};
   }
 
   return snapshot_provider_.snapshot_jpeg();

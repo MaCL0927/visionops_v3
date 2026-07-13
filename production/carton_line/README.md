@@ -99,6 +99,8 @@ Orbbec 336L Bridge :18182
 visionops-v3-runtime-pick.service
 visionops-v3-tcp-pick.service
 visionops-v3-collector-pick.service
+visionops-v3-runtime-pick-watchdog.service
+visionops-v3-runtime-pick-watchdog.timer
 ```
 
 ## 4. Profile 安装
@@ -158,7 +160,8 @@ sudo bash production/carton_line/deploy/install_services.sh \
 sudo systemctl start \
   visionops-v3-runtime-pick.service \
   visionops-v3-tcp-pick.service \
-  visionops-v3-collector-pick.service
+  visionops-v3-collector-pick.service \
+  visionops-v3-runtime-pick-watchdog.timer
 ```
 
 查看状态：
@@ -167,7 +170,8 @@ sudo systemctl start \
 systemctl status \
   visionops-v3-runtime-pick.service \
   visionops-v3-tcp-pick.service \
-  visionops-v3-collector-pick.service
+  visionops-v3-collector-pick.service \
+  visionops-v3-runtime-pick-watchdog.timer
 ```
 
 Web 页面和 TCP 状态接口：
@@ -317,7 +321,96 @@ python3 -m production.carton_line.tasks.tube_pick_vision.mock_scheduler \
 ./production/carton_line/scripts/start_tcp_pick.sh
 ```
 
-## 9. Modbus 寄存器
+
+## 9. Runtime 自动重连与 watchdog
+
+`tube-pick` profile 对实时画面增加两级恢复机制。
+
+### 9.1 Runtime 内部自动重连
+
+Runtime 的取流线程会检查实时帧是否过期，并在连续读取失败后自动关闭、重新打开帧源。默认参数位于：
+
+```yaml
+runtime_recovery:
+  stale_frame_timeout_ms: 3000
+  failure_threshold: 3
+  initial_backoff_ms: 200
+  max_backoff_ms: 2000
+```
+
+正常取流时这些参数不会增加额外等待。只有 Bridge/USB 短暂异常时，Runtime 才按 `200ms -> 400ms -> ... -> 2000ms` 退避重连。
+
+状态接口会新增：
+
+```text
+frame_source.latest_frame_age_ms
+frame_source.stale
+frame_source.thread_alive
+frame_source.consecutive_read_errors
+frame_source.reconnect_count
+frame_source.last_reconnect_timestamp_ms
+```
+
+检查：
+
+```bash
+curl -s http://127.0.0.1:28083/api/runtime/status | python3 -m json.tool
+```
+
+实时帧超过阈值后，`snapshot.jpg` 会返回 HTTP 503，而不是继续返回数分钟前的旧缓存图。
+
+### 9.2 systemd watchdog
+
+`tube-pick` 安装时同时安装并启用：
+
+```text
+visionops-v3-runtime-pick-watchdog.service
+visionops-v3-runtime-pick-watchdog.timer
+```
+
+Timer 每 10 秒检查一次，只在 Pick Runtime 正处于 `preview` 模式且帧过期时采取动作：
+
+```text
+Runtime 帧过期
+  -> stop_preview + start_preview
+  -> 仍未恢复则重启 Pick Runtime
+  -> Bridge 自身也过期时先重启 336L Bridge，再重启 Pick Runtime
+```
+
+查看 timer：
+
+```bash
+systemctl status visionops-v3-runtime-pick-watchdog.timer
+systemctl list-timers | grep visionops-v3-runtime-pick-watchdog
+```
+
+查看恢复日志：
+
+```bash
+journalctl -t visionops-pick-watchdog -f
+```
+
+手动执行一次检查：
+
+```bash
+sudo systemctl start visionops-v3-runtime-pick-watchdog.service
+```
+
+watchdog 参数可在 `/etc/visionops_v3/carton_line.env` 覆盖：
+
+```bash
+VISIONOPS_PICK_WATCHDOG_STALE_MS=5000
+VISIONOPS_PICK_WATCHDOG_COOLDOWN_S=30
+VISIONOPS_PICK_WATCHDOG_RECOVERY_WAIT_S=3
+```
+
+### 9.3 对重启耗时的影响
+
+正常执行 `systemctl restart visionops-v3-runtime-pick.service` 时，watchdog 不参与启动链路，也没有增加 `ExecStartPre` 等待，因此正常重启耗时基本不变。Runtime 的退避等待采用可中断睡眠，停止服务时最多主要受当前一次 HTTP 读取超时影响，默认约 1 秒以内。
+
+只有相机或 Bridge 已经异常时，自动恢复才会等待重连；watchdog 在重启 Bridge 的异常路径中最多等待约 10 秒确认新帧到达。该等待发生在 watchdog 的独立 oneshot 进程中，不会拖慢平时的手动重启命令。
+
+## 10. Modbus 寄存器
 
 以下寄存器只用于 `partition-tube` profile：
 
@@ -333,7 +426,7 @@ python3 -m production.carton_line.tasks.tube_pick_vision.mock_scheduler \
 | 102 | 纸筒触发：1 左、2 右、3 全部 |
 | 103 | 坐标识别触发 |
 
-## 10. 常用排查命令
+## 11. 常用排查命令
 
 查看当前启用的相关服务：
 
@@ -355,7 +448,7 @@ journalctl -u visionops-v3-robot-gateway.service -f
 journalctl -u visionops-v3-tcp-pick.service -f
 ```
 
-## 11. 增加新任务
+## 12. 增加新任务
 
 在同一产线增加任务时：
 

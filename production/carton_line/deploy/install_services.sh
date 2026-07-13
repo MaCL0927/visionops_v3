@@ -17,11 +17,20 @@ PARTITION_TUBE_UNITS=(
   visionops-v3-collector-partition.service
   visionops-v3-collector-tube.service
 )
+PARTITION_TUBE_ENABLE_UNITS=("${PARTITION_TUBE_UNITS[@]}")
 
 TUBE_PICK_UNITS=(
   visionops-v3-runtime-pick.service
   visionops-v3-tcp-pick.service
   visionops-v3-collector-pick.service
+  visionops-v3-runtime-pick-watchdog.service
+  visionops-v3-runtime-pick-watchdog.timer
+)
+TUBE_PICK_ENABLE_UNITS=(
+  visionops-v3-runtime-pick.service
+  visionops-v3-tcp-pick.service
+  visionops-v3-collector-pick.service
+  visionops-v3-runtime-pick-watchdog.timer
 )
 
 usage() {
@@ -34,7 +43,7 @@ usage() {
                   partition Runtime、tube Runtime、Modbus Gateway、两个 Collector
 
   tube-pick       安装“纸筒产品 / 大隔板检测”板卡所需服务：
-                  pick Runtime、TCP Client、pick Collector
+                  pick Runtime、TCP Client、pick Collector、帧流 watchdog timer
 
 示例：
   sudo bash production/carton_line/deploy/install_services.sh --profile partition-tube
@@ -84,11 +93,13 @@ fi
 case "${PROFILE}" in
   partition-tube)
     SELECTED_UNITS=("${PARTITION_TUBE_UNITS[@]}")
+    SELECTED_ENABLE_UNITS=("${PARTITION_TUBE_ENABLE_UNITS[@]}")
     UNSELECTED_UNITS=("${TUBE_PICK_UNITS[@]}")
     PROFILE_DESCRIPTION="纸隔板 + 纸筒产品（Modbus）"
     ;;
   tube-pick)
     SELECTED_UNITS=("${TUBE_PICK_UNITS[@]}")
+    SELECTED_ENABLE_UNITS=("${TUBE_PICK_ENABLE_UNITS[@]}")
     UNSELECTED_UNITS=("${PARTITION_TUBE_UNITS[@]}")
     PROFILE_DESCRIPTION="纸筒产品 / 大隔板检测（TCP JSON）"
     ;;
@@ -156,10 +167,30 @@ VISIONOPS_CAMERA_BRIDGE_URL=http://127.0.0.1:18182
 VISIONOPS_PARTITION_MODEL_DIR=${ROOT}/models/carton_partition_check/current
 VISIONOPS_TUBE_MODEL_DIR=${ROOT}/models/carton_tube_check/current
 VISIONOPS_PICK_MODEL_DIR=${ROOT}/models/tube_pick_vision/current
+VISIONOPS_PICK_RUNTIME_URL=http://127.0.0.1:28083
+VISIONOPS_CAMERA_BRIDGE_SERVICE=visionops-orbbec336l-bridge.service
+VISIONOPS_PICK_RUNTIME_SERVICE=visionops-v3-runtime-pick.service
+VISIONOPS_PICK_WATCHDOG_STALE_MS=5000
+VISIONOPS_PICK_WATCHDOG_COOLDOWN_S=30
+VISIONOPS_PICK_WATCHDOG_RECOVERY_WAIT_S=3
 EOF_ENV
 elif ! grep -q '^VISIONOPS_PICK_MODEL_DIR=' "${ENV_FILE}"; then
   printf '\nVISIONOPS_PICK_MODEL_DIR=%s/models/tube_pick_vision/current\n' "${ROOT}" >> "${ENV_FILE}"
 fi
+
+append_env_default() {
+  local key="$1"
+  local value="$2"
+  if ! grep -q "^${key}=" "${ENV_FILE}"; then
+    printf '%s=%s\n' "${key}" "${value}" >> "${ENV_FILE}"
+  fi
+}
+append_env_default VISIONOPS_PICK_RUNTIME_URL http://127.0.0.1:28083
+append_env_default VISIONOPS_CAMERA_BRIDGE_SERVICE visionops-orbbec336l-bridge.service
+append_env_default VISIONOPS_PICK_RUNTIME_SERVICE visionops-v3-runtime-pick.service
+append_env_default VISIONOPS_PICK_WATCHDOG_STALE_MS 5000
+append_env_default VISIONOPS_PICK_WATCHDOG_COOLDOWN_S 30
+append_env_default VISIONOPS_PICK_WATCHDOG_RECOVERY_WAIT_S 3
 
 log_info "清理非当前 profile 的服务..."
 for unit in "${UNSELECTED_UNITS[@]}"; do
@@ -183,17 +214,20 @@ for unit in "${SELECTED_UNITS[@]}"; do
 done
 
 "${SYSTEMCTL_BIN}" daemon-reload
-"${SYSTEMCTL_BIN}" enable "${SELECTED_UNITS[@]}"
+"${SYSTEMCTL_BIN}" enable "${SELECTED_ENABLE_UNITS[@]}"
 
 log_ok "profile 安装完成: ${PROFILE}"
 echo "Line config: ${LINE_CONFIG}"
 echo "Environment: ${ENV_FILE}"
 echo
-printf '已启用的服务:\n'
+printf '已安装的 unit:\n'
 printf '  - %s\n' "${SELECTED_UNITS[@]}"
 echo
+printf '已启用的服务/timer:\n'
+printf '  - %s\n' "${SELECTED_ENABLE_UNITS[@]}"
+echo
 printf '启动命令:\n  sudo systemctl start'
-printf ' %s' "${SELECTED_UNITS[@]}"
+printf ' %s' "${SELECTED_ENABLE_UNITS[@]}"
 printf '\n\n状态检查:\n  systemctl status'
-printf ' %s' "${SELECTED_UNITS[@]}"
+printf ' %s' "${SELECTED_ENABLE_UNITS[@]}"
 printf '\n'

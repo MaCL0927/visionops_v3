@@ -41,6 +41,7 @@ def _runtime(task: str, config: dict) -> int:
     model_override = os.environ.get(f"VISIONOPS_{task.upper()}_MODEL_DIR")
     model_dir = Path(model_override or runtime["model_dir"])
     bridge_url = os.environ.get("VISIONOPS_CAMERA_BRIDGE_URL", config["camera_bridge"]["base_url"])
+    recovery = config.get("runtime_recovery", {})
 
     if not runtime_bin.is_file() or not os.access(runtime_bin, os.X_OK):
         raise FileNotFoundError(f"Runtime binary not found or not executable: {runtime_bin}")
@@ -60,6 +61,10 @@ def _runtime(task: str, config: dict) -> int:
         "--port", str(parsed.port),
         "--device-id", str(runtime["device_id"]),
         "--component", str(runtime["component"]),
+        "--stale-frame-timeout-ms", str(recovery.get("stale_frame_timeout_ms", 3000)),
+        "--camera-reconnect-failure-threshold", str(recovery.get("failure_threshold", 3)),
+        "--camera-reconnect-initial-ms", str(recovery.get("initial_backoff_ms", 200)),
+        "--camera-reconnect-max-ms", str(recovery.get("max_backoff_ms", 2000)),
     ]
     os.execv(command[0], command)
     return 0

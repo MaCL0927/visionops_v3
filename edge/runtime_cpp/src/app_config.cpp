@@ -46,8 +46,14 @@ void validate_app_config(const AppConfig& config) {
   if (config.camera_width <= 0 || config.camera_height <= 0 || config.camera_fps <= 0) {
     throw std::invalid_argument("camera-width、camera-height、camera-fps 必须为正数");
   }
-  if (config.camera_open_timeout_ms <= 0 || config.camera_read_timeout_ms <= 0) {
+  if (config.camera_open_timeout_ms <= 0 || config.camera_read_timeout_ms <= 0 ||
+      config.stale_frame_timeout_ms <= 0) {
     throw std::invalid_argument("camera timeout 必须为正数");
+  }
+  if (config.reconnect_failure_threshold <= 0 || config.reconnect_initial_ms <= 0 ||
+      config.reconnect_max_ms < config.reconnect_initial_ms) {
+    throw std::invalid_argument(
+        "camera reconnect 参数非法：failure-threshold/initial 必须为正数，max 不得小于 initial");
   }
 }
 

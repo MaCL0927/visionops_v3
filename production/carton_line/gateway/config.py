@@ -47,6 +47,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "heartbeat_interval_ms": 500,
         "heartbeat_max": 1000,
     },
+    "runtime_recovery": {
+        "stale_frame_timeout_ms": 3000,
+        "failure_threshold": 3,
+        "initial_backoff_ms": 200,
+        "max_backoff_ms": 2000,
+    },
     "camera_bridge": {
         "base_url": "http://127.0.0.1:18182",
         "snapshot_path": "/stream/snapshot.jpg",
@@ -350,6 +356,14 @@ def load_config(path: str | None) -> dict[str, Any]:
     modbus["address_base"] = int(modbus.get("address_base", 0))
     if modbus["address_base"] < 0 or modbus["register_count"] < 200:
         raise ValueError("modbus.address_base 必须非负且 register_count 至少为 200")
+
+    recovery = config["runtime_recovery"]
+    for key in ("stale_frame_timeout_ms", "failure_threshold", "initial_backoff_ms", "max_backoff_ms"):
+        recovery[key] = int(recovery[key])
+        if recovery[key] <= 0:
+            raise ValueError(f"runtime_recovery.{key} 必须大于 0")
+    if recovery["max_backoff_ms"] < recovery["initial_backoff_ms"]:
+        raise ValueError("runtime_recovery.max_backoff_ms 不得小于 initial_backoff_ms")
 
     bridge = config["camera_bridge"]
     bridge["base_url"] = _valid_url(bridge["base_url"], "camera_bridge.base_url")
