@@ -14,6 +14,7 @@ const captureList = document.getElementById("validate-capture-list");
 const roiModal = document.getElementById("validate-roi-modal");
 const roiImage = document.getElementById("validate-roi-image");
 const roiCanvas = document.getElementById("validate-roi-canvas");
+const roiStage = document.querySelector(".roi-editor-stage");
 const roiEmpty = document.getElementById("validate-roi-empty");
 const roiCoordinates = document.getElementById("validate-roi-coordinates");
 
@@ -29,6 +30,7 @@ let roiSnapshotUrl = null;
 let roiDraft = { enabled: false, x1: 0, y1: 0, x2: 1, y2: 1 };
 let roiDrawing = false;
 let roiStartPoint = null;
+let roiResizeObserver = null;
 
 function formatBytes(value) {
   if (value == null || Number.isNaN(Number(value))) return "--";
@@ -193,14 +195,26 @@ function updateRoiButton(roi) {
 }
 
 function sizeRoiCanvas() {
-  if (!roiImage?.naturalWidth || !roiImage?.naturalHeight || !roiCanvas) return false;
-  const rect = roiImage.getBoundingClientRect();
-  roiCanvas.width = Math.max(1, Math.round(rect.width));
-  roiCanvas.height = Math.max(1, Math.round(rect.height));
-  roiCanvas.style.left = `${roiImage.offsetLeft}px`;
-  roiCanvas.style.top = `${roiImage.offsetTop}px`;
-  roiCanvas.style.width = `${rect.width}px`;
-  roiCanvas.style.height = `${rect.height}px`;
+  if (!roiImage?.naturalWidth || !roiImage?.naturalHeight || !roiCanvas || !roiStage) return false;
+  const stageWidth = Math.max(1, roiStage.clientWidth);
+  const stageHeight = Math.max(1, roiStage.clientHeight);
+  const scale = Math.min(
+    stageWidth / roiImage.naturalWidth,
+    stageHeight / roiImage.naturalHeight,
+  );
+  const displayWidth = Math.max(1, Math.floor(roiImage.naturalWidth * scale));
+  const displayHeight = Math.max(1, Math.floor(roiImage.naturalHeight * scale));
+  roiImage.style.width = `${displayWidth}px`;
+  roiImage.style.height = `${displayHeight}px`;
+
+  const stageRect = roiStage.getBoundingClientRect();
+  const imageRect = roiImage.getBoundingClientRect();
+  roiCanvas.width = Math.max(1, Math.round(imageRect.width));
+  roiCanvas.height = Math.max(1, Math.round(imageRect.height));
+  roiCanvas.style.left = `${imageRect.left - stageRect.left}px`;
+  roiCanvas.style.top = `${imageRect.top - stageRect.top}px`;
+  roiCanvas.style.width = `${imageRect.width}px`;
+  roiCanvas.style.height = `${imageRect.height}px`;
   return true;
 }
 
@@ -304,7 +318,7 @@ async function openRoiEditor() {
       roiImage.src = roiSnapshotUrl;
     });
     roiEmpty?.classList.add("hidden");
-    renderRoiEditor();
+    window.requestAnimationFrame(() => window.requestAnimationFrame(renderRoiEditor));
   } catch (error) {
     if (roiEmpty) {
       roiEmpty.textContent = error.body?.error?.message || error.message || "读取 ROI 编辑图像失败";
@@ -579,8 +593,14 @@ export function initValidate() {
   document.getElementById("validate-model-scan").addEventListener("click", refreshModelCatalog);
   window.addEventListener("resize", () => {
     if (currentResult) drawInferenceOverlay(canvas, image, currentResult);
-    if (roiModal?.classList.contains("active")) renderRoiEditor();
+    if (roiModal?.classList.contains("active")) window.requestAnimationFrame(renderRoiEditor);
   });
+  if (roiStage && "ResizeObserver" in window && !roiResizeObserver) {
+    roiResizeObserver = new ResizeObserver(() => {
+      if (roiModal?.classList.contains("active")) window.requestAnimationFrame(renderRoiEditor);
+    });
+    roiResizeObserver.observe(roiStage);
+  }
   window.addEventListener("visionops:settings-saved", () => currentResult && drawInferenceOverlay(canvas, image, currentResult));
   renderEmptySummary("执行检测后显示目标摘要");
   setRealtimeButtonState(false);

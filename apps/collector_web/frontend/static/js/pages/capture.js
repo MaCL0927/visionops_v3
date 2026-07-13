@@ -11,6 +11,10 @@ let busy = false;
 let previewRecord = null;
 let timedStatusTimer = null;
 let lastTimedCaptureCount = -1;
+let timedCaptureEnabled = false;
+let timedCaptureStateKnown = false;
+let timedToggleBusy = false;
+let latestTimedStatus = null;
 
 const image = document.getElementById("capture-image");
 const empty = document.getElementById("capture-empty");
@@ -247,9 +251,17 @@ function renderTimedStatus(payload) {
   const enabled = payload?.enabled === true;
   const button = document.getElementById("capture-timed-btn");
   const count = Number(payload?.capture_count || 0);
+  timedCaptureEnabled = enabled;
+  timedCaptureStateKnown = true;
+  latestTimedStatus = payload || {};
   if (button) {
     button.classList.toggle("active", enabled);
-    button.textContent = enabled ? `定时采图中 (${payload.interval_seconds}s)` : "定时采图";
+    button.setAttribute("aria-pressed", String(enabled));
+    button.disabled = timedToggleBusy;
+    button.title = enabled ? "点击立即停止定时采图" : "设置定时采图间隔";
+    button.textContent = timedToggleBusy
+      ? (enabled ? "正在停止定时采图…" : "正在处理…")
+      : (enabled ? `停止定时采图 (${payload.interval_seconds}s)` : "定时采图");
   }
   if (timedIntervalInput && document.activeElement !== timedIntervalInput) {
     timedIntervalInput.value = String(payload?.interval_seconds ?? 10);
@@ -289,6 +301,16 @@ async function openTimedCapture() {
   await refreshTimedStatus();
 }
 
+async function toggleTimedCapture() {
+  if (timedToggleBusy) return;
+  if (!timedCaptureStateKnown) await refreshTimedStatus();
+  if (timedCaptureEnabled) {
+    await stopTimedCapture();
+    return;
+  }
+  await openTimedCapture();
+}
+
 async function startTimedCapture() {
   const interval = Number(timedIntervalInput?.value || 10);
   if (!Number.isFinite(interval) || interval < 0.5 || interval > 86400) {
@@ -311,14 +333,24 @@ async function startTimedCapture() {
 }
 
 async function stopTimedCapture() {
+  timedToggleBusy = true;
+  renderTimedStatus(latestTimedStatus || { enabled: true });
   try {
     const payload = await postJson(endpoints.timedCapture, { enabled: false });
-    renderTimedStatus(payload);
+    latestTimedStatus = payload;
     hideModal(timedModal);
     setMessage("定时采图已停止", "ok");
   } catch (error) {
-    timedStatusNode.textContent = error.body?.error?.message || error.message || "停止定时采图失败";
-    timedStatusNode.dataset.kind = "error";
+    const messageText = error.body?.error?.message || error.message || "停止定时采图失败";
+    if (timedStatusNode) {
+      timedStatusNode.textContent = messageText;
+      timedStatusNode.dataset.kind = "error";
+    }
+    setMessage(messageText, "error");
+  } finally {
+    timedToggleBusy = false;
+    if (latestTimedStatus) renderTimedStatus(latestTimedStatus);
+    else await refreshTimedStatus();
   }
 }
 
@@ -429,7 +461,7 @@ export function initCapture() {
   document.querySelectorAll("[data-capture-step]").forEach((button) => button.addEventListener("click", () => activateStep(button.dataset.captureStep)));
   document.getElementById("capture-refresh")?.addEventListener("click", refreshCapture);
   document.getElementById("capture-shoot-btn")?.addEventListener("click", shoot);
-  document.getElementById("capture-timed-btn")?.addEventListener("click", openTimedCapture);
+  document.getElementById("capture-timed-btn")?.addEventListener("click", toggleTimedCapture);
   document.getElementById("capture-download")?.addEventListener("click", downloadCapture);
   document.getElementById("capture-clear")?.addEventListener("click", clearRecords);
   document.getElementById("capture-refresh-list")?.addEventListener("click", () => loadRecords(offset));
@@ -450,7 +482,6 @@ export function initCapture() {
   document.getElementById("capture-timed-close")?.addEventListener("click", () => hideModal(timedModal));
   document.getElementById("capture-timed-cancel")?.addEventListener("click", () => hideModal(timedModal));
   document.getElementById("capture-timed-confirm")?.addEventListener("click", startTimedCapture);
-  document.getElementById("capture-timed-stop")?.addEventListener("click", stopTimedCapture);
 
   loadRecords(0);
   refreshTimedStatus();
