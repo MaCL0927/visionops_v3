@@ -21,16 +21,20 @@ PARTITION_TUBE_ENABLE_UNITS=("${PARTITION_TUBE_UNITS[@]}")
 
 TUBE_PICK_UNITS=(
   visionops-v3-runtime-pick.service
-  visionops-v3-tcp-pick.service
+  visionops-v3-ws-pick.service
   visionops-v3-collector-pick.service
   visionops-v3-runtime-pick-watchdog.service
   visionops-v3-runtime-pick-watchdog.timer
 )
 TUBE_PICK_ENABLE_UNITS=(
   visionops-v3-runtime-pick.service
-  visionops-v3-tcp-pick.service
+  visionops-v3-ws-pick.service
   visionops-v3-collector-pick.service
   visionops-v3-runtime-pick-watchdog.timer
+)
+
+LEGACY_TUBE_PICK_UNITS=(
+  visionops-v3-tcp-pick.service
 )
 
 usage() {
@@ -43,7 +47,7 @@ usage() {
                   partition Runtime、tube Runtime、Modbus Gateway、两个 Collector
 
   tube-pick       安装“纸筒产品 / 大隔板检测”板卡所需服务：
-                  pick Runtime、TCP Client、pick Collector、帧流 watchdog timer
+                  pick Runtime、WebSocket Server、pick Collector、帧流 watchdog timer
 
 示例：
   sudo bash production/carton_line/deploy/install_services.sh --profile partition-tube
@@ -101,7 +105,7 @@ case "${PROFILE}" in
     SELECTED_UNITS=("${TUBE_PICK_UNITS[@]}")
     SELECTED_ENABLE_UNITS=("${TUBE_PICK_ENABLE_UNITS[@]}")
     UNSELECTED_UNITS=("${PARTITION_TUBE_UNITS[@]}")
-    PROFILE_DESCRIPTION="纸筒产品 / 大隔板检测（TCP JSON）"
+    PROFILE_DESCRIPTION="纸筒产品 / 大隔板检测（WebSocket + MJPEG）"
     ;;
   *)
     log_error "未知 profile: ${PROFILE}"
@@ -152,7 +156,8 @@ fi
 
 "${PYTHON_BIN}" "${SOURCE_DIR}/deploy/merge_line_config.py" \
   --template "${SOURCE_DIR}/config/line.yaml" \
-  --target "${LINE_CONFIG}"
+  --target "${LINE_CONFIG}" \
+  --drop-path pick.tcp
 
 install -m 0644 \
   "${SOURCE_DIR}/config/line.yaml" \
@@ -170,6 +175,7 @@ VISIONOPS_PICK_MODEL_DIR=${ROOT}/models/tube_pick_vision/current
 VISIONOPS_PICK_RUNTIME_URL=http://127.0.0.1:28083
 VISIONOPS_CAMERA_BRIDGE_SERVICE=visionops-orbbec336l-bridge.service
 VISIONOPS_PICK_RUNTIME_SERVICE=visionops-v3-runtime-pick.service
+VISIONOPS_PICK_WS_SERVICE=visionops-v3-ws-pick.service
 VISIONOPS_PICK_WATCHDOG_STALE_MS=5000
 VISIONOPS_PICK_WATCHDOG_COOLDOWN_S=30
 VISIONOPS_PICK_WATCHDOG_RECOVERY_WAIT_S=3
@@ -188,9 +194,19 @@ append_env_default() {
 append_env_default VISIONOPS_PICK_RUNTIME_URL http://127.0.0.1:28083
 append_env_default VISIONOPS_CAMERA_BRIDGE_SERVICE visionops-orbbec336l-bridge.service
 append_env_default VISIONOPS_PICK_RUNTIME_SERVICE visionops-v3-runtime-pick.service
+append_env_default VISIONOPS_PICK_WS_SERVICE visionops-v3-ws-pick.service
 append_env_default VISIONOPS_PICK_WATCHDOG_STALE_MS 5000
 append_env_default VISIONOPS_PICK_WATCHDOG_COOLDOWN_S 30
 append_env_default VISIONOPS_PICK_WATCHDOG_RECOVERY_WAIT_S 3
+
+log_info "清理旧 tube_pick TCP Client 服务..."
+for unit in "${LEGACY_TUBE_PICK_UNITS[@]}"; do
+  "${SYSTEMCTL_BIN}" disable --now "${unit}" >/dev/null 2>&1 || true
+  if [[ -e "${UNIT_DIR}/${unit}" || -L "${UNIT_DIR}/${unit}" ]]; then
+    rm -f "${UNIT_DIR}/${unit}"
+    log_info "已移除旧服务: ${unit}"
+  fi
+done
 
 log_info "清理非当前 profile 的服务..."
 for unit in "${UNSELECTED_UNITS[@]}"; do

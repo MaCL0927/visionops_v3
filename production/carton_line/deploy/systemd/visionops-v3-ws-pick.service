@@ -1,0 +1,16 @@
+[Unit]
+Description=VisionOps v3 Carton Line - Tube Pick WebSocket Server
+After=network-online.target visionops-v3-runtime-pick.service visionops-orbbec336l-bridge.service
+Wants=network-online.target visionops-v3-runtime-pick.service visionops-orbbec336l-bridge.service
+
+[Service]
+Type=simple
+User=neardi
+WorkingDirectory=/opt/visionops_v3
+EnvironmentFile=-/etc/visionops_v3/carton_line.env
+ExecStart=/opt/visionops_v3/production/carton_line/scripts/start_ws_pick.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

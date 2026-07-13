@@ -14,6 +14,7 @@ namespace visionops::runtime {
 
 struct MockFrame {
   std::uint64_t sequence{0};
+  std::uint64_t timestamp_ms{0};
   int width{1920};
   int height{1080};
 };

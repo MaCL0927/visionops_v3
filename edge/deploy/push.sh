@@ -184,10 +184,10 @@ REQUIRED_EDGE_FILES=(
   "production/carton_line/tasks/carton_partition_check/algorithm.py"
   "production/carton_line/tasks/carton_tube_check/algorithm.py"
   "production/carton_line/tasks/tube_pick_vision/service.py"
-  "production/carton_line/tasks/tube_pick_vision/tcp_client.py"
+  "production/carton_line/tasks/tube_pick_vision/websocket_server.py"
   "production/carton_line/scripts/start_runtime.sh"
   "production/carton_line/scripts/start_gateway.sh"
-  "production/carton_line/scripts/start_tcp_pick.sh"
+  "production/carton_line/scripts/start_ws_pick.sh"
   "production/carton_line/deploy/install_services.sh"
 )
 
@@ -419,7 +419,7 @@ cat <<'EOF_SUMMARY'
 常用后续操作：
   # Python、Web 或产线任务代码变化：重启对应服务
   sudo systemctl restart visionops-v3-robot-gateway.service
-  sudo systemctl restart visionops-v3-tcp-pick.service
+  sudo systemctl restart visionops-v3-ws-pick.service
   sudo systemctl restart visionops-v3-collector-partition.service
   sudo systemctl restart visionops-v3-collector-tube.service
   sudo systemctl restart visionops-v3-collector-pick.service

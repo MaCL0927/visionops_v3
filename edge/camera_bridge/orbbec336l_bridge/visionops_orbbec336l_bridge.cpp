@@ -6,6 +6,8 @@
 //   GET  /stream/depth.png       16-bit PNG depth, millimeters when scale is available
 //   GET  /stream/depth_vis.jpg   visualized depth JPEG
 //   GET  /stream/depth_meta
+//   GET  /stream/camera_info
+//   POST /api/coordinate/deproject  {"points":[[u,v,depth_mm], ...]}
 //   GET  /stream/profiles     SDK-supported color/depth profiles
 //   GET  /stream.mjpeg, /stream/mjpeg, /stream.mjpg
 //   POST /stream/start, /stream/stop  compatibility no-op endpoints
@@ -13,6 +15,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
 #include <condition_variable>
 #include <csignal>
 #include <cstring>
@@ -279,6 +284,7 @@ private:
             }
             if (!profile) profile = profiles->getProfile(0)->as<ob::VideoStreamProfile>();
             cfg->enableStream(profile);
+            color_profile_ = profile;
             std::cerr << "[INFO] color profile " << profile->width() << "x" << profile->height()
                       << " fps=" << profile->fps() << " fmt=" << frame_format_to_string(profile->format()) << std::endl;
         } catch (const std::exception &e) {
@@ -297,6 +303,7 @@ private:
             } catch (...) {}
             if (!profile) profile = profiles->getProfile(0)->as<ob::VideoStreamProfile>();
             cfg->enableStream(profile);
+            depth_profile_ = profile;
             std::cerr << "[INFO] depth profile " << profile->width() << "x" << profile->height()
                       << " fps=" << profile->fps() << " fmt=" << frame_format_to_string(profile->format()) << std::endl;
         } catch (const std::exception &e) {
@@ -409,6 +416,200 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
         }
+    }
+
+    struct DeprojectInput {
+        float u = 0.0f;
+        float v = 0.0f;
+        float depth_mm = 0.0f;
+    };
+
+    static bool parse_deproject_points(const std::string &body, std::vector<DeprojectInput> &points, std::string &error) {
+        const auto key = body.find("\"points\"");
+        if (key == std::string::npos) {
+            error = "missing points";
+            return false;
+        }
+        const auto begin = body.find('[', key);
+        if (begin == std::string::npos) {
+            error = "points must be array";
+            return false;
+        }
+        int nesting = 0;
+        size_t end = std::string::npos;
+        for (size_t i = begin; i < body.size(); ++i) {
+            if (body[i] == '[') ++nesting;
+            else if (body[i] == ']') {
+                --nesting;
+                if (nesting == 0) {
+                    end = i;
+                    break;
+                }
+            }
+        }
+        if (end == std::string::npos) {
+            error = "unterminated points array";
+            return false;
+        }
+        std::vector<double> values;
+        const char *cursor = body.c_str() + begin + 1;
+        const char *limit = body.c_str() + end;
+        while (cursor < limit) {
+            while (cursor < limit && !((*cursor >= '0' && *cursor <= '9') || *cursor == '-' || *cursor == '+' || *cursor == '.')) ++cursor;
+            if (cursor >= limit) break;
+            char *next = nullptr;
+            errno = 0;
+            double value = std::strtod(cursor, &next);
+            if (next == cursor || errno == ERANGE || !std::isfinite(value)) {
+                error = "invalid number in points";
+                return false;
+            }
+            values.push_back(value);
+            cursor = next;
+        }
+        if (values.empty() || values.size() % 3 != 0) {
+            error = "each point must contain u,v,depth_mm";
+            return false;
+        }
+        if (values.size() / 3 > 512) {
+            error = "too many points";
+            return false;
+        }
+        for (size_t i = 0; i < values.size(); i += 3) {
+            points.push_back(DeprojectInput{
+                static_cast<float>(values[i]),
+                static_cast<float>(values[i + 1]),
+                static_cast<float>(values[i + 2]),
+            });
+        }
+        return true;
+    }
+
+    std::string camera_info_json() {
+        std::shared_ptr<ob::VideoStreamProfile> profile;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            profile = color_profile_;
+        }
+        if (!profile) return "{\"ok\":false,\"error\":\"color profile unavailable\"}";
+        try {
+            auto intrinsic = profile->getIntrinsic();
+            std::ostringstream os;
+            os << "{"
+               << "\"ok\":true,"
+               << "\"coordinate_frame\":\"color_camera\","
+               << "\"unit\":\"mm\","
+               << "\"depth_aligned_to_color\":true,"
+               << "\"color_intrinsic\":{"
+               << "\"fx\":" << intrinsic.fx << ","
+               << "\"fy\":" << intrinsic.fy << ","
+               << "\"cx\":" << intrinsic.cx << ","
+               << "\"cy\":" << intrinsic.cy << ","
+               << "\"width\":" << intrinsic.width << ","
+               << "\"height\":" << intrinsic.height
+               << "}}";
+            return os.str();
+        } catch (const std::exception &e) {
+            return std::string("{\"ok\":false,\"error\":\"") + json_escape(e.what()) + "\"}";
+        }
+    }
+
+    std::string deproject_json(const std::string &body, int &status_code) {
+        std::vector<DeprojectInput> inputs;
+        std::string parse_error;
+        if (!parse_deproject_points(body, inputs, parse_error)) {
+            status_code = 400;
+            return std::string("{\"ok\":false,\"error\":\"") + json_escape(parse_error) + "\"}";
+        }
+        std::shared_ptr<ob::VideoStreamProfile> profile;
+        int width = 0;
+        int height = 0;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            profile = color_profile_;
+            width = color_w_ > 0 ? color_w_ : color_width_;
+            height = color_h_ > 0 ? color_h_ : color_height_;
+        }
+        if (!profile) {
+            status_code = 503;
+            return "{\"ok\":false,\"error\":\"color profile unavailable\"}";
+        }
+        try {
+            auto intrinsic = profile->getIntrinsic();
+            auto identity = profile->getExtrinsicTo(profile);
+            std::ostringstream os;
+            os << "{\"ok\":true,\"coordinate_frame\":\"color_camera\",\"unit\":\"mm\",\"points\":[";
+            for (size_t i = 0; i < inputs.size(); ++i) {
+                if (i) os << ",";
+                float u = inputs[i].u;
+                float v = inputs[i].v;
+                const float depth_mm = inputs[i].depth_mm;
+                if (flip_horizontal_ && width > 0) u = static_cast<float>(width - 1) - u;
+                if (flip_vertical_ && height > 0) v = static_cast<float>(height - 1) - v;
+                OBPoint3f point3d{};
+                bool valid = false;
+                if (depth_mm > 0.0f && u >= 0.0f && v >= 0.0f && u < width && v < height) {
+                    OBPoint2f pixel{u, v};
+                    valid = ob::CoordinateTransformHelper::transformation2dto3d(
+                        pixel, depth_mm, intrinsic, identity, &point3d);
+                    valid = valid && std::isfinite(point3d.x) && std::isfinite(point3d.y) && std::isfinite(point3d.z);
+                }
+                os << "{\"valid\":" << (valid ? "true" : "false") << ",\"position_camera\":[";
+                if (valid) os << point3d.x << "," << point3d.y << "," << point3d.z;
+                else os << "0,0,0";
+                os << "]}";
+            }
+            os << "]}";
+            status_code = 200;
+            return os.str();
+        } catch (const std::exception &e) {
+            status_code = 500;
+            return std::string("{\"ok\":false,\"error\":\"") + json_escape(e.what()) + "\"}";
+        }
+    }
+
+    bool read_http_request(int fd, std::string &method, std::string &path, std::string &body) {
+        std::string request;
+        char buffer[4096];
+        size_t header_end = std::string::npos;
+        while ((header_end = request.find("\r\n\r\n")) == std::string::npos) {
+            ssize_t n = ::recv(fd, buffer, sizeof(buffer), 0);
+            if (n <= 0) return false;
+            request.append(buffer, static_cast<size_t>(n));
+            if (request.size() > 1024 * 1024) return false;
+        }
+        const std::string headers_text = request.substr(0, header_end);
+        std::istringstream lines(headers_text);
+        std::string request_line;
+        std::getline(lines, request_line);
+        if (!request_line.empty() && request_line.back() == '\r') request_line.pop_back();
+        std::istringstream first(request_line);
+        std::string proto;
+        first >> method >> path >> proto;
+        size_t content_length = 0;
+        std::string line;
+        while (std::getline(lines, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const auto colon = line.find(':');
+            if (colon == std::string::npos) continue;
+            std::string key = line.substr(0, colon);
+            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+            if (key == "content-length") {
+                try { content_length = static_cast<size_t>(std::stoul(line.substr(colon + 1))); }
+                catch (...) { return false; }
+            }
+        }
+        if (content_length > 1024 * 1024) return false;
+        body = request.substr(header_end + 4);
+        while (body.size() < content_length) {
+            ssize_t n = ::recv(fd, buffer, sizeof(buffer), 0);
+            if (n <= 0) return false;
+            body.append(buffer, static_cast<size_t>(n));
+        }
+        if (body.size() > content_length) body.resize(content_length);
+        const auto query = path.find('?');
+        if (query != std::string::npos) path.resize(query);
+        return !method.empty() && !path.empty();
     }
 
     void send_all(int fd, const void *data, size_t len) {
@@ -633,13 +834,14 @@ private:
     }
 
     void handle_client(int fd) {
-        char buf[4096] = {0};
-        ssize_t n = ::recv(fd, buf, sizeof(buf) - 1, 0);
-        if (n <= 0) { ::close(fd); return; }
-        std::string req(buf, static_cast<size_t>(n));
-        std::istringstream is(req);
-        std::string method, path, proto;
-        is >> method >> path >> proto;
+        std::string method;
+        std::string path;
+        std::string body;
+        if (!read_http_request(fd, method, path, body)) {
+            send_text(fd, 400, "application/json", "{\"ok\":false,\"error\":\"bad request\"}");
+            ::close(fd);
+            return;
+        }
 
         if (path == "/health" || path == "/stream/status") {
             send_text(fd, 200, "application/json", status_json());
@@ -651,6 +853,12 @@ private:
             send_depth_vis(fd);
         } else if (path == "/stream/depth_meta") {
             send_text(fd, 200, "application/json", depth_meta_json());
+        } else if (path == "/stream/camera_info" || path == "/api/camera/info") {
+            send_text(fd, 200, "application/json", camera_info_json());
+        } else if (method == "POST" && path == "/api/coordinate/deproject") {
+            int code = 200;
+            auto response = deproject_json(body, code);
+            send_text(fd, code, "application/json", response);
         } else if (path == "/stream/profiles" || path == "/profiles") {
             send_text(fd, 200, "application/json", profiles_json());
         } else if (path == "/stream.mjpeg" || path == "/stream/mjpeg" || path == "/stream.mjpg") {
@@ -679,6 +887,8 @@ private:
 
     std::shared_ptr<ob::Context> ctx_;
     std::shared_ptr<ob::Pipeline> pipeline_;
+    std::shared_ptr<ob::VideoStreamProfile> color_profile_;
+    std::shared_ptr<ob::VideoStreamProfile> depth_profile_;
     std::thread camera_thread_;
     std::atomic<bool> camera_started_{false};
 

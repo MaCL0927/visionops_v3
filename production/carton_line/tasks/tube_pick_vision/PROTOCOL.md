@@ -1,166 +1,146 @@
-# Tube Pick Vision 自定义 TCP JSON 协议
+# 外部推理盒子 WebSocket 契约（tube_pick_vision）
 
-## 1. 传输
+## 1. 网络
 
-- 调度系统：TCP Server，默认监听 `10000`。
-- VisionOps：TCP Client，主动连接并保持长连接。
-- 编码：UTF-8 JSON。
-- 帧格式：`*<json>#`。
-- 支持分包和粘包。
+- 视觉盒：WebSocket Server；
+- 机器人后端：WebSocket Client；
+- 地址：`ws://<box-ip>:9001/vision`；
+- JSON 使用 WebSocket 文本帧；
+- 心跳使用 WebSocket 原生 Ping/Pong；
+- 原始视频：`http://<box-ip>:18182/stream.mjpeg`，与检测结果软同步。
 
-## 2. 调度触发
+## 2. 检测结果
 
-沿用机器人侧触发结构，VisionOps 至少使用以下字段：
-
-```json
-{
-  "function": "vision0",
-  "timestamp": [1752135960, 123456789],
-  "triggerpos": 1752135960,
-  "triggerindex": 7,
-  "camera": "cam_1",
-  "task_id": "tube_pick_vision"
-}
-```
-
-`timestamp`、`triggerpos`、`triggerindex`、`camera` 和 `task_id` 会回传，用于关联请求和响应。
-
-## 3. 检测响应
+连续模式按配置频率推送：
 
 ```json
 {
-  "schema_version": "1.0",
-  "message_type": "vision_detection_result",
-  "function": "tube_pick_result",
-  "timestamp": [1752135960, 123456789],
-  "response_timestamp": [1752135960, 200000000],
-  "triggerpos": 1752135960,
-  "triggerindex": 7,
-  "camera": "cam_1",
-  "task_id": "tube_pick_vision",
-  "result": 0,
-  "status": "ok",
-  "result_text": "success",
-  "coordinate_frame": "image_depth_aligned",
-  "coordinate_units": {
-    "x": "pixel",
-    "y": "pixel",
-    "z": "mm"
-  },
-  "image": {
-    "width": 1280,
-    "height": 720
-  },
-  "depth": {
-    "width": 1280,
-    "height": 720,
-    "encoding": "16UC1",
-    "unit": "mm",
-    "aligned_to": "color",
-    "sampling": "roi_percentile",
-    "roi_radius_px": 4,
-    "percentile": 50
-  },
-  "product_detected": true,
-  "separator_detected": true,
-  "product_count": 2,
-  "separator_count": 1,
-  "invalid_depth_count": 0,
-  "products": [
+  "type": "detection",
+  "frame_id": 1024,
+  "timestamp": 1783905059.684,
+  "items": [
     {
+      "id": 0,
       "class_id": 0,
-      "class_name": "tube_product",
-      "score": 0.946,
-      "center": {
-        "x": 532.4,
-        "y": 281.7,
-        "z": 842
-      },
-      "depth_valid": true
-    }
-  ],
-  "separators": [
+      "confidence": 0.92,
+      "position_camera": [12.5, -34.2, 1260.0],
+      "center_px": [320.0, 240.0]
+    },
     {
+      "id": 1,
       "class_id": 1,
-      "class_name": "large_separator",
-      "score": 0.923
+      "confidence": 0.90,
+      "position_camera": [15.0, 20.0, 1310.0],
+      "center_px": [350.0, 260.0]
     }
   ],
-  "types": [],
-  "poses": []
+  "image": {"width": 640, "height": 480},
+  "coordinate_frame": "color_camera",
+  "coordinate_unit": "mm",
+  "video_url": "http://192.168.2.211:18182/stream.mjpeg",
+  "video_sync": "soft",
+  "latency_ms": 58.3
 }
 ```
 
-## 4. 坐标语义
+字段：
 
-- `products[].center.x`：产品框中心在彩色图像中的横坐标，像素。
-- `products[].center.y`：产品框中心在彩色图像中的纵坐标，像素。
-- `products[].center.z`：同一中心映射到 D2C 对齐深度图后，邻域有效深度的中位数，毫米。
-- `separators[]`：只包含类别和置信度，不包含框、中心和深度。
-- 不输出 `base_link`、机器人 TCP 或机械臂坐标。
+- `frame_id`：盒子服务进程内递增序号，用于排序；MJPEG 软同步不提供严格逐帧对应；
+- `timestamp`：本次采集/推理开始时的 Unix 秒；
+- `class_id=0`：产品；`class_id=1`：隔板；
+- `position_camera`：彩色相机光心坐标系，X 向右、Y 向下、Z 向前，单位毫米；
+- `center_px`：640×480 RGB 图像中的检测框中心；
+- 深度无效：`position_camera=[0,0,0]`；
+- 不返回 `angle_deg`，当前模型为普通 detection，机器人端按无角度处理。
 
-## 5. result 约定
+内部推理异常时连接保持，盒子返回：
 
-| result | status | 含义 |
-|---:|---|---|
-| `0` | `ok` | 推理完成，结果有效；允许没有检测到任何目标 |
-| `2` | `partial` | 检测到产品，但至少一个产品中心没有有效深度 |
-| `1001` | `error` | Runtime 或 Camera Bridge HTTP 请求失败 |
-| `1002` | `error` | 深度图无效、过旧或解码失败 |
-| `1003` | `error` | 请求、模型任务类型或结果格式错误 |
-| `1004` | `error` | 服务正在处理上一条触发 |
-
-## 6. 与原 VisionInterfacer 的兼容边界
-
-响应保留 `types: []` 和 `poses: []`，因此原有调度端能识别为“视觉已响应，但没有机器人位姿”，不会把像素坐标误当成 `base_link` 坐标。
-
-但是，原 `VisionInterfacer` 只消费 `types/poses`，不会自动使用新增的 `products/separators`。机器人调度程序必须增加对这两个自定义字段的解析，才能得到图像 `x/y` 和深度 `z`。
-
-## 7. 调度端解析建议（nlohmann::json）
-
-```cpp
-if (json.contains("products") && json["products"].is_array()) {
-    for (const auto &item : json["products"]) {
-        const auto &center = item.at("center");
-        const double image_x_px = center.value("x", 0.0);
-        const double image_y_px = center.value("y", 0.0);
-        const bool depth_valid = item.value("depth_valid", false);
-        const int depth_z_mm = depth_valid && !center["z"].is_null()
-            ? center["z"].get<int>() : 0;
-        // image_x_px / image_y_px / depth_z_mm are not base_link coordinates.
-    }
-}
-
-const bool separator_detected = json.value("separator_detected", false);
-if (separator_detected && json.contains("separators")) {
-    // Only class_id, class_name and score are supplied for separators.
+```json
+{
+  "type": "detection",
+  "frame_id": 1025,
+  "timestamp": 1783905060.100,
+  "items": [],
+  "error": {"code": "UpstreamError", "message": "..."}
 }
 ```
 
-## 8. TCP 帧与 HTTP 调试接口
+## 3. 控制
 
-协议中的 `*` 和 `#` 是 **TCP 字节流的帧界定符**，不是 JSON 对象内部字段。
-因此完整线上消息是：
-
-```text
-*{"function":"tube_pick_result","triggerindex":7,"result":0,"products":[],"separators":[]}#
+```json
+{"type":"control","command":"start","request_id":101}
+{"type":"control","command":"stop","request_id":102}
+{"type":"control","command":"trigger","request_id":103}
 ```
 
-而本机 HTTP 调试接口：
+- `start`：开启连续推理；
+- `stop`：暂停连续推理，连接保持；
+- `trigger`：请求立即执行一次推理；
+- `trigger.request_id` 必填，允许整数或非空字符串；
+- trigger 对应的 detection 原样返回 `request_id`；
+- 连续模式 detection 不带 `request_id`。
 
-```text
-POST /api/app/evaluate_once
+接收命令后先返回排队确认：
+
+```json
+{
+  "type":"ack",
+  "request_type":"control",
+  "request_id":103,
+  "command":"trigger",
+  "success":true,
+  "queued":true
+}
 ```
 
-为了保持 `Content-Type: application/json`，只返回中间的 JSON 对象；通过
-`curl ... | python3 -m json.tool` 看不到 `*` 和 `#` 属于预期行为，并不代表真实 TCP
-发送缺少帧界定符。
+随后返回：
 
-用于检查实际编码格式的调试接口为：
-
-```text
-POST /api/tcp/evaluate_once_frame
+```json
+{
+  "type":"detection",
+  "request_id":103,
+  "frame_id":1026,
+  "timestamp":1783905060.500,
+  "items":[]
+}
 ```
 
-它调用与真实 TCP 发送相同的 `StarHashJsonCodec.encode()`，以 `text/plain` 返回
-完整的 `*<JSON>#` 帧。
+## 4. 状态
+
+连接建立后立即发送，并按配置周期推送：
+
+```json
+{
+  "type":"status",
+  "online":true,
+  "fps":10.0,
+  "model":"tube_pick_vision",
+  "camera_connected":true,
+  "latency_ms":58.3,
+  "continuous_enabled":true,
+  "clients":1,
+  "video_url":"http://192.168.2.211:18182/stream.mjpeg",
+  "error":null
+}
+```
+
+## 5. ROI 与阈值
+
+机器人侧不下发 ROI 或阈值。ROI 由 VisionOps 边缘 Web 设置：
+
+```text
+整图输入模型 → Runtime 后处理 → 目标中心位于 ROI 内才保留 → WebSocket 输出
+```
+
+因此 Web 模型验证、WebSocket、其他 Runtime 调用获得相同的 ROI 过滤结果。
+
+## 6. 三维坐标
+
+视觉服务从 D2C 对齐 16UC1 深度图采样中心邻域深度，然后调用 336L Bridge：
+
+```text
+POST /api/coordinate/deproject
+{"points":[[u,v,depth_mm], ...]}
+```
+
+Bridge 内部使用 Orbbec SDK `CoordinateTransformHelper::calibration2dTo3d()`，输出彩色相机坐标系毫米值。视觉系统不执行手眼标定和机器人坐标转换。

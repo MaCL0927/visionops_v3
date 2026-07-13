@@ -78,7 +78,7 @@ def _collector(task: str, config: dict) -> int:
     if gateway_host in {"0.0.0.0", "::"}:
         gateway_host = "127.0.0.1"
     if task == "pick":
-        pick_http = config["pick"]["tcp"]["http"]
+        pick_http = config["pick"]["http"]
         pick_host = str(pick_http["listen_host"])
         if pick_host in {"0.0.0.0", "::"}:
             pick_host = "127.0.0.1"
@@ -119,7 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     collector.add_argument("task", type=_task)
 
     subparsers.add_parser("gateway", help="启动统一 Robot Protocol Gateway")
-    subparsers.add_parser("tcp-pick", help="启动纸筒抓取点 TCP Client 服务")
+    subparsers.add_parser("ws-pick", help="启动纸筒抓取外部盒子 WebSocket Server")
     subparsers.add_parser("show-config", help="输出解析后的统一配置")
     return parser
 
@@ -135,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "gateway":
         from production.carton_line.gateway.service import main as gateway_main
         return gateway_main(["--config", path])
-    if args.command == "tcp-pick":
+    if args.command == "ws-pick":
         from production.carton_line.tasks.tube_pick_vision.service import main as pick_main
         return pick_main(["--config", path])
     print(json.dumps(config, ensure_ascii=False, indent=2))

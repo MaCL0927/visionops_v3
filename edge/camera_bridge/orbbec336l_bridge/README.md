@@ -21,3 +21,44 @@ sudo systemctl restart visionops-orbbec336l-bridge.service
 curl -s http://127.0.0.1:18182/stream/profiles | python3 -m json.tool
 curl -s http://127.0.0.1:18182/stream/status | python3 -m json.tool
 ```
+
+## Tube-pick 相机三维坐标接口
+
+`tube_pick_vision` 固定 RGB/Depth 为 640×480，并启用 D2C。Bridge 新增：
+
+```text
+GET  /stream/camera_info
+POST /api/coordinate/deproject
+```
+
+批量反投影请求：
+
+```json
+{"points":[[320.0,240.0,1260.0],[410.0,260.0,1185.0]]}
+```
+
+响应：
+
+```json
+{
+  "ok": true,
+  "coordinate_frame": "color_camera",
+  "unit": "mm",
+  "points": [
+    {"valid":true,"position_camera":[0.0,0.0,1260.0]},
+    {"valid":true,"position_camera":[175.0,40.0,1185.0]}
+  ]
+}
+```
+
+内部调用 Orbbec SDK `CoordinateTransformHelper::transformation2dto3d()`。深度为 0 或转换失败时返回 `[0,0,0]`。
+
+机器人需要读取 MJPEG 时，实际 env 文件必须设置：
+
+```bash
+VISIONOPS_ORBBEC336L_HTTP_HOST=0.0.0.0
+VISIONOPS_ORBBEC336L_COLOR_WIDTH=640
+VISIONOPS_ORBBEC336L_COLOR_HEIGHT=480
+VISIONOPS_ORBBEC336L_DEPTH_WIDTH=640
+VISIONOPS_ORBBEC336L_DEPTH_HEIGHT=480
+```

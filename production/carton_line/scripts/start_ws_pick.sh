@@ -8,4 +8,4 @@ if [[ -f "${VENV}/bin/activate" ]]; then
   # shellcheck disable=SC1090
   source "${VENV}/bin/activate"
 fi
-exec python3 -m production.carton_line.launcher --config "${CONFIG}" tcp-pick
+exec python3 -m production.carton_line.launcher --config "${CONFIG}" ws-pick

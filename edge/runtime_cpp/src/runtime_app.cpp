@@ -652,7 +652,6 @@ std::string RuntimeApp::inference_result_json(
     const PreprocessOutput& preprocess,
     const RknnOutput& inference) const {
   const auto now = now_timestamp_ms();
-  (void)frame;
   constexpr char kResultBuildToken[] = "__RESULT_BUILD_MS__";
   constexpr char kTotalToken[] = "__TOTAL_MS__";
   const auto build_started = std::chrono::steady_clock::now();
@@ -661,6 +660,8 @@ std::string RuntimeApp::inference_result_json(
          << ",\"device_id\":\"" << json_escape(config_.device_id) << '"'
          << ",\"component\":\"" << json_escape(config_.component) << '"'
          << ",\"timestamp_ms\":" << now
+         << ",\"capture_timestamp_ms\":"
+         << (frame.timestamp_ms > 0 ? frame.timestamp_ms : static_cast<std::uint64_t>(now))
          << ",\"trace_id\":\"" << make_trace_id(now) << '"'
          << ",\"frame_id\":\"" << json_escape(identity.frame_id) << '"'
          << ",\"source\":\"runtime:" << json_escape(config_.backend) << "\",\"status\":\"ok\""

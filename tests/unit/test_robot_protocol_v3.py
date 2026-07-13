@@ -83,7 +83,9 @@ def test_unified_line_config_resolves_all_task_paths() -> None:
     assert Path(config["runtimes"]["pick"]["model_dir"]).is_absolute()
     assert config["runtimes"]["pick"]["url"].endswith(":28083")
     assert config["collectors"]["pick"]["listen_port"] == 18093
-    assert config["pick"]["tcp"]["server_port"] == 10000
+    assert config["pick"]["websocket"]["listen_port"] == 9001
+    assert config["pick"]["websocket"]["path"] == "/vision"
+    assert config["pick"]["video"]["type"] == "mjpeg"
 
 
 def test_unified_line_config_rejects_duplicate_ports(tmp_path: Path) -> None:

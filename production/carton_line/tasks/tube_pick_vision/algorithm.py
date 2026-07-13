@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Task algorithm for tube-product centers and large-separator presence.
+"""Detection/depth preparation for the external bin-picking contract.
 
-The model is expected to emit two detection classes:
-
-* class 0: tube product. Return image-space center ``x/y`` and aligned depth ``z``.
-* class 1: large separator between product layers. Return class information only.
-
-No robot/base-link coordinate conversion is performed in this module.
+The Runtime still receives the complete RGB image. ROI filtering is performed by
+Runtime before this module receives ``inference_result``. This module classifies
+product/separator detections, samples the D2C-aligned depth around each bbox
+centre, and prepares the points that are deprojected by the Orbbec SDK bridge.
 """
 from __future__ import annotations
 
@@ -20,15 +18,14 @@ import numpy as np  # type: ignore
 
 
 class DetectionFormatError(ValueError):
-    """Raised when the runtime result is missing required image metadata."""
+    """Raised when Runtime output is missing required fields."""
 
 
 @dataclass(frozen=True)
 class ClassifiedDetections:
     image_width: int
     image_height: int
-    products: list[dict[str, Any]]
-    separators: list[dict[str, Any]]
+    items: list[dict[str, Any]]
     ignored: list[dict[str, Any]]
 
 
@@ -38,7 +35,11 @@ def _float(value: object, default: float = 0.0) -> float:
     if isinstance(value, (int, float)):
         number = float(value)
         return number if math.isfinite(number) else default
-    return default
+    try:
+        number = float(value)  # type: ignore[arg-type]
+        return number if math.isfinite(number) else default
+    except (TypeError, ValueError, OverflowError):
+        return default
 
 
 def _int_set(values: object, default: Sequence[int]) -> set[int]:
@@ -62,7 +63,7 @@ def _name_set(values: object) -> set[str]:
 
 
 def decode_depth_png(depth_bytes: bytes) -> "np.ndarray":
-    """Decode the bridge 16UC1 PNG whose values are millimetres."""
+    """Decode the Bridge 16UC1 PNG whose pixel values are millimetres."""
     if not depth_bytes:
         raise ValueError("深度图为空")
     encoded = np.frombuffer(depth_bytes, dtype=np.uint8)
@@ -79,11 +80,12 @@ def decode_depth_png(depth_bytes: bytes) -> "np.ndarray":
 
 
 class TubePickAlgorithm:
-    """Filter model detections and sample D2C-aligned depth around each center."""
+    """Classify detections and sample D2C-aligned depth around bbox centres."""
 
     def __init__(self, settings: Mapping[str, Any]) -> None:
         classes = settings.get("classes") if isinstance(settings.get("classes"), Mapping) else {}
         depth = settings.get("depth") if isinstance(settings.get("depth"), Mapping) else {}
+        image = settings.get("image") if isinstance(settings.get("image"), Mapping) else {}
 
         self.product_ids = _int_set(classes.get("product_ids"), [0])
         self.separator_ids = _int_set(classes.get("separator_ids"), [1])
@@ -95,13 +97,16 @@ class TubePickAlgorithm:
         if self.output_order not in {"row_major", "column_major", "confidence"}:
             raise ValueError("pick.algorithm.classes.output_order 必须是 row_major/column_major/confidence")
 
+        self.expected_width = max(1, int(image.get("width", 640)))
+        self.expected_height = max(1, int(image.get("height", 480)))
+        self.require_fixed_size = bool(image.get("require_fixed_size", True))
+
         self.roi_radius_px = max(0, int(depth.get("roi_radius_px", 4)))
         self.percentile = min(100.0, max(0.0, float(depth.get("percentile", 50.0))))
         self.min_valid_pixels = max(1, int(depth.get("min_valid_pixels", 3)))
         self.min_depth_mm = max(0, int(depth.get("min_depth_mm", 100)))
         self.max_depth_mm = max(self.min_depth_mm + 1, int(depth.get("max_depth_mm", 5000)))
         self.max_age_ms = max(0, int(depth.get("max_age_ms", 1500)))
-        self.fail_on_invalid_depth = bool(depth.get("fail_on_invalid_depth", True))
 
     @staticmethod
     def _image_size(runtime_result: Mapping[str, Any]) -> tuple[int, int]:
@@ -123,22 +128,25 @@ class TubePickAlgorithm:
             return (x1 + x2) / 2.0, (y1 + y2) / 2.0
         return None
 
-    def _is_product(self, class_id: int | None, class_name: str) -> bool:
-        return (class_id in self.product_ids) or (
-            bool(self.product_names) and class_name.lower() in self.product_names
-        )
-
-    def _is_separator(self, class_id: int | None, class_name: str) -> bool:
-        return (class_id in self.separator_ids) or (
-            bool(self.separator_names) and class_name.lower() in self.separator_names
-        )
+    def _semantic(self, class_id: int | None, class_name: str) -> str | None:
+        lower_name = class_name.lower()
+        if class_id in self.product_ids or (self.product_names and lower_name in self.product_names):
+            return "product"
+        if class_id in self.separator_ids or (self.separator_names and lower_name in self.separator_names):
+            return "separator"
+        return None
 
     def classify(self, runtime_result: Mapping[str, Any]) -> ClassifiedDetections:
         width, height = self._image_size(runtime_result)
+        if self.require_fixed_size and (width != self.expected_width or height != self.expected_height):
+            raise DetectionFormatError(
+                f"tube_pick_vision 固定图像尺寸为 {self.expected_width}x{self.expected_height}，"
+                f"Runtime 当前为 {width}x{height}"
+            )
+
         detections = runtime_result.get("detections")
         detections = detections if isinstance(detections, list) else []
-        products: list[dict[str, Any]] = []
-        separators: list[dict[str, Any]] = []
+        accepted: list[dict[str, Any]] = []
         ignored: list[dict[str, Any]] = []
 
         for index, raw in enumerate(detections):
@@ -151,48 +159,40 @@ class TubePickAlgorithm:
                 class_id = None
             class_name = str(raw.get("class_name") or "")
             score = _float(raw.get("score"))
+            center = self._center(raw)
+            semantic = self._semantic(class_id, class_name)
             detection_id = str(raw.get("id") or f"det-{index}")
 
-            if self._is_product(class_id, class_name):
-                center = self._center(raw)
-                if score < self.product_min_confidence or center is None:
-                    ignored.append({"id": detection_id, "reason": "low_confidence_or_missing_center"})
-                    continue
-                products.append(
-                    {
-                        "id": detection_id,
-                        "class_id": class_id if class_id is not None else 0,
-                        "class_name": class_name or "tube_product",
-                        "score": score,
-                        "center_x": float(center[0]),
-                        "center_y": float(center[1]),
-                        # Kept for local debug only; not exposed in the external response.
-                        "bbox_xyxy": list(raw.get("bbox_xyxy") or []),
-                    }
-                )
-            elif self._is_separator(class_id, class_name):
-                if score < self.separator_min_confidence:
-                    ignored.append({"id": detection_id, "reason": "low_confidence"})
-                    continue
-                separators.append(
-                    {
-                        "id": detection_id,
-                        "class_id": class_id if class_id is not None else 1,
-                        "class_name": class_name or "large_separator",
-                        "score": score,
-                    }
-                )
-            else:
+            if semantic is None:
                 ignored.append({"id": detection_id, "reason": "class_not_used", "class_id": class_id})
+                continue
+            threshold = self.product_min_confidence if semantic == "product" else self.separator_min_confidence
+            if score < threshold or center is None:
+                ignored.append({"id": detection_id, "reason": "low_confidence_or_missing_center"})
+                continue
+
+            default_id = 0 if semantic == "product" else 1
+            default_name = "tube_product" if semantic == "product" else "large_separator"
+            accepted.append(
+                {
+                    "source_id": detection_id,
+                    "semantic": semantic,
+                    "class_id": class_id if class_id is not None else default_id,
+                    "class_name": class_name or default_name,
+                    "confidence": score,
+                    "center_x": float(center[0]),
+                    "center_y": float(center[1]),
+                    "bbox_xyxy": list(raw.get("bbox_xyxy") or []),
+                }
+            )
 
         if self.output_order == "row_major":
-            products.sort(key=lambda item: (float(item["center_y"]), float(item["center_x"])))
+            accepted.sort(key=lambda item: (float(item["center_y"]), float(item["center_x"])))
         elif self.output_order == "column_major":
-            products.sort(key=lambda item: (float(item["center_x"]), float(item["center_y"])))
+            accepted.sort(key=lambda item: (float(item["center_x"]), float(item["center_y"])))
         else:
-            products.sort(key=lambda item: -float(item["score"]))
-        separators.sort(key=lambda item: -float(item["score"]))
-        return ClassifiedDetections(width, height, products, separators, ignored)
+            accepted.sort(key=lambda item: -float(item["confidence"]))
+        return ClassifiedDetections(width, height, accepted, ignored)
 
     @staticmethod
     def _map_pixel(value: float, source_size: int, target_size: int) -> int:
@@ -212,6 +212,11 @@ class TubePickAlgorithm:
         center_y: float,
     ) -> dict[str, Any]:
         depth_height, depth_width = int(depth.shape[0]), int(depth.shape[1])
+        if self.require_fixed_size and (depth_width != self.expected_width or depth_height != self.expected_height):
+            raise ValueError(
+                f"tube_pick_vision 固定深度尺寸为 {self.expected_width}x{self.expected_height}，"
+                f"Bridge 当前为 {depth_width}x{depth_height}"
+            )
         depth_x = self._map_pixel(center_x, image_width, depth_width)
         depth_y = self._map_pixel(center_y, image_height, depth_height)
         radius = self.roi_radius_px
@@ -222,8 +227,8 @@ class TubePickAlgorithm:
         valid_count = int(valid.size)
         if valid_count < self.min_valid_pixels:
             return {
-                "z_mm": None,
-                "valid": False,
+                "z_mm": 0,
+                "depth_valid": False,
                 "depth_x": depth_x,
                 "depth_y": depth_y,
                 "valid_pixels": valid_count,
@@ -231,95 +236,49 @@ class TubePickAlgorithm:
         z_mm = int(round(float(np.percentile(valid.astype(np.float32), self.percentile))))
         return {
             "z_mm": z_mm,
-            "valid": True,
+            "depth_valid": True,
             "depth_x": depth_x,
             "depth_y": depth_y,
             "valid_pixels": valid_count,
         }
 
-    def build_detection_payload(
+    def sample_items(
         self,
         classified: ClassifiedDetections,
-        depth: "np.ndarray | None",
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Return external payload and richer local debug details."""
-        external_products: list[dict[str, Any]] = []
-        debug_products: list[dict[str, Any]] = []
-        invalid_depth_count = 0
+        depth: "np.ndarray",
+    ) -> list[dict[str, Any]]:
+        sampled: list[dict[str, Any]] = []
+        for item in classified.items:
+            depth_info = self.sample_depth(
+                depth,
+                classified.image_width,
+                classified.image_height,
+                float(item["center_x"]),
+                float(item["center_y"]),
+            )
+            sampled.append({**item, **depth_info})
+        return sampled
 
-        for product in classified.products:
-            depth_info: dict[str, Any]
-            if depth is None:
-                depth_info = {
-                    "z_mm": None,
-                    "valid": False,
-                    "depth_x": None,
-                    "depth_y": None,
-                    "valid_pixels": 0,
-                }
-            else:
-                depth_info = self.sample_depth(
-                    depth,
-                    classified.image_width,
-                    classified.image_height,
-                    float(product["center_x"]),
-                    float(product["center_y"]),
-                )
-            if not depth_info["valid"]:
-                invalid_depth_count += 1
-            external_products.append(
+    @staticmethod
+    def build_external_items(
+        sampled: Sequence[Mapping[str, Any]],
+        positions_camera: Sequence[Sequence[float]],
+    ) -> list[dict[str, Any]]:
+        if len(sampled) != len(positions_camera):
+            raise ValueError("SDK 三维反投影结果数量与检测目标数量不一致")
+        output: list[dict[str, Any]] = []
+        for index, (item, position) in enumerate(zip(sampled, positions_camera)):
+            if len(position) < 3:
+                position = [0.0, 0.0, 0.0]
+            if not bool(item.get("depth_valid")):
+                position = [0.0, 0.0, 0.0]
+            output.append(
                 {
-                    "class_id": int(product["class_id"]),
-                    "class_name": str(product["class_name"]),
-                    "score": round(float(product["score"]), 6),
-                    "center": {
-                        "x": round(float(product["center_x"]), 3),
-                        "y": round(float(product["center_y"]), 3),
-                        "z": depth_info["z_mm"],
-                    },
-                    "depth_valid": bool(depth_info["valid"]),
+                    "id": index,
+                    "class_id": int(item.get("class_id", 0)),
+                    "confidence": round(float(item.get("confidence", 0.0)), 6),
+                    "position_camera": [round(float(position[0]), 3), round(float(position[1]), 3), round(float(position[2]), 3)],
+                    "center_px": [round(float(item.get("center_x", 0.0)), 3), round(float(item.get("center_y", 0.0)), 3)],
                 }
             )
-            debug_products.append({**product, **depth_info})
-
-        # Separator items deliberately contain no bbox, center or depth fields.
-        external_separators = [
-            {
-                "class_id": int(item["class_id"]),
-                "class_name": str(item["class_name"]),
-                "score": round(float(item["score"]), 6),
-            }
-            for item in classified.separators
-        ]
-
-        depth_height = int(depth.shape[0]) if depth is not None else 0
-        depth_width = int(depth.shape[1]) if depth is not None else 0
-        payload = {
-            "coordinate_frame": "image_depth_aligned",
-            "coordinate_units": {"x": "pixel", "y": "pixel", "z": "mm"},
-            "image": {"width": classified.image_width, "height": classified.image_height},
-            "depth": {
-                "width": depth_width,
-                "height": depth_height,
-                "encoding": "16UC1",
-                "unit": "mm",
-                "aligned_to": "color",
-                "sampling": "roi_percentile",
-                "roi_radius_px": self.roi_radius_px,
-                "percentile": self.percentile,
-                "required": bool(classified.products),
-            },
-            "product_detected": bool(external_products),
-            "separator_detected": bool(external_separators),
-            "product_count": len(external_products),
-            "separator_count": len(external_separators),
-            "invalid_depth_count": invalid_depth_count,
-            "products": external_products,
-            "separators": external_separators,
-        }
-        debug = {
-            **payload,
-            "products": debug_products,
-            "ignored_detections": classified.ignored,
-        }
-        return payload, debug
+        return output

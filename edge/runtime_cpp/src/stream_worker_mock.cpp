@@ -458,6 +458,7 @@ FrameReadResult StreamWorkerMock::next_frame(std::uint64_t sequence) {
     result.image = make_mock_image_for_sequence(sequence);
     result.frame.width = result.image.width;
     result.frame.height = result.image.height;
+    result.frame.timestamp_ms = result.image.timestamp_ms;
     update_latest(result.image);
     return result;
   }
@@ -466,6 +467,7 @@ FrameReadResult StreamWorkerMock::next_frame(std::uint64_t sequence) {
     result.image.source = "frame_source:test_image_placeholder";
     result.frame.width = result.image.width;
     result.frame.height = result.image.height;
+    result.frame.timestamp_ms = result.image.timestamp_ms;
     update_latest(result.image);
     return result;
   }
@@ -487,6 +489,7 @@ FrameReadResult StreamWorkerMock::next_frame(std::uint64_t sequence) {
       result.from_cache = true;
       result.frame.width = result.image.width;
       result.frame.height = result.image.height;
+      result.frame.timestamp_ms = result.image.timestamp_ms;
       return result;
     }
   }
@@ -509,6 +512,7 @@ FrameReadResult StreamWorkerMock::next_frame(std::uint64_t sequence) {
   result.image = image;
   result.frame.width = image.width;
   result.frame.height = image.height;
+  result.frame.timestamp_ms = image.timestamp_ms;
   update_latest(image);
   clear_error();
   return result;

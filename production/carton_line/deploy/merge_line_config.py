@@ -22,10 +22,29 @@ def merge(defaults: dict[str, Any], current: Mapping[str, Any]) -> dict[str, Any
     return output
 
 
+def drop_path(document: dict[str, Any], dotted_path: str) -> None:
+    parts = [part for part in dotted_path.split(".") if part]
+    if not parts:
+        return
+    current: dict[str, Any] = document
+    for part in parts[:-1]:
+        value = current.get(part)
+        if not isinstance(value, dict):
+            return
+        current = value
+    current.pop(parts[-1], None)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--template", required=True)
     parser.add_argument("--target", required=True)
+    parser.add_argument(
+        "--drop-path",
+        action="append",
+        default=[],
+        help="remove obsolete dotted key from installed YAML before merge",
+    )
     args = parser.parse_args()
     template_path = Path(args.template)
     target_path = Path(args.target)
@@ -40,8 +59,11 @@ def main() -> int:
     current = yaml.safe_load(target_path.read_text(encoding="utf-8"))
     if not isinstance(current, dict):
         raise ValueError("installed YAML top-level must be object")
+    original_current = deepcopy(current)
+    for dotted_path in args.drop_path:
+        drop_path(current, dotted_path)
     merged = merge(defaults, current)
-    if merged == current:
+    if merged == original_current:
         print(f"up-to-date {target_path}")
         return 0
     backup = target_path.with_name(f"{target_path.name}.bak.{int(time.time())}")

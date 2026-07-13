@@ -10,7 +10,7 @@ KEEP_SERVICES=(
     "visionops-orbbec336l-bridge.service"
     "visionops-v3-collector-pick.service"
     "visionops-v3-runtime-pick.service"
-    "visionops-v3-tcp-pick.service"
+    "visionops-v3-ws-pick.service"
     # 在此添加更多需要保留的服务
 )
 

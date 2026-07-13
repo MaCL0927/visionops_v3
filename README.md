@@ -69,7 +69,7 @@ visionops_v3/
 - 纸筒站立/倒伏与 RGB-Depth 高度判断；
 - 双机械手坐标转换；
 - 统一 Robot Protocol Gateway；
-- 三套 Runtime、三套 Collector、一个 Modbus-TCP 服务和一个机器人调度 TCP Client；
+- 三套 Runtime、三套 Collector、一个 Modbus-TCP 服务，以及面向机器人后端的 Tube Pick WebSocket Server + MJPEG 视频接口；
 - 单一产线配置文件和 systemd 部署文件。
 
 完整说明见：
@@ -143,7 +143,7 @@ cd /opt/visionops_v3
 ./production/carton_line/scripts/start_runtime.sh tube
 ./production/carton_line/scripts/start_runtime.sh pick
 ./production/carton_line/scripts/start_gateway.sh
-./production/carton_line/scripts/start_tcp_pick.sh
+./production/carton_line/scripts/start_ws_pick.sh
 ./production/carton_line/scripts/start_collector.sh partition
 ./production/carton_line/scripts/start_collector.sh tube
 ./production/carton_line/scripts/start_collector.sh pick
@@ -158,7 +158,8 @@ production/carton_line/config/line.yaml
 安装 systemd：
 
 ```bash
-sudo bash production/carton_line/deploy/install_services.sh
+sudo bash production/carton_line/deploy/install_services.sh --profile partition-tube
+# 或：sudo bash production/carton_line/deploy/install_services.sh --profile tube-pick
 ```
 
 ## 8. 通用验证

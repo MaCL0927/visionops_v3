@@ -1,7 +1,7 @@
 [Unit]
 Description=VisionOps v3 Carton Line - Tube Pick Web
-After=network-online.target visionops-v3-runtime-pick.service visionops-v3-tcp-pick.service
-Wants=network-online.target visionops-v3-runtime-pick.service visionops-v3-tcp-pick.service
+After=network-online.target visionops-v3-runtime-pick.service visionops-v3-ws-pick.service
+Wants=network-online.target visionops-v3-runtime-pick.service visionops-v3-ws-pick.service
 
 [Service]
 Type=simple

@@ -59,6 +59,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "health_path": "/health",
         "depth_url": "http://127.0.0.1:18182/stream/depth.png",
         "depth_meta_url": "http://127.0.0.1:18182/stream/depth_meta",
+        "deproject_url": "http://127.0.0.1:18182/api/coordinate/deproject",
     },
     "runtimes": {
         "partition": {
@@ -186,23 +187,31 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
     },
     "pick": {
-        "tcp": {
-            "server_host": "127.0.0.1",
-            "server_port": 10000,
-            "connect_timeout_ms": 3000,
-            "read_timeout_ms": 1000,
-            "reconnect_initial_ms": 1000,
-            "reconnect_max_ms": 10000,
-            "max_frame_bytes": 1048576,
-            "response_cache_size": 32,
-            "response_function": "tube_pick_result",
-            "camera_id": 0,
-            "accepted_functions": [],
-            "accepted_cameras": [],
-            "accepted_task_ids": [],
-            "http": {"listen_host": "127.0.0.1", "listen_port": 19130},
+        "websocket": {
+            "listen_host": "0.0.0.0",
+            "listen_port": 9001,
+            "path": "/vision",
+            "token": "",
+            "auto_start": True,
+            "detection_hz": 10.0,
+            "status_interval_s": 2.0,
+            "read_timeout_s": 30.0,
+            "max_clients": 4,
+            "max_payload_bytes": 1048576,
+            "trigger_queue_size": 32,
+        },
+        "http": {"listen_host": "127.0.0.1", "listen_port": 19130},
+        "video": {
+            "type": "mjpeg",
+            "public_url": "http://192.168.2.211:18182/stream.mjpeg",
+            "sync": "soft",
         },
         "algorithm": {
+            "image": {
+                "width": 640,
+                "height": 480,
+                "require_fixed_size": True,
+            },
             "classes": {
                 "product_ids": [0],
                 "separator_ids": [1],
@@ -219,7 +228,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "min_depth_mm": 100,
                 "max_depth_mm": 5000,
                 "max_age_ms": 1500,
-                "fail_on_invalid_depth": True,
             },
         },
         "debug": {
@@ -313,14 +321,14 @@ def load_config(path: str | None) -> dict[str, Any]:
         service[key] = _port(service[key], f"service.{key}")
     modbus["port"] = _port(modbus["port"], "modbus.port")
 
-    pick_tcp = config["pick"]["tcp"]
-    pick_http = pick_tcp["http"]
-    pick_http["listen_port"] = _port(pick_http["listen_port"], "pick.tcp.http.listen_port")
-    pick_tcp["server_port"] = _port(pick_tcp["server_port"], "pick.tcp.server_port")
+    pick_ws = config["pick"]["websocket"]
+    pick_http = config["pick"]["http"]
+    pick_ws["listen_port"] = _port(pick_ws["listen_port"], "pick.websocket.listen_port")
+    pick_http["listen_port"] = _port(pick_http["listen_port"], "pick.http.listen_port")
 
     used_ports = [
         service["listen_port"], service["partition_app_port"], service["tube_app_port"],
-        modbus["port"], pick_http["listen_port"],
+        modbus["port"], pick_ws["listen_port"], pick_http["listen_port"],
     ]
     for task in ("partition", "tube", "pick"):
         runtime = config["runtimes"][task]
@@ -375,33 +383,43 @@ def load_config(path: str | None) -> dict[str, Any]:
     bridge["base_url"] = _valid_url(bridge["base_url"], "camera_bridge.base_url")
     bridge["depth_url"] = _valid_url(bridge["depth_url"], "camera_bridge.depth_url")
     bridge["depth_meta_url"] = _valid_url(bridge["depth_meta_url"], "camera_bridge.depth_meta_url")
+    bridge["deproject_url"] = _valid_url(bridge["deproject_url"], "camera_bridge.deproject_url")
     config["partition"]["template_path"] = _project_relative_path(config["partition"]["template_path"])
     config["coordinates"]["template_path"] = _project_relative_path(config["coordinates"]["template_path"])
     config["debug"]["save_root"] = str(Path(config["debug"]["save_root"]).expanduser())
 
-    if not str(pick_tcp.get("server_host") or "").strip():
-        raise ValueError("pick.tcp.server_host 不能为空")
-    for key in (
-        "connect_timeout_ms", "read_timeout_ms", "reconnect_initial_ms", "reconnect_max_ms",
-        "max_frame_bytes", "response_cache_size",
-    ):
-        pick_tcp[key] = int(pick_tcp[key])
-        if pick_tcp[key] <= 0:
-            raise ValueError(f"pick.tcp.{key} 必须大于 0")
-    if pick_tcp["reconnect_max_ms"] < pick_tcp["reconnect_initial_ms"]:
-        raise ValueError("pick.tcp.reconnect_max_ms 不得小于 reconnect_initial_ms")
-    for key in ("accepted_functions", "accepted_cameras", "accepted_task_ids"):
-        values = pick_tcp.get(key, [])
-        if not isinstance(values, list):
-            raise ValueError(f"pick.tcp.{key} 必须是数组")
-        pick_tcp[key] = [str(value) for value in values if str(value)]
+    pick_ws["listen_host"] = str(pick_ws.get("listen_host") or "0.0.0.0")
+    pick_ws["path"] = str(pick_ws.get("path") or "/vision")
+    if not pick_ws["path"].startswith("/"):
+        pick_ws["path"] = "/" + pick_ws["path"]
+    pick_ws["token"] = str(pick_ws.get("token") or "")
+    pick_ws["auto_start"] = bool(pick_ws.get("auto_start", True))
+    for key in ("max_clients", "max_payload_bytes", "trigger_queue_size"):
+        pick_ws[key] = int(pick_ws[key])
+        if pick_ws[key] <= 0:
+            raise ValueError(f"pick.websocket.{key} 必须大于 0")
+    for key in ("detection_hz", "status_interval_s", "read_timeout_s"):
+        pick_ws[key] = float(pick_ws[key])
+        if pick_ws[key] <= 0:
+            raise ValueError(f"pick.websocket.{key} 必须大于 0")
+    if pick_ws["detection_hz"] > 30.0:
+        raise ValueError("pick.websocket.detection_hz 不得大于 30")
     pick_http["listen_host"] = str(pick_http.get("listen_host") or "127.0.0.1")
-    pick_tcp["camera_id"] = int(pick_tcp.get("camera_id", 0))
-    pick_tcp["response_function"] = str(pick_tcp.get("response_function") or "").strip()
-    if not pick_tcp["response_function"]:
-        raise ValueError("pick.tcp.response_function 不能为空")
+
+    video = config["pick"]["video"]
+    video["type"] = str(video.get("type") or "mjpeg").lower()
+    if video["type"] != "mjpeg":
+        raise ValueError("pick.video.type 当前只支持 mjpeg")
+    video["public_url"] = _valid_url(video["public_url"], "pick.video.public_url")
+    video["sync"] = "soft"
 
     pick_algorithm = config["pick"]["algorithm"]
+    image_config = pick_algorithm["image"]
+    for key in ("width", "height"):
+        image_config[key] = int(image_config[key])
+        if image_config[key] <= 0:
+            raise ValueError(f"pick.algorithm.image.{key} 必须大于 0")
+    image_config["require_fixed_size"] = bool(image_config.get("require_fixed_size", True))
     class_config = pick_algorithm["classes"]
     product_ids = {int(value) for value in class_config.get("product_ids", [])}
     separator_ids = {int(value) for value in class_config.get("separator_ids", [])}
@@ -431,7 +449,5 @@ def load_config(path: str | None) -> dict[str, Any]:
         raise ValueError("pick.algorithm.depth.percentile 必须位于 0..100")
     if depth_config["max_age_ms"] < 0:
         raise ValueError("pick.algorithm.depth.max_age_ms 不得为负")
-    depth_config["fail_on_invalid_depth"] = bool(depth_config.get("fail_on_invalid_depth", True))
-
     config["pick"]["debug"]["save_root"] = str(Path(config["pick"]["debug"]["save_root"]).expanduser())
     return config
