@@ -44,6 +44,7 @@
 #include <opencv2/imgproc.hpp>
 
 #include "libobsensor/ObSensor.hpp"
+#include "libobsensor/hpp/Utils.hpp"
 
 namespace {
 
@@ -192,6 +193,14 @@ public:
             enable_depth_stream(cfg);
             cfg->setAlignMode(ALIGN_D2C_SW_MODE);
             pipeline_->start(cfg);
+
+            // CoordinateTransformHelper is declared in hpp/Utils.hpp.
+            // Cache the calibration parameters generated from the exact active
+            // color/depth profiles so the HTTP deprojection endpoint can convert
+            // aligned color pixels + depth (mm) into the color-camera 3D frame.
+            calibration_param_ = pipeline_->getCalibrationParam(cfg);
+            calibration_ready_ = true;
+
             camera_started_ = true;
             start_ms_ = now_ms();
             std::cerr << "[INFO] Orbbec Gemini 336L bridge camera started" << std::endl;
@@ -522,11 +531,15 @@ private:
             return std::string("{\"ok\":false,\"error\":\"") + json_escape(parse_error) + "\"}";
         }
         std::shared_ptr<ob::VideoStreamProfile> profile;
+        OBCalibrationParam calibration_param{};
+        bool calibration_ready = false;
         int width = 0;
         int height = 0;
         {
             std::lock_guard<std::mutex> lk(mtx_);
             profile = color_profile_;
+            calibration_param = calibration_param_;
+            calibration_ready = calibration_ready_;
             width = color_w_ > 0 ? color_w_ : color_width_;
             height = color_h_ > 0 ? color_h_ : color_height_;
         }
@@ -534,9 +547,11 @@ private:
             status_code = 503;
             return "{\"ok\":false,\"error\":\"color profile unavailable\"}";
         }
+        if (!calibration_ready) {
+            status_code = 503;
+            return "{\"ok\":false,\"error\":\"camera calibration unavailable\"}";
+        }
         try {
-            auto intrinsic = profile->getIntrinsic();
-            auto identity = profile->getExtrinsicTo(profile);
             std::ostringstream os;
             os << "{\"ok\":true,\"coordinate_frame\":\"color_camera\",\"unit\":\"mm\",\"points\":[";
             for (size_t i = 0; i < inputs.size(); ++i) {
@@ -550,8 +565,13 @@ private:
                 bool valid = false;
                 if (depth_mm > 0.0f && u >= 0.0f && v >= 0.0f && u < width && v < height) {
                     OBPoint2f pixel{u, v};
-                    valid = ob::CoordinateTransformHelper::transformation2dto3d(
-                        pixel, depth_mm, intrinsic, identity, &point3d);
+                    valid = ob::CoordinateTransformHelper::calibration2dTo3d(
+                        calibration_param,
+                        pixel,
+                        depth_mm,
+                        OB_SENSOR_COLOR,
+                        OB_SENSOR_COLOR,
+                        &point3d);
                     valid = valid && std::isfinite(point3d.x) && std::isfinite(point3d.y) && std::isfinite(point3d.z);
                 }
                 os << "{\"valid\":" << (valid ? "true" : "false") << ",\"position_camera\":[";
@@ -887,6 +907,8 @@ private:
 
     std::shared_ptr<ob::Context> ctx_;
     std::shared_ptr<ob::Pipeline> pipeline_;
+    OBCalibrationParam calibration_param_{};
+    bool calibration_ready_ = false;
     std::shared_ptr<ob::VideoStreamProfile> color_profile_;
     std::shared_ptr<ob::VideoStreamProfile> depth_profile_;
     std::thread camera_thread_;

@@ -51,7 +51,7 @@ POST /api/coordinate/deproject
 }
 ```
 
-内部调用 Orbbec SDK `CoordinateTransformHelper::transformation2dto3d()`。深度为 0 或转换失败时返回 `[0,0,0]`。
+内部调用 Orbbec SDK `CoordinateTransformHelper::calibration2dTo3d()`。深度为 0 或转换失败时返回 `[0,0,0]`。
 
 机器人需要读取 MJPEG 时，实际 env 文件必须设置：
 
