@@ -237,3 +237,45 @@ Collector Web 提供边缘端数据集采集、打包与上传接口：
 - `POST /api/dataset/upload`：使用视觉盒子设置里的 SSH 配置打包并上传。
 
 使用 SSH 密码上传时，运行环境需要安装 `paramiko` 或系统 `sshpass`。
+
+## 定时采图
+
+“采集上传 / 拍照采集”页面提供“定时采图”按钮。设置间隔后，Collector 在后台周期性读取 Runtime 的 `/api/runtime/snapshot.jpg`，并使用与手动拍照相同的保存目录和命名规则。
+
+接口：
+
+```text
+GET  /api/dataset/timed_capture
+POST /api/dataset/timed_capture
+```
+
+启动示例：
+
+```bash
+curl -s -X POST http://127.0.0.1:18093/api/dataset/timed_capture \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"interval_seconds":10}' | python3 -m json.tool
+```
+
+停止示例：
+
+```bash
+curl -s -X POST http://127.0.0.1:18093/api/dataset/timed_capture \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":false}' | python3 -m json.tool
+```
+
+定时任务属于当前 Collector 进程；Collector 重启后默认停止，需要重新启用。
+
+## 检测结果 ROI
+
+模型验证页提供“绘制 ROI”按钮。ROI 使用归一化坐标保存到对应 Runtime 的独立配置文件。模型输入仍为完整相机画面，ROI 只在 C++ Runtime 完成 detection / OBB / segmentation 后处理后过滤输出，判断规则为目标中心点位于 ROI 内。
+
+Collector 代理接口：
+
+```text
+GET  /api/runtime/roi
+POST /api/runtime/roi
+```
+
+因此 Collector Web、生产 Gateway、Modbus 和 Tube Pick TCP 读取到的都是同一份 ROI 过滤后的 Runtime 结果。

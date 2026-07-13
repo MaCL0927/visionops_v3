@@ -375,3 +375,66 @@ Collector Web 使用该接口显示预览和结果叠加图。Gateway/Modbus 不
 - Runtime 不接受任意文件路径、模型路径或 shell 命令作为本 API 参数。
 - 模型切换、服务重启和生产参数变更不属于本文最小 API，后续需单独定义鉴权和审计契约。
 - Mock 与生产实现必须返回相同字段结构，但 Mock 使用 `backend: "mock"` 明确标识。
+
+## 12. GET /api/runtime/roi
+
+### 用途
+
+读取 Runtime 当前检测结果 ROI。ROI 只过滤后处理输出，不裁剪模型输入。
+
+### 请求参数
+
+无。ROI 坐标使用原始图像的归一化坐标。
+
+### 成功响应
+
+HTTP `200 OK`：
+
+```json
+{
+  "schema_version": "1.0",
+  "message_type": "runtime_roi_config",
+  "status": "ok",
+  "roi": {
+    "enabled": true,
+    "mode": "center",
+    "normalized_xyxy": [0.1, 0.2, 0.9, 0.8],
+    "pixel_xyxy": [128, 144, 1152, 576]
+  }
+}
+```
+
+### 错误状态
+
+- HTTP `500 Internal Server Error`：配置读取失败。
+
+### 调用关系
+
+Collector Web 代理该接口用于 ROI 编辑和展示。Gateway 与业务 App 无需读取配置，它们直接消费已经过滤的 `inference_result`。
+
+## 13. POST /api/runtime/roi
+
+### 用途
+
+启用、更新或关闭 Runtime 检测结果 ROI，并持久化到 `--roi-config` 指定的文件。
+
+### 请求参数
+
+```json
+{"enabled":true,"x1":0.1,"y1":0.2,"x2":0.9,"y2":0.8}
+```
+
+坐标必须满足 `0 <= x1 < x2 <= 1` 和 `0 <= y1 < y2 <= 1`。
+
+### 成功响应
+
+HTTP `200 OK`，结构同 `GET /api/runtime/roi`。
+
+### 错误状态
+
+- HTTP `400 Bad Request`：字段缺失、坐标非法或 ROI 过小。
+- HTTP `500 Internal Server Error`：配置无法持久化。
+
+### 调用关系
+
+模型验证页调用该接口。更新后后续所有 Web、TCP、Modbus 推理结果立即使用新 ROI。

@@ -120,3 +120,6 @@ diagnostics/
 *~
 .DS_Store
 Thumbs.db
+
+# Runtime generated state
+/data/runtime/

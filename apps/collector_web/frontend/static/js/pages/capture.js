@@ -9,6 +9,8 @@ const limit = 24;
 let total = 0;
 let busy = false;
 let previewRecord = null;
+let timedStatusTimer = null;
+let lastTimedCaptureCount = -1;
 
 const image = document.getElementById("capture-image");
 const empty = document.getElementById("capture-empty");
@@ -19,6 +21,9 @@ const previewImage = document.getElementById("capture-preview-image");
 const previewMeta = document.getElementById("capture-preview-meta");
 const uploadModal = document.getElementById("capture-upload-modal");
 const resultModal = document.getElementById("capture-result-modal");
+const timedModal = document.getElementById("capture-timed-modal");
+const timedStatusNode = document.getElementById("capture-timed-status");
+const timedIntervalInput = document.getElementById("capture-timed-interval");
 
 function formatBytes(value) {
   const n = Number(value);
@@ -232,6 +237,91 @@ async function deleteSavedImage(record, options = {}) {
   }
 }
 
+function formatTimestamp(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "--";
+  return new Date(number).toLocaleString();
+}
+
+function renderTimedStatus(payload) {
+  const enabled = payload?.enabled === true;
+  const button = document.getElementById("capture-timed-btn");
+  const count = Number(payload?.capture_count || 0);
+  if (button) {
+    button.classList.toggle("active", enabled);
+    button.textContent = enabled ? `定时采图中 (${payload.interval_seconds}s)` : "定时采图";
+  }
+  if (timedIntervalInput && document.activeElement !== timedIntervalInput) {
+    timedIntervalInput.value = String(payload?.interval_seconds ?? 10);
+  }
+  if (timedStatusNode) {
+    if (enabled) {
+      timedStatusNode.textContent = `运行中：已自动保存 ${count} 张；下次 ${formatTimestamp(payload.next_capture_at_ms)}；最近错误：${payload.last_error || "无"}`;
+      timedStatusNode.dataset.kind = payload.last_error ? "error" : "ok";
+    } else {
+      timedStatusNode.textContent = `当前未启用。累计自动保存 ${count} 张；上次采图 ${formatTimestamp(payload.last_capture_at_ms)}。`;
+      timedStatusNode.dataset.kind = "";
+    }
+  }
+  if (lastTimedCaptureCount >= 0 && count > lastTimedCaptureCount) {
+    setMessage(`定时采图已保存：${payload.last_image?.filename || `累计 ${count} 张`}`, "ok");
+    loadRecords(0);
+  }
+  lastTimedCaptureCount = count;
+}
+
+async function refreshTimedStatus() {
+  try {
+    const payload = await requestJson(endpoints.timedCapture);
+    renderTimedStatus(payload);
+    return payload;
+  } catch (error) {
+    if (timedStatusNode) {
+      timedStatusNode.textContent = error.body?.error?.message || error.message || "读取定时采图状态失败";
+      timedStatusNode.dataset.kind = "error";
+    }
+    return null;
+  }
+}
+
+async function openTimedCapture() {
+  showModal(timedModal);
+  await refreshTimedStatus();
+}
+
+async function startTimedCapture() {
+  const interval = Number(timedIntervalInput?.value || 10);
+  if (!Number.isFinite(interval) || interval < 0.5 || interval > 86400) {
+    timedStatusNode.textContent = "采图间隔必须位于 0.5 到 86400 秒。";
+    timedStatusNode.dataset.kind = "error";
+    return;
+  }
+  try {
+    const payload = await postJson(endpoints.timedCapture, {
+      enabled: true,
+      interval_seconds: interval,
+    });
+    renderTimedStatus(payload);
+    hideModal(timedModal);
+    setMessage(`定时采图已启动，间隔 ${interval} 秒`, "ok");
+  } catch (error) {
+    timedStatusNode.textContent = error.body?.error?.message || error.message || "启动定时采图失败";
+    timedStatusNode.dataset.kind = "error";
+  }
+}
+
+async function stopTimedCapture() {
+  try {
+    const payload = await postJson(endpoints.timedCapture, { enabled: false });
+    renderTimedStatus(payload);
+    hideModal(timedModal);
+    setMessage("定时采图已停止", "ok");
+  } catch (error) {
+    timedStatusNode.textContent = error.body?.error?.message || error.message || "停止定时采图失败";
+    timedStatusNode.dataset.kind = "error";
+  }
+}
+
 function openUploadConfirm() {
   const state = getState();
   const config = state.config || {};
@@ -339,6 +429,7 @@ export function initCapture() {
   document.querySelectorAll("[data-capture-step]").forEach((button) => button.addEventListener("click", () => activateStep(button.dataset.captureStep)));
   document.getElementById("capture-refresh")?.addEventListener("click", refreshCapture);
   document.getElementById("capture-shoot-btn")?.addEventListener("click", shoot);
+  document.getElementById("capture-timed-btn")?.addEventListener("click", openTimedCapture);
   document.getElementById("capture-download")?.addEventListener("click", downloadCapture);
   document.getElementById("capture-clear")?.addEventListener("click", clearRecords);
   document.getElementById("capture-refresh-list")?.addEventListener("click", () => loadRecords(offset));
@@ -356,5 +447,12 @@ export function initCapture() {
   document.getElementById("capture-result-close")?.addEventListener("click", () => hideModal(resultModal));
   document.getElementById("capture-result-done")?.addEventListener("click", () => hideModal(resultModal));
 
+  document.getElementById("capture-timed-close")?.addEventListener("click", () => hideModal(timedModal));
+  document.getElementById("capture-timed-cancel")?.addEventListener("click", () => hideModal(timedModal));
+  document.getElementById("capture-timed-confirm")?.addEventListener("click", startTimedCapture);
+  document.getElementById("capture-timed-stop")?.addEventListener("click", stopTimedCapture);
+
   loadRecords(0);
+  refreshTimedStatus();
+  if (!timedStatusTimer) timedStatusTimer = window.setInterval(refreshTimedStatus, 2000);
 }

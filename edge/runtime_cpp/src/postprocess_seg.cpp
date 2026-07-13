@@ -731,6 +731,26 @@ bool decode_fused_segmentation(
   return true;
 }
 
+void apply_roi_filter(
+    std::vector<SegItem>& detections,
+    const RoiFilterConfig& roi,
+    const LetterboxMeta& letterbox) {
+  if (!roi.enabled) return;
+  detections.erase(
+      std::remove_if(
+          detections.begin(),
+          detections.end(),
+          [&](const SegItem& item) {
+            return !roi_contains_center(
+                roi,
+                (item.x1 + item.x2) * 0.5F,
+                (item.y1 + item.y2) * 0.5F,
+                letterbox.orig_width,
+                letterbox.orig_height);
+          }),
+      detections.end());
+}
+
 }  // namespace
 
 PostprocessResult postprocess_segmentation(
@@ -745,9 +765,12 @@ PostprocessResult postprocess_segmentation(
 
   if (decode_split_dfl_segmentation(outputs, config, letterbox, decoded, proto_shape, proto_values, mask_dim)) {
     decoded = apply_nms(std::move(decoded), config.nms_threshold, config.max_detections);
+    result.raw_result_count = static_cast<int>(decoded.size());
+    apply_roi_filter(decoded, config.roi, letterbox);
     attach_proto_masks(decoded, proto_values, proto_shape, letterbox);
     result.success = true;
     result.result_count = static_cast<int>(decoded.size());
+    result.roi_filtered_count = result.raw_result_count - result.result_count;
     result.mask_count = static_cast<int>(decoded.size());
     result.proto_shape = proto_shape;
     result.payload_json = segmentation_json(decoded, letterbox);
@@ -761,9 +784,12 @@ PostprocessResult postprocess_segmentation(
   mask_dim = 0;
   if (decode_fused_segmentation(outputs, config, letterbox, decoded, proto_shape, proto_values, mask_dim)) {
     decoded = apply_nms(std::move(decoded), config.nms_threshold, config.max_detections);
+    result.raw_result_count = static_cast<int>(decoded.size());
+    apply_roi_filter(decoded, config.roi, letterbox);
     attach_proto_masks(decoded, proto_values, proto_shape, letterbox);
     result.success = true;
     result.result_count = static_cast<int>(decoded.size());
+    result.roi_filtered_count = result.raw_result_count - result.result_count;
     result.mask_count = static_cast<int>(decoded.size());
     result.proto_shape = proto_shape;
     result.payload_json = segmentation_json(decoded, letterbox);

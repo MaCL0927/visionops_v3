@@ -183,7 +183,9 @@ PostprocessResult postprocess_classification(
   }
 
   result.success = true;
+  result.raw_result_count = static_cast<int>(items.size());
   result.result_count = static_cast<int>(items.size());
+  result.roi_filtered_count = 0;
   result.payload_json = classifications_json(items);
   return result;
 }

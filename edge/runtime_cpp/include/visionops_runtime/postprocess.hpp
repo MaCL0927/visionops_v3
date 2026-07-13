@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "visionops_runtime/preprocess.hpp"
+#include "visionops_runtime/roi_filter.hpp"
 #include "visionops_runtime/rknn_runner.hpp"
 
 namespace visionops::runtime {
@@ -13,6 +14,7 @@ struct PostprocessConfig {
   float score_threshold{0.5F};
   float nms_threshold{0.45F};
   int max_detections{100};
+  RoiFilterConfig roi;
 };
 
 struct PostprocessResult {
@@ -22,6 +24,8 @@ struct PostprocessResult {
   std::string error_message;
   std::string warning;
   int result_count{0};
+  int raw_result_count{0};
+  int roi_filtered_count{0};
   int mask_count{0};
   std::vector<std::uint32_t> proto_shape;
 };

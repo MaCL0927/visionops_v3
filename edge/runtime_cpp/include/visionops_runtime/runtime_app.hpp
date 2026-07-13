@@ -9,6 +9,7 @@
 #include "visionops_runtime/model_package.hpp"
 #include "visionops_runtime/preprocess.hpp"
 #include "visionops_runtime/rknn_runner.hpp"
+#include "visionops_runtime/roi_filter.hpp"
 #include "visionops_runtime/runtime_state.hpp"
 #include "visionops_runtime/snapshot_provider.hpp"
 #include "visionops_runtime/stream_worker.hpp"
@@ -30,6 +31,8 @@ class RuntimeApp {
   std::string stop_preview();
   std::string infer_once();
   RuntimeApiResult switch_model(const std::string& request_body);
+  std::string roi_json() const;
+  RuntimeApiResult update_roi(const std::string& request_body);
   std::optional<std::string> latest_result_json() const;
   std::vector<std::uint8_t> snapshot_jpeg();
 
@@ -75,6 +78,7 @@ class RuntimeApp {
   std::unique_ptr<RknnRunner> rknn_runner_;
   StreamWorkerMock stream_worker_;
   SnapshotProvider snapshot_provider_;
+  RoiFilterStore roi_filter_;
   mutable std::recursive_mutex model_mutex_;
 };
 

@@ -15,6 +15,7 @@ struct AppConfig {
   std::string model_dir;
   std::string test_image;
   std::string save_debug_output;
+  std::string roi_config_path;
   std::string preprocess_backend{"cpu"};  // cpu, rga, auto
   std::string rga_mode{"resize_rgb"};
   bool dump_rknn_io{false};

@@ -21,6 +21,7 @@ from .runtime_client import RuntimeClient, RuntimeResponse, RuntimeUnavailable
 from .sdk_bridge_settings import apply_orbbec_settings, get_orbbec_settings_payload
 from .algorithm_settings import apply_algorithm_settings, get_algorithm_settings_payload
 from .vision_box_settings import apply_vision_box_settings, get_vision_box_settings_payload, load_vision_box_settings
+from .timed_capture import TimedCaptureController
 from .dataset_manager import (
     create_and_upload_dataset,
     create_dataset_package,
@@ -65,6 +66,7 @@ class CollectorServer(ThreadingHTTPServer):
         self.runtime_client = RuntimeClient(config.runtime_url)
         self.gateway_client = RuntimeClient(config.gateway_url)
         self.business_app_client = RuntimeClient(config.business_app_url)
+        self.timed_capture = TimedCaptureController(self.runtime_client)
 
     def uptime_s(self) -> float:
         return time.monotonic() - self.started_at
@@ -114,6 +116,12 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/dataset/packages":
             self._send_dataset_packages()
             return
+        if path == "/api/dataset/timed_capture":
+            send_json(self, 200, self.server.timed_capture.status())
+            return
+        if path == "/api/runtime/roi":
+            self._proxy_runtime(path, expected_method="GET")
+            return
         if path.startswith("/api/dataset/images/") and path.endswith("/content"):
             self._send_dataset_image_content(path)
             return
@@ -148,6 +156,12 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/dataset/images/capture":
             self._capture_dataset_image()
+            return
+        if path == "/api/dataset/timed_capture":
+            self._configure_timed_capture()
+            return
+        if path == "/api/runtime/roi":
+            self._proxy_runtime(path, expected_method="POST")
             return
         if path == "/api/dataset/packages/create":
             self._create_dataset_package()
@@ -322,6 +336,25 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             self._send_collector_error(500, "DATASET_CAPTURE_FAILED", "保存采集图片失败", True, detail=str(error))
             return
         send_json(self, 200, payload)
+
+    def _configure_timed_capture(self) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        try:
+            enabled = bool(payload.get("enabled", True))
+            if enabled:
+                result = self.server.timed_capture.start(
+                    float(payload.get("interval_seconds", 10))
+                )
+            else:
+                result = self.server.timed_capture.stop()
+        except (TypeError, ValueError) as error:
+            self._send_collector_error(
+                400, "TIMED_CAPTURE_INVALID", str(error), True
+            )
+            return
+        send_json(self, 200, result)
 
     def _create_dataset_package(self) -> None:
         payload_body = self._read_json_body()
@@ -858,6 +891,7 @@ def run(config: CollectorConfig) -> int:
     try:
         server.serve_forever(poll_interval=0.2)
     finally:
+        server.timed_capture.close()
         server.server_close()
     print("VisionOps Collector Web 已停止")
     return 0

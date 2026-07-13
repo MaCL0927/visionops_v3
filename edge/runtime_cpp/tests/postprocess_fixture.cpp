@@ -31,15 +31,24 @@ int main(int argc, char* argv[]) {
   }
   const std::string task = argv[1];
   const visionops::runtime::LetterboxMeta meta{1280, 720, 640, 640, 640, 360, 0.5F, 0.0F, 140.0F};
-  const visionops::runtime::PostprocessConfig config{{"tube", "bag"}, 0.5F, 0.45F, 100};
+  const visionops::runtime::PostprocessConfig config{{"tube", "bag"}, 0.5F, 0.45F, 100, {}};
   visionops::runtime::PostprocessResult result;
   std::string output_task = task;
-  if (task == "detection") {
+  if (task == "detection" || task == "detection_roi") {
+    auto detection_config = config;
+    if (task == "detection_roi") {
+      detection_config.roi.enabled = true;
+      detection_config.roi.x1 = 0.75;
+      detection_config.roi.y1 = 0.0;
+      detection_config.roi.x2 = 1.0;
+      detection_config.roi.y2 = 1.0;
+      output_task = "detection";
+    }
     result = visionops::runtime::postprocess_detection(
         {make_tensor({1, 2, 6}, {
             320, 320, 160, 120, 0.9F, 0.1F,
             322, 322, 160, 120, 0.4F, 0.2F})},
-        config,
+        detection_config,
         meta);
   } else if (task == "detection_split") {
     std::vector<float> box(64, 0.0F);
@@ -79,7 +88,7 @@ int main(int argc, char* argv[]) {
     output_task = "obb";
   } else if (task == "obb_rockchip_extra_channel") {
     const visionops::runtime::LetterboxMeta meta1280{1280, 720, 1280, 1280, 1280, 720, 1.0F, 0.0F, 280.0F};
-    const visionops::runtime::PostprocessConfig config2{{"bag", "point"}, 0.5F, 0.45F, 100};
+    const visionops::runtime::PostprocessConfig config2{{"bag", "point"}, 0.5F, 0.45F, 100, {}};
     std::vector<float> head(67, -20.0F);
     // 64 个 DFL 通道 + 2 个类别通道 + 1 个额外辅助通道。
     // 1280 OBB RKNN 常见输出为 [1,67,160,160] + [1,1,33600]。
@@ -118,7 +127,7 @@ int main(int argc, char* argv[]) {
         config,
         meta);
   } else if (task == "segmentation_split") {
-    const visionops::runtime::PostprocessConfig seg_config{{"person", "bag"}, 0.5F, 0.45F, 100};
+    const visionops::runtime::PostprocessConfig seg_config{{"person", "bag"}, 0.5F, 0.45F, 100, {}};
     auto box_head = []() {
       std::vector<float> values(64, -20.0F);
       for (int side = 0; side < 4; ++side) {

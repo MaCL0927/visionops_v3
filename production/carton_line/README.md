@@ -459,3 +459,38 @@ journalctl -u visionops-v3-tcp-pick.service -f
 5. 明确新任务属于哪个部署 profile，避免默认安装到所有板卡；
 6. 在顶层 `tests/` 增加纯算法和协议测试；
 7. 不在根目录增加新的任务专用 YAML、env、脚本或 service 文件。
+
+## 13. 定时采图与任务 ROI
+
+每个 Collector Web 的“采集上传 / 拍照采集”页面均支持定时采图。定时任务由对应 Collector 进程维护，保存位置与手动拍照一致；Collector 重启后不会自动恢复定时任务。
+
+模型验证页可在当前原始相机图像上拖动设置 ROI。三个 Runtime 使用独立配置文件：
+
+```text
+data/runtime/roi_partition.json
+data/runtime/roi_tube.json
+data/runtime/roi_pick.json
+```
+
+ROI 不裁剪模型输入，只过滤模型后处理输出，规则为目标中心点位于 ROI 内。由于过滤位于 C++ Runtime 的统一后处理出口，以下链路无需分别增加 ROI 代码：
+
+```text
+模型验证 Web
+partition/tube Modbus Gateway
+tube_pick_vision TCP JSON
+```
+
+例如 Pick Runtime 可直接检查：
+
+```bash
+curl -s http://127.0.0.1:28083/api/runtime/roi | python3 -m json.tool
+```
+
+关闭 ROI：
+
+```bash
+curl -s -X POST http://127.0.0.1:28083/api/runtime/roi \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":false,"x1":0,"y1":0,"x2":1,"y2":1}' \
+  | python3 -m json.tool
+```

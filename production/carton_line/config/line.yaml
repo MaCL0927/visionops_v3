@@ -41,6 +41,7 @@ runtimes:
   partition:
     url: http://127.0.0.1:28081
     model_dir: models/carton_partition_check/current
+    roi_config_path: data/runtime/roi_partition.json
     device_id: lb3576-partition
     component: rknn_runtime_partition
     accepted_task_types: [detection, detect]
@@ -49,6 +50,7 @@ runtimes:
   tube:
     url: http://127.0.0.1:28082
     model_dir: models/carton_tube_check/current
+    roi_config_path: data/runtime/roi_tube.json
     device_id: lb3576-tube
     component: rknn_runtime_tube
     accepted_task_types: [obb, obb_detection]
@@ -57,6 +59,7 @@ runtimes:
   pick:
     url: http://127.0.0.1:28083
     model_dir: models/tube_pick_vision/current
+    roi_config_path: data/runtime/roi_pick.json
     device_id: lb3576-tube-pick
     component: rknn_runtime_tube_pick
     accepted_task_types: [detection, detect]

@@ -490,6 +490,22 @@ std::string detections_json(const std::vector<ObbItem>& detections) {
   return stream.str();
 }
 
+void apply_roi_filter(
+    std::vector<ObbItem>& detections,
+    const RoiFilterConfig& roi,
+    const LetterboxMeta& letterbox) {
+  if (!roi.enabled) return;
+  detections.erase(
+      std::remove_if(
+          detections.begin(),
+          detections.end(),
+          [&](const ObbItem& item) {
+            return !roi_contains_center(
+                roi, item.cx, item.cy, letterbox.orig_width, letterbox.orig_height);
+          }),
+      detections.end());
+}
+
 }  // namespace
 
 PostprocessResult postprocess_obb(
@@ -517,11 +533,14 @@ PostprocessResult postprocess_obb(
   }
 
   decoded = apply_obb_nms(std::move(decoded), config.nms_threshold, config.max_detections);
+  result.raw_result_count = static_cast<int>(decoded.size());
+  apply_roi_filter(decoded, config.roi, letterbox);
   result.success = true;
   result.result_count = static_cast<int>(decoded.size());
+  result.roi_filtered_count = result.raw_result_count - result.result_count;
   result.payload_json = detections_json(decoded);
   if (decoded.empty() && result.warning.empty()) {
-    result.warning = "OBB 后处理完成，但没有通过阈值和 NMS 的目标";
+    result.warning = "OBB 后处理完成，但没有通过阈值、NMS 和 ROI 的目标";
   }
   return result;
 }

@@ -46,3 +46,17 @@ def test_postprocess_fixture_matches_inference_contract(
         assert len(result["detections"][0]["obb"]["points"]) == 4
     if fixture_task == "segmentation":
         assert result["detections"][0]["mask"]["encoding"] == "polygon"
+
+
+def test_detection_roi_filters_target_after_full_frame_postprocess(
+    postprocess_fixture_binary: Path,
+) -> None:
+    completed = subprocess.run(
+        [str(postprocess_fixture_binary), "detection_roi"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+    assert result["task_type"] == "detection"
+    assert result["detections"] == []

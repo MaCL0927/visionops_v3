@@ -56,6 +56,7 @@ def _runtime(task: str, config: dict) -> int:
         "--hp60c-snapshot-path", str(config["camera_bridge"]["snapshot_path"]),
         "--hp60c-health-path", str(config["camera_bridge"]["health_path"]),
         "--model-dir", str(model_dir),
+        "--roi-config", str(runtime["roi_config_path"]),
         "--preprocess-backend", "auto",
         "--host", parsed.hostname,
         "--port", str(parsed.port),

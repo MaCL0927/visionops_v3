@@ -11,6 +11,11 @@ const targetSummary = document.getElementById("validate-target-summary");
 const resultBrief = document.getElementById("validate-result-brief");
 const capturePickerPanel = document.getElementById("validate-picker-panel");
 const captureList = document.getElementById("validate-capture-list");
+const roiModal = document.getElementById("validate-roi-modal");
+const roiImage = document.getElementById("validate-roi-image");
+const roiCanvas = document.getElementById("validate-roi-canvas");
+const roiEmpty = document.getElementById("validate-roi-empty");
+const roiCoordinates = document.getElementById("validate-roi-coordinates");
 
 let snapshotUrl = null;
 let currentResult = null;
@@ -20,6 +25,10 @@ let currentCatalog = null;
 let switchingModelId = null;
 let selectedCaptureRecord = null;
 let realtimeEnabled = false;
+let roiSnapshotUrl = null;
+let roiDraft = { enabled: false, x1: 0, y1: 0, x2: 1, y2: 1 };
+let roiDrawing = false;
+let roiStartPoint = null;
 
 function formatBytes(value) {
   if (value == null || Number.isNaN(Number(value))) return "--";
@@ -147,6 +156,211 @@ function showResult(result) {
     document.getElementById(`timing-${key}`).textContent = timing[`${key}_ms`] == null ? "--" : `${timing[`${key}_ms`]} ms`;
   }
   renderResultSummary(result);
+}
+
+function showRoiModal() {
+  roiModal?.classList.add("active");
+  roiModal?.setAttribute("aria-hidden", "false");
+}
+
+function hideRoiModal() {
+  roiModal?.classList.remove("active");
+  roiModal?.setAttribute("aria-hidden", "true");
+}
+
+function normalizeRoi(payload) {
+  const roi = payload?.roi || payload || {};
+  const values = Array.isArray(roi.normalized_xyxy)
+    ? roi.normalized_xyxy.map(Number)
+    : [Number(roi.x1), Number(roi.y1), Number(roi.x2), Number(roi.y2)];
+  if (values.length !== 4 || values.some((value) => !Number.isFinite(value))) {
+    return { enabled: false, x1: 0, y1: 0, x2: 1, y2: 1 };
+  }
+  return {
+    enabled: roi.enabled === true,
+    x1: Math.max(0, Math.min(1, values[0])),
+    y1: Math.max(0, Math.min(1, values[1])),
+    x2: Math.max(0, Math.min(1, values[2])),
+    y2: Math.max(0, Math.min(1, values[3])),
+  };
+}
+
+function updateRoiButton(roi) {
+  const button = document.getElementById("validate-roi");
+  if (!button) return;
+  button.classList.toggle("active", roi?.enabled === true);
+  button.textContent = roi?.enabled === true ? "ROI 已启用" : "绘制 ROI";
+}
+
+function sizeRoiCanvas() {
+  if (!roiImage?.naturalWidth || !roiImage?.naturalHeight || !roiCanvas) return false;
+  const rect = roiImage.getBoundingClientRect();
+  roiCanvas.width = Math.max(1, Math.round(rect.width));
+  roiCanvas.height = Math.max(1, Math.round(rect.height));
+  roiCanvas.style.left = `${roiImage.offsetLeft}px`;
+  roiCanvas.style.top = `${roiImage.offsetTop}px`;
+  roiCanvas.style.width = `${rect.width}px`;
+  roiCanvas.style.height = `${rect.height}px`;
+  return true;
+}
+
+function renderRoiEditor() {
+  if (!sizeRoiCanvas()) return;
+  const ctx = roiCanvas.getContext("2d");
+  const width = roiCanvas.width;
+  const height = roiCanvas.height;
+  ctx.clearRect(0, 0, width, height);
+  if (!roiDraft.enabled) {
+    if (roiCoordinates) roiCoordinates.textContent = "未设置，使用全画面输出";
+    return;
+  }
+  const x1 = roiDraft.x1 * width;
+  const y1 = roiDraft.y1 * height;
+  const x2 = roiDraft.x2 * width;
+  const y2 = roiDraft.y2 * height;
+  ctx.fillStyle = "rgba(2, 6, 23, .42)";
+  ctx.fillRect(0, 0, width, y1);
+  ctx.fillRect(0, y2, width, height - y2);
+  ctx.fillRect(0, y1, x1, y2 - y1);
+  ctx.fillRect(x2, y1, width - x2, y2 - y1);
+  ctx.strokeStyle = "#facc15";
+  ctx.lineWidth = Math.max(2, Math.round(width / 400));
+  ctx.setLineDash([10, 6]);
+  ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  ctx.setLineDash([]);
+  ctx.fillStyle = "rgba(250, 204, 21, .95)";
+  ctx.fillRect(x1, Math.max(0, y1 - 28), 54, 26);
+  ctx.fillStyle = "#111827";
+  ctx.font = "bold 15px system-ui";
+  ctx.fillText("ROI", x1 + 10, Math.max(18, y1 - 9));
+  if (roiCoordinates) {
+    const px = [
+      Math.round(roiDraft.x1 * roiImage.naturalWidth),
+      Math.round(roiDraft.y1 * roiImage.naturalHeight),
+      Math.round(roiDraft.x2 * roiImage.naturalWidth),
+      Math.round(roiDraft.y2 * roiImage.naturalHeight),
+    ];
+    roiCoordinates.textContent = `像素 [${px.join(", ")}]；归一化 [${roiDraft.x1.toFixed(4)}, ${roiDraft.y1.toFixed(4)}, ${roiDraft.x2.toFixed(4)}, ${roiDraft.y2.toFixed(4)}]`;
+  }
+}
+
+function roiPointerPosition(event) {
+  const rect = roiCanvas.getBoundingClientRect();
+  return {
+    x: Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(rect.width, 1))),
+    y: Math.max(0, Math.min(1, (event.clientY - rect.top) / Math.max(rect.height, 1))),
+  };
+}
+
+function beginRoiDraw(event) {
+  if (!roiCanvas.width || !roiCanvas.height) return;
+  roiDrawing = true;
+  roiStartPoint = roiPointerPosition(event);
+  roiDraft = { enabled: true, x1: roiStartPoint.x, y1: roiStartPoint.y, x2: roiStartPoint.x, y2: roiStartPoint.y };
+  roiCanvas.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+}
+
+function updateRoiDraw(event) {
+  if (!roiDrawing || !roiStartPoint) return;
+  const current = roiPointerPosition(event);
+  roiDraft = {
+    enabled: true,
+    x1: Math.min(roiStartPoint.x, current.x),
+    y1: Math.min(roiStartPoint.y, current.y),
+    x2: Math.max(roiStartPoint.x, current.x),
+    y2: Math.max(roiStartPoint.y, current.y),
+  };
+  renderRoiEditor();
+}
+
+function endRoiDraw(event) {
+  if (!roiDrawing) return;
+  roiDrawing = false;
+  roiCanvas.releasePointerCapture?.(event.pointerId);
+  if ((roiDraft.x2 - roiDraft.x1) < 0.005 || (roiDraft.y2 - roiDraft.y1) < 0.005) {
+    roiDraft.enabled = false;
+  }
+  renderRoiEditor();
+}
+
+async function openRoiEditor() {
+  stopRealtimeLoop();
+  showRoiModal();
+  roiEmpty?.classList.remove("hidden");
+  if (roiEmpty) roiEmpty.textContent = "正在读取当前相机图像";
+  try {
+    const [config, blob] = await Promise.all([
+      requestJson(endpoints.runtimeRoi),
+      requestBlob(`${endpoints.snapshot}?t=${Date.now()}`),
+    ]);
+    roiDraft = normalizeRoi(config);
+    updateRoiButton(roiDraft);
+    if (roiSnapshotUrl) URL.revokeObjectURL(roiSnapshotUrl);
+    roiSnapshotUrl = URL.createObjectURL(blob);
+    await new Promise((resolve, reject) => {
+      roiImage.onload = resolve;
+      roiImage.onerror = reject;
+      roiImage.src = roiSnapshotUrl;
+    });
+    roiEmpty?.classList.add("hidden");
+    renderRoiEditor();
+  } catch (error) {
+    if (roiEmpty) {
+      roiEmpty.textContent = error.body?.error?.message || error.message || "读取 ROI 编辑图像失败";
+      roiEmpty.classList.remove("hidden");
+    }
+  }
+}
+
+async function saveRoi() {
+  if (!roiDraft.enabled) {
+    if (roiCoordinates) roiCoordinates.textContent = "请先在图像中拖动绘制 ROI。";
+    return;
+  }
+  try {
+    const payload = await postJson(endpoints.runtimeRoi, roiDraft);
+    const saved = normalizeRoi(payload);
+    roiDraft = saved;
+    updateRoiButton(saved);
+    if (currentResult) {
+      currentResult = { ...currentResult, roi: payload.roi || saved };
+      drawInferenceOverlay(canvas, image, currentResult);
+    }
+    hideRoiModal();
+  } catch (error) {
+    if (roiCoordinates) roiCoordinates.textContent = error.body?.error?.message || error.message || "保存 ROI 失败";
+  }
+}
+
+async function disableRoi() {
+  try {
+    const payload = await postJson(endpoints.runtimeRoi, {
+      enabled: false,
+      x1: roiDraft.x1,
+      y1: roiDraft.y1,
+      x2: roiDraft.x2,
+      y2: roiDraft.y2,
+    });
+    roiDraft = normalizeRoi(payload);
+    updateRoiButton(roiDraft);
+    if (currentResult) {
+      currentResult = { ...currentResult, roi: payload.roi || roiDraft };
+      drawInferenceOverlay(canvas, image, currentResult);
+    }
+    hideRoiModal();
+  } catch (error) {
+    if (roiCoordinates) roiCoordinates.textContent = error.body?.error?.message || error.message || "关闭 ROI 失败";
+  }
+}
+
+async function refreshRoiState() {
+  try {
+    const payload = await requestJson(endpoints.runtimeRoi);
+    updateRoiButton(normalizeRoi(payload));
+  } catch (_error) {
+    updateRoiButton({ enabled: false });
+  }
 }
 
 function renderModelList() {
@@ -353,12 +567,25 @@ export function initValidate() {
     await inferOnce();
   });
   document.getElementById("validate-realtime").addEventListener("click", toggleRealtime);
+  document.getElementById("validate-roi")?.addEventListener("click", openRoiEditor);
+  document.getElementById("validate-roi-close")?.addEventListener("click", hideRoiModal);
+  document.getElementById("validate-roi-cancel")?.addEventListener("click", hideRoiModal);
+  document.getElementById("validate-roi-save")?.addEventListener("click", saveRoi);
+  document.getElementById("validate-roi-disable")?.addEventListener("click", disableRoi);
+  roiCanvas?.addEventListener("pointerdown", beginRoiDraw);
+  roiCanvas?.addEventListener("pointermove", updateRoiDraw);
+  roiCanvas?.addEventListener("pointerup", endRoiDraw);
+  roiCanvas?.addEventListener("pointercancel", endRoiDraw);
   document.getElementById("validate-model-scan").addEventListener("click", refreshModelCatalog);
-  window.addEventListener("resize", () => currentResult && drawInferenceOverlay(canvas, image, currentResult));
+  window.addEventListener("resize", () => {
+    if (currentResult) drawInferenceOverlay(canvas, image, currentResult);
+    if (roiModal?.classList.contains("active")) renderRoiEditor();
+  });
   window.addEventListener("visionops:settings-saved", () => currentResult && drawInferenceOverlay(canvas, image, currentResult));
   renderEmptySummary("执行检测后显示目标摘要");
   setRealtimeButtonState(false);
   renderCapturePicker();
   refreshRuntimeStatus();
   refreshModelCatalog();
+  refreshRoiState();
 }

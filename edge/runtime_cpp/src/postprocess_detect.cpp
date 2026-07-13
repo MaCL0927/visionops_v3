@@ -216,6 +216,26 @@ bool decode_split_dfl(
   return recognized;
 }
 
+void apply_roi_filter(
+    std::vector<Detection>& detections,
+    const RoiFilterConfig& roi,
+    const LetterboxMeta& letterbox) {
+  if (!roi.enabled) return;
+  detections.erase(
+      std::remove_if(
+          detections.begin(),
+          detections.end(),
+          [&](const Detection& item) {
+            return !roi_contains_center(
+                roi,
+                (item.x1 + item.x2) * 0.5F,
+                (item.y1 + item.y2) * 0.5F,
+                letterbox.orig_width,
+                letterbox.orig_height);
+          }),
+      detections.end());
+}
+
 }  // namespace
 
 PostprocessResult postprocess_detection(
@@ -227,8 +247,11 @@ PostprocessResult postprocess_detection(
   if (outputs.size() != 1) {
     if (decode_split_dfl(outputs, config, letterbox, decoded)) {
       decoded = apply_nms(std::move(decoded), config.nms_threshold, config.max_detections);
+      result.raw_result_count = static_cast<int>(decoded.size());
+      apply_roi_filter(decoded, config.roi, letterbox);
       result.success = true;
       result.result_count = static_cast<int>(decoded.size());
+      result.roi_filtered_count = result.raw_result_count - result.result_count;
       result.payload_json = detections_json(decoded);
       return result;
     }
@@ -297,8 +320,11 @@ PostprocessResult postprocess_detection(
     if (detection.x2 > detection.x1 && detection.y2 > detection.y1) decoded.push_back(detection);
   }
   decoded = apply_nms(std::move(decoded), config.nms_threshold, config.max_detections);
+  result.raw_result_count = static_cast<int>(decoded.size());
+  apply_roi_filter(decoded, config.roi, letterbox);
   result.success = true;
   result.result_count = static_cast<int>(decoded.size());
+  result.roi_filtered_count = result.raw_result_count - result.result_count;
   result.payload_json = detections_json(decoded);
   return result;
 }

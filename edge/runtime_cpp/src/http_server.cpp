@@ -304,6 +304,16 @@ HttpResponse HttpServer::route(const HttpRequest& request) {
     const auto result = app_.switch_model(request.body);
     return json_response(result.status_code, status_reason(result.status_code), result.body);
   }
+  if (request.path == "/api/runtime/roi") {
+    if (request.method == "GET") {
+      return json_response(200, "OK", app_.roi_json());
+    }
+    if (request.method == "POST") {
+      const auto result = app_.update_roi(request.body);
+      return json_response(result.status_code, status_reason(result.status_code), result.body);
+    }
+    return method_not_allowed("GET, POST");
+  }
   if (request.path == "/api/runtime/latest_result") {
     if (request.method != "GET") {
       return method_not_allowed("GET");

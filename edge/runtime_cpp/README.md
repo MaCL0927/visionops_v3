@@ -385,3 +385,20 @@ bash edge/runtime_cpp/tests/smoke_test.sh
 Runtime segmentation 后处理支持 Rockchip YOLOv8-seg split-DFL 多输出格式。该格式通常包含 3 个尺度，每个尺度分别输出 bbox DFL、class、objectness、mask coefficients，并额外输出 proto。后处理根据 head 的 H/W 与模型输入尺寸动态推导 stride，不写死 640 或 8400。
 
 当前 segmentation mask 使用 bbox polygon 简化表示，满足 Web 可视化与基础结果查看；真正基于 proto 的实例 mask 栅格化后续再实现。
+
+## 统一输出 ROI
+
+Runtime 支持通过 `--roi-config <path>` 为每个实例指定 ROI 配置文件，并提供：
+
+```text
+GET  /api/runtime/roi
+POST /api/runtime/roi
+```
+
+配置示例：
+
+```json
+{"enabled":true,"x1":0.1,"y1":0.2,"x2":0.9,"y2":0.8}
+```
+
+ROI 坐标归一化到原始图像宽高。模型仍对整幅图像完成预处理和推理；detection、OBB、segmentation 在 NMS 后按目标中心点过滤。该过滤发生在标准 `inference_result` 生成前，因此所有 Runtime 调用方自动获得一致结果。分类任务没有空间目标，当前不应用 ROI 过滤。

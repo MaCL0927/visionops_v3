@@ -256,3 +256,31 @@ def test_runtime_mock_can_switch_model_in_mock_backend(
         status_code, after_failed = _request_json(f"{base_url}/api/runtime/status")
         assert status_code == 200
         assert after_failed["loaded_model"]["model_name"] == "model_b"
+
+
+def test_runtime_roi_api_persists_normalized_configuration(
+    runtime_mock_binary: Path, tmp_path: Path
+) -> None:
+    roi_path = tmp_path / "runtime_roi.json"
+    with _running_runtime(
+        runtime_mock_binary,
+        "detection",
+        ["--roi-config", str(roi_path)],
+    ) as base_url:
+        status_code, initial = _request_json(f"{base_url}/api/runtime/roi")
+        assert status_code == 200
+        assert initial["roi"]["enabled"] is False
+
+        status_code, updated = _request_json(
+            f"{base_url}/api/runtime/roi",
+            method="POST",
+            body={"enabled": True, "x1": 0.1, "y1": 0.2, "x2": 0.8, "y2": 0.9},
+        )
+        assert status_code == 200
+        assert updated["roi"]["enabled"] is True
+        assert updated["roi"]["normalized_xyxy"] == [0.1, 0.2, 0.8, 0.9]
+        assert roi_path.is_file()
+
+        status_code, status = _request_json(f"{base_url}/api/runtime/status")
+        assert status_code == 200
+        assert status["roi"]["enabled"] is True

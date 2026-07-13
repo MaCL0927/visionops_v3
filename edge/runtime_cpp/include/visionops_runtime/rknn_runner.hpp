@@ -39,6 +39,9 @@ struct RknnOutput {
   double get_output_ms{0.0};
   double inference_ms{0.0};
   double postprocess_ms{0.0};
+  int postprocess_raw_count{0};
+  int postprocess_result_count{0};
+  int roi_filtered_count{0};
   std::string error;
 };
 

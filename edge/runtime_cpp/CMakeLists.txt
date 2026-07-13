@@ -15,6 +15,7 @@ set(VISIONOPS_RUNTIME_SOURCES
   src/rga_preprocess.cpp
   src/rknn_runner_mock.cpp
   src/rknn_runner_factory.cpp
+  src/roi_filter.cpp
   src/runtime_app.cpp
   src/runtime_state.cpp
   src/snapshot_provider.cpp
@@ -96,6 +97,7 @@ add_executable(visionops_postprocess_fixture
   src/postprocess_classification.cpp
   src/postprocess_obb.cpp
   src/postprocess_seg.cpp
+  src/roi_filter.cpp
 )
 target_include_directories(visionops_postprocess_fixture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_options(visionops_postprocess_fixture PRIVATE -Wall -Wextra -Wpedantic)

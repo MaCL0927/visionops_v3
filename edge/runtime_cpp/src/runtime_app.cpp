@@ -232,7 +232,8 @@ std::string frame_source_json(const FrameSourceStatus& frame_source) {
 
 RuntimeApp::RuntimeApp(AppConfig config)
     : config_(std::move(config)),
-      stream_worker_(make_frame_source_config(config_)) {
+      stream_worker_(make_frame_source_config(config_)),
+      roi_filter_(config_.roi_config_path) {
   validate_app_config(config_);
   auto prepared = prepare_model_runtime(config_);
   model_info_ = std::move(prepared.model_info);
@@ -270,6 +271,21 @@ std::string RuntimeApp::health_json() const {
 
 std::string RuntimeApp::status_json() const { return status_json(state_.snapshot()); }
 
+std::string RuntimeApp::roi_json() const {
+  const auto source = stream_worker_.status();
+  return roi_filter_.json(source.width, source.height);
+}
+
+RuntimeApiResult RuntimeApp::update_roi(const std::string& request_body) {
+  std::string error;
+  if (!roi_filter_.update_from_json(request_body, error)) {
+    return {400, make_error_json(
+        config_.device_id, config_.component, "ROI_CONFIG_INVALID",
+        error.empty() ? std::string("ROI 配置无效") : error, true)};
+  }
+  return {200, roi_json()};
+}
+
 std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
   const auto now = now_timestamp_ms();
   const auto frame_source = stream_worker_.status();
@@ -295,6 +311,7 @@ std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
          << ",\"camera_connected\":"
          << json_bool(frame_source.opened && !frame_source.stale && frame_source.last_error.empty())
          << ",\"frame_source\":" << frame_source_json(frame_source)
+         << ",\"roi\":" << roi_filter_.value_json(frame_source.width, frame_source.height)
          << ",\"preprocess\":{\"backend_requested\":\"" << json_escape(config_.preprocess_backend)
          << "\",\"backend_active\":\"" << json_escape(config_.preprocess_backend == "auto" && rga_backend_compiled() ? "rga" : config_.preprocess_backend)
          << "\",\"rga_mode\":\"" << json_escape(config_.rga_mode)
@@ -457,7 +474,8 @@ std::string RuntimeApp::infer_once() {
         model_info_.class_names,
         static_cast<float>(model_info_.score_threshold),
         static_cast<float>(model_info_.nms_threshold),
-        100};
+        100,
+        roi_filter_.snapshot()};
     PostprocessResult postprocess;
     if (model_info_.task_type == "detection" || model_info_.task_type == "detect") {
       postprocess = postprocess_detection(inference.tensors, postprocess_config, preprocess.letterbox);
@@ -500,6 +518,9 @@ std::string RuntimeApp::infer_once() {
       return error;
     }
     inference.result_payload_json = postprocess.payload_json;
+    inference.postprocess_raw_count = postprocess.raw_result_count;
+    inference.postprocess_result_count = postprocess.result_count;
+    inference.roi_filtered_count = postprocess.roi_filtered_count;
     inference.error = postprocess.warning;
     if (!config_.save_debug_output.empty()) {
       std::error_code filesystem_error;
@@ -648,6 +669,8 @@ std::string RuntimeApp::inference_result_json(
          << ",\"model\":" << loaded_model_json()
          << ",\"image\":{\"width\":" << preprocess.letterbox.orig_width
          << ",\"height\":" << preprocess.letterbox.orig_height << '}'
+         << ",\"roi\":" << roi_filter_.value_json(
+                preprocess.letterbox.orig_width, preprocess.letterbox.orig_height)
          << ",\"timing\":{\"capture_ms\":" << capture_ms
          << ",\"decode_ms\":" << decode_ms
          << ",\"preprocess_ms\":" << preprocess.elapsed_ms
@@ -669,6 +692,9 @@ std::string RuntimeApp::inference_result_json(
     stream << ",\"debug\":{\"rknn_runner_called\":" << json_bool(inference.runner_called)
            << ",\"runner_success\":" << json_bool(inference.success)
            << ",\"raw_outputs_count\":" << inference.tensors.size()
+           << ",\"postprocess_raw_count\":" << inference.postprocess_raw_count
+           << ",\"postprocess_result_count\":" << inference.postprocess_result_count
+           << ",\"roi_filtered_count\":" << inference.roi_filtered_count
            << ",\"runner_error\":"
            << (inference.error.empty()
                    ? "null"

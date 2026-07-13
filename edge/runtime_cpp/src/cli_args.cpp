@@ -43,6 +43,8 @@ CliArgs parse_cli_args(int argc, char* argv[]) {
       args.config.test_image = require_value(argc, argv, index);
     } else if (argument == "--save-debug-output") {
       args.config.save_debug_output = require_value(argc, argv, index);
+    } else if (argument == "--roi-config") {
+      args.config.roi_config_path = require_value(argc, argv, index);
     } else if (argument == "--preprocess-backend") {
       args.config.preprocess_backend = require_value(argc, argv, index);
     } else if (argument == "--rga-mode") {
@@ -112,6 +114,7 @@ std::string cli_help_text(const std::string& program) {
          "  --model-dir <路径>       标准模型目录，必须包含 model.rknn 和 model.yaml\n"
          "  --test-image <路径>      本地 P6 PPM 测试图片（无 OpenCV 默认构建）\n"
          "  --save-debug-output <目录> 预留轻量调试输出目录\n"
+         "  --roi-config <路径>       输出 ROI 持久化 JSON；ROI 仅过滤后处理结果，不裁剪模型输入\n"
          "  --preprocess-backend <cpu|rga|auto> 预处理后端，默认 cpu；启用 RGA 构建后可设为 rga\n"
          "  --rga-mode <resize_rgb>    RGA 预处理模式，当前支持 resize_rgb\n"
          "  --dump-rknn-io           启动时打印 RKNN 输入输出属性\n"

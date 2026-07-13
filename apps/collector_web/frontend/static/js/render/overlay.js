@@ -52,6 +52,52 @@ function drawCenter(ctx, detection, sx, sy) {
   ctx.fill();
 }
 
+
+function roiCoordinates(roi, sourceWidth, sourceHeight) {
+  if (!roi?.enabled) return null;
+  const normalized = Array.isArray(roi.normalized_xyxy) ? roi.normalized_xyxy.map(Number) : null;
+  if (normalized?.length === 4 && normalized.every(Number.isFinite)) {
+    return [
+      normalized[0] * sourceWidth,
+      normalized[1] * sourceHeight,
+      normalized[2] * sourceWidth,
+      normalized[3] * sourceHeight,
+    ];
+  }
+  const pixels = Array.isArray(roi.pixel_xyxy) ? roi.pixel_xyxy.map(Number) : null;
+  if (pixels?.length === 4 && pixels.every(Number.isFinite)) return pixels;
+  const values = [Number(roi.x1), Number(roi.y1), Number(roi.x2), Number(roi.y2)];
+  if (values.every(Number.isFinite)) {
+    return values.every((value) => value >= 0 && value <= 1)
+      ? [values[0] * sourceWidth, values[1] * sourceHeight, values[2] * sourceWidth, values[3] * sourceHeight]
+      : values;
+  }
+  return null;
+}
+
+function drawOutputRoi(ctx, roi, sourceWidth, sourceHeight, sx, sy, canvasWidth) {
+  const coordinates = roiCoordinates(roi, sourceWidth, sourceHeight);
+  if (!coordinates) return;
+  const [x1, y1, x2, y2] = coordinates;
+  if (!(x2 > x1 && y2 > y1)) return;
+  ctx.save();
+  ctx.strokeStyle = "#facc15";
+  ctx.lineWidth = Math.max(2, Math.round(canvasWidth / 420));
+  ctx.setLineDash([10, 6]);
+  ctx.strokeRect(x1 * sx, y1 * sy, (x2 - x1) * sx, (y2 - y1) * sy);
+  ctx.setLineDash([]);
+  ctx.font = `bold ${Math.max(14, Math.round(canvasWidth / 68))}px system-ui`;
+  const label = "ROI 输出区域";
+  const labelX = x1 * sx;
+  const labelY = Math.max(0, y1 * sy - 25);
+  const labelWidth = ctx.measureText(label).width + 16;
+  ctx.fillStyle = "rgba(250, 204, 21, .94)";
+  ctx.fillRect(labelX, labelY, labelWidth, 24);
+  ctx.fillStyle = "#111827";
+  ctx.fillText(label, labelX + 8, labelY + 17);
+  ctx.restore();
+}
+
 export function clearOverlay(canvas) { canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height); }
 
 export function drawInferenceOverlay(canvas, image, result) {
@@ -68,6 +114,8 @@ export function drawInferenceOverlay(canvas, image, result) {
   ctx.font = `${Math.max(16, Math.round(canvas.width / 60))}px system-ui`;
   const overlay = getState().config.overlay || {};
   const maskOpacity = clamp(Number(overlay.mask_opacity ?? 0.28), 0, 1);
+
+  drawOutputRoi(ctx, result?.roi, sourceWidth, sourceHeight, sx, sy, canvas.width);
 
   const classifications = Array.isArray(result?.classifications) ? result.classifications : [];
   if (classifications.length && (!Array.isArray(result?.detections) || !result.detections.length)) {

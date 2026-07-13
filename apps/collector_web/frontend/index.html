@@ -60,7 +60,7 @@
             </aside>
             <section class="content-card">
               <section id="capture-shoot" class="subscreen active">
-                <div class="screen-head"><div><div class="kicker">采集上传 / 第 1 步</div><h1>拍照采集</h1><p>使用 Runtime 当前快照进行预览、下载或保存到边缘端数据集。</p></div><div class="head-actions"><button id="capture-refresh">刷新快照</button><button id="capture-shoot-btn" class="primary">拍照采集并保存</button><button id="capture-download">本地下载</button></div></div>
+                <div class="screen-head"><div><div class="kicker">采集上传 / 第 1 步</div><h1>拍照采集</h1><p>使用 Runtime 当前快照进行预览、下载或保存到边缘端数据集。</p></div><div class="head-actions"><button id="capture-refresh">刷新快照</button><button id="capture-shoot-btn" class="primary">拍照采集并保存</button><button id="capture-timed-btn">定时采图</button><button id="capture-download">本地下载</button></div></div>
                 <div class="camera-stage capture-stage"><img id="capture-image" class="stage-image" alt="采集快照"><div id="capture-empty" class="stage-empty">等待 Runtime snapshot</div><div class="camera-label"><b>实时预览 / 当前快照</b><span id="capture-message">尚未刷新</span></div></div>
               </section>
               <section id="capture-upload" class="subscreen">
@@ -84,7 +84,7 @@
               <button id="validate-model-scan" class="primary model-refresh-btn">刷新模型</button>
             </aside>
             <section class="content-card validate-card">
-              <div class="screen-head"><div><div class="kicker">模型验证</div><h1>选图 / 拍照 / 实时检测</h1><p>通过 Collector 调用 Runtime，并在快照上绘制 bbox 与 OBB points。</p></div><div class="head-actions validate-actions"><button id="validate-infer" class="validate-action-btn">选图检测</button><button id="validate-photo" class="validate-action-btn primary">拍照检测</button><button id="validate-realtime" class="validate-action-btn" aria-pressed="false">实时检测</button></div></div>
+              <div class="screen-head"><div><div class="kicker">模型验证</div><h1>选图 / 拍照 / 实时检测</h1><p>通过 Collector 调用 Runtime，并在快照上绘制 bbox 与 OBB points。</p></div><div class="head-actions validate-actions"><button id="validate-infer" class="validate-action-btn">选图检测</button><button id="validate-photo" class="validate-action-btn primary">拍照检测</button><button id="validate-roi" class="validate-action-btn">绘制 ROI</button><button id="validate-realtime" class="validate-action-btn" aria-pressed="false">实时检测</button></div></div>
               <div id="validate-picker-panel" class="validate-picker-panel hidden">
                 <div class="validate-picker-head">
                   <b>选择采集图片</b>
@@ -152,6 +152,54 @@
     </main>
 
 
+
+
+    <div id="capture-timed-modal" class="modal-mask capture-modal-mask" aria-hidden="true">
+      <section class="capture-timed-dialog" role="dialog" aria-modal="true" aria-labelledby="capture-timed-title">
+        <div class="dialog-head">
+          <div><h2 id="capture-timed-title">定时采图</h2><p>Collector 将按设定间隔自动读取 Runtime 当前快照并保存到采集目录。</p></div>
+          <button id="capture-timed-close" class="close-btn" aria-label="关闭">×</button>
+        </div>
+        <div class="capture-timed-body">
+          <label class="setting-field">采图间隔（秒）
+            <input id="capture-timed-interval" type="number" min="0.5" max="86400" step="0.5" value="10">
+            <small>最短 0.5 秒。第一次采图会在一个完整间隔后执行。</small>
+          </label>
+          <div id="capture-timed-status" class="settings-inline-status">当前未启用定时采图。</div>
+        </div>
+        <div class="dialog-actions">
+          <button id="capture-timed-stop" class="danger-soft">停止定时采图</button>
+          <button id="capture-timed-cancel">取消</button>
+          <button id="capture-timed-confirm" class="primary">开始定时采图</button>
+        </div>
+      </section>
+    </div>
+
+    <div id="validate-roi-modal" class="modal-mask" aria-hidden="true">
+      <section class="roi-dialog" role="dialog" aria-modal="true" aria-labelledby="validate-roi-title">
+        <div class="dialog-head">
+          <div><h2 id="validate-roi-title">绘制检测结果 ROI</h2><p>拖动绘制矩形。模型仍对整幅图推理，仅保留中心点位于 ROI 内的输出目标。</p></div>
+          <button id="validate-roi-close" class="close-btn" aria-label="关闭">×</button>
+        </div>
+        <div class="roi-editor-body">
+          <div class="roi-editor-stage">
+            <img id="validate-roi-image" alt="当前相机原始图像">
+            <canvas id="validate-roi-canvas"></canvas>
+            <div id="validate-roi-empty" class="stage-empty">正在读取当前相机图像</div>
+          </div>
+          <div class="roi-editor-info">
+            <b>当前 ROI</b>
+            <span id="validate-roi-coordinates">未设置，使用全画面输出</span>
+            <em>筛选规则：检测框中心点在 ROI 内即保留；Detection、OBB、Segmentation 以及 TCP/Modbus 业务结果统一生效。</em>
+          </div>
+        </div>
+        <div class="dialog-actions">
+          <button id="validate-roi-disable" class="danger-soft">关闭 ROI</button>
+          <button id="validate-roi-cancel">取消</button>
+          <button id="validate-roi-save" class="primary">保存 ROI</button>
+        </div>
+      </section>
+    </div>
 
     <div id="capture-preview-modal" class="modal-mask capture-modal-mask" aria-hidden="true">
       <section class="capture-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="capture-preview-title">

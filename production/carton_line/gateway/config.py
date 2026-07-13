@@ -64,6 +64,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "partition": {
             "url": "http://127.0.0.1:28081",
             "model_dir": _project_path("models", "carton_partition_check", "current"),
+            "roi_config_path": _project_path("data", "runtime", "roi_partition.json"),
             "device_id": "lb3576-partition",
             "component": "rknn_runtime_partition",
             "accepted_task_types": ["detection", "detect"],
@@ -73,6 +74,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "tube": {
             "url": "http://127.0.0.1:28082",
             "model_dir": _project_path("models", "carton_tube_check", "current"),
+            "roi_config_path": _project_path("data", "runtime", "roi_tube.json"),
             "device_id": "lb3576-tube",
             "component": "rknn_runtime_tube",
             "accepted_task_types": ["obb", "obb_detection"],
@@ -82,6 +84,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "pick": {
             "url": "http://127.0.0.1:28083",
             "model_dir": _project_path("models", "tube_pick_vision", "current"),
+            "roi_config_path": _project_path("data", "runtime", "roi_pick.json"),
             "device_id": "lb3576-tube-pick",
             "component": "rknn_runtime_tube_pick",
             "accepted_task_types": ["detection", "detect"],
@@ -325,6 +328,9 @@ def load_config(path: str | None) -> dict[str, Any]:
         runtime_port = urlparse(runtime["url"]).port or (443 if runtime["url"].startswith("https:") else 80)
         used_ports.append(runtime_port)
         runtime["model_dir"] = _project_relative_path(runtime["model_dir"])
+        runtime["roi_config_path"] = _project_relative_path(
+            runtime.get("roi_config_path") or f"data/runtime/roi_{task}.json"
+        )
         runtime["accepted_task_types"] = [str(x).lower() for x in runtime.get("accepted_task_types", [])]
         runtime["accepted_model_ids"] = [str(x) for x in runtime.get("accepted_model_ids", []) if str(x)]
         runtime["accepted_model_names"] = [str(x) for x in runtime.get("accepted_model_names", []) if str(x)]
