@@ -32,12 +32,19 @@
       "confidence": 0.90,
       "position_camera": [15.0, 20.0, 1310.0],
       "center_px": [350.0, 260.0]
+    },
+    {
+      "id": 2,
+      "class_id": 2,
+      "confidence": 0.94,
+      "position_camera": [-82.4, 41.7, 920.0],
+      "center_px": [278.0, 258.0]
     }
   ],
   "image": {"width": 640, "height": 480},
   "coordinate_frame": "color_camera",
   "coordinate_unit": "mm",
-  "video_url": "http://192.168.2.211:18182/stream.mjpeg",
+  "video_url": "http://192.168.213.137:18182/stream.mjpeg",
   "video_sync": "soft",
   "latency_ms": 58.3
 }
@@ -47,7 +54,9 @@
 
 - `frame_id`：盒子服务进程内递增序号，用于排序；MJPEG 软同步不提供严格逐帧对应；
 - `timestamp`：本次采集/推理开始时的 Unix 秒；
-- `class_id=0`：产品；`class_id=1`：隔板；
+- `class_id=0`：正常直立纸筒产品；
+- `class_id=1`：大隔板；
+- `class_id=2`：倒伏纸筒 `lying`，属于异常对象；视觉盒只按普通检测目标返回，告警判断由机器人系统完成；
 - `position_camera`：彩色相机光心坐标系，X 向右、Y 向下、Z 向前，单位毫米；
 - `center_px`：640×480 RGB 图像中的检测框中心；
 - 深度无效：`position_camera=[0,0,0]`；
@@ -119,7 +128,7 @@
   "latency_ms":58.3,
   "continuous_enabled":true,
   "clients":1,
-  "video_url":"http://192.168.2.211:18182/stream.mjpeg",
+  "video_url":"http://192.168.213.137:18182/stream.mjpeg",
   "error":null
 }
 ```
@@ -144,3 +153,26 @@ POST /api/coordinate/deproject
 ```
 
 Bridge 内部使用 Orbbec SDK `CoordinateTransformHelper::calibration2dTo3d()`，输出彩色相机坐标系毫米值。视觉系统不执行手眼标定和机器人坐标转换。
+
+
+## 7. `lying` 异常类别扩展
+
+模型新增普通 detection 类别 `class_id=2`，类别名为 `lying`。其传输结构与产品、隔板完全一致：
+
+```json
+{
+  "id": 2,
+  "class_id": 2,
+  "confidence": 0.94,
+  "position_camera": [-82.4, 41.7, 920.0],
+  "center_px": [278.0, 258.0]
+}
+```
+
+机器人侧处理约定：
+
+1. 任意一条 `items[].class_id == 2` 即表示当前检测帧发现倒伏纸筒；
+2. 告警等级、蜂鸣、暂停抓取或人工介入均由机器人系统决定，视觉盒不增加单独的告警字段；
+3. `position_camera` 与 `center_px` 可用于异常目标定位及界面高亮；
+4. 深度无效时仍返回 `position_camera=[0,0,0]`，但 `class_id=2` 检测本身仍然有效；
+5. ROI 规则与其他类别相同：目标中心位于 VisionOps Web 设置的 ROI 内时才会出现在 `items` 中。

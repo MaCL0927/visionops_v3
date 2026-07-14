@@ -103,9 +103,9 @@ cd /opt/visionops_v3
 
 ## 4. tube_pick_vision 最终契约
 
-- detection 模型：0=产品、1=隔板；
+- detection 模型：0=正常纸筒产品、1=大隔板、2=倒伏纸筒 `lying`；
 - RGB 和 D2C Depth 固定 `640×480`；
-- 产品和隔板均以检测框中心取深度；
+- 产品、隔板和倒伏纸筒均以检测框中心取深度；
 - 336L Bridge 使用 Orbbec SDK 反投影，输出彩色相机坐标 `[X,Y,Z]`，单位 mm；
 - 深度无效返回 `[0,0,0]`；
 - 盒子是 WebSocket Server：`ws://盒子IP:9001/vision`；

@@ -50,6 +50,14 @@ def _runtime_result() -> dict:
                 "bbox_xyxy": [100, 150, 500, 190],
                 "center_xy": [300, 170],
             },
+            {
+                "id": "lying-1",
+                "class_id": 2,
+                "class_name": "lying",
+                "score": 0.89,
+                "bbox_xyxy": [180, 180, 260, 220],
+                "center_xy": [220, 200],
+            },
         ],
     }
 
@@ -61,19 +69,23 @@ def _depth_png(value: int = 1234) -> bytes:
     return encoded.tobytes()
 
 
-def test_algorithm_samples_product_and_separator_centres() -> None:
+def test_algorithm_samples_product_separator_and_lying_centres() -> None:
     algorithm = TubePickAlgorithm(_settings())
     classified = algorithm.classify(_runtime_result())
     depth = decode_depth_png(_depth_png(1234))
     sampled = algorithm.sample_items(classified, depth)
 
-    assert [item["semantic"] for item in sampled] == ["separator", "product"]
+    assert [item["semantic"] for item in sampled] == ["separator", "lying", "product"]
     assert sampled[0]["center_x"] == 300.0
     assert sampled[0]["center_y"] == 170.0
     assert sampled[0]["z_mm"] == 1234
     assert sampled[1]["z_mm"] == 1234
+    assert sampled[2]["z_mm"] == 1234
 
-    external = algorithm.build_external_items(sampled, [[-20, -30, 1234], [0, 0, 1234]])
+    external = algorithm.build_external_items(
+        sampled,
+        [[-20, -30, 1234], [-40, -10, 1234], [0, 0, 1234]],
+    )
     assert external == [
         {
             "id": 0,
@@ -84,6 +96,13 @@ def test_algorithm_samples_product_and_separator_centres() -> None:
         },
         {
             "id": 1,
+            "class_id": 2,
+            "confidence": 0.89,
+            "position_camera": [-40.0, -10.0, 1234.0],
+            "center_px": [220.0, 200.0],
+        },
+        {
+            "id": 2,
             "class_id": 0,
             "confidence": 0.95,
             "position_camera": [0.0, 0.0, 1234.0],
@@ -97,9 +116,10 @@ def test_invalid_depth_returns_zero_camera_point() -> None:
     classified = algorithm.classify(_runtime_result())
     depth = np.zeros((480, 640), dtype=np.uint16)
     sampled = algorithm.sample_items(classified, depth)
-    output = algorithm.build_external_items(sampled, [[9, 9, 9], [8, 8, 8]])
+    output = algorithm.build_external_items(sampled, [[9, 9, 9], [8, 8, 8], [7, 7, 7]])
     assert output[0]["position_camera"] == [0.0, 0.0, 0.0]
     assert output[1]["position_camera"] == [0.0, 0.0, 0.0]
+    assert output[2]["position_camera"] == [0.0, 0.0, 0.0]
 
 
 def test_fixed_640x480_contract_is_enforced() -> None:
@@ -126,10 +146,12 @@ def test_service_builds_camera_coordinate_detection(tmp_path) -> None:
     assert response["type"] == "detection"
     assert response["request_id"] == "req-7"
     assert response["coordinate_frame"] == "color_camera"
-    assert len(response["items"]) == 2
+    assert len(response["items"]) == 3
     assert response["items"][0]["class_id"] == 1
-    assert response["items"][1]["class_id"] == 0
+    assert response["items"][1]["class_id"] == 2
+    assert response["items"][2]["class_id"] == 0
     assert response["items"][1]["position_camera"] == [1.0, 2.0, 987.0]
+    assert response["items"][2]["position_camera"] == [2.0, 3.0, 987.0]
 
 
 def test_installed_line_config_merge_preserves_site_values_and_adds_websocket() -> None:

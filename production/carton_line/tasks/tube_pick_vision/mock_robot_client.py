@@ -109,7 +109,16 @@ class Client:
             opcode, payload = _read_server_frame(self.sock)
             if opcode == 0x1:
                 try:
-                    print(json.dumps(json.loads(payload.decode("utf-8")), ensure_ascii=False, indent=2))
+                    document = json.loads(payload.decode("utf-8"))
+                    print(json.dumps(document, ensure_ascii=False, indent=2))
+                    if isinstance(document, dict) and document.get("type") == "detection":
+                        lying_items = [
+                            item
+                            for item in document.get("items", [])
+                            if isinstance(item, dict) and item.get("class_id") == 2
+                        ]
+                        if lying_items:
+                            print(f"[ALARM-DEMO] detected {len(lying_items)} lying tube(s), class_id=2")
                 except Exception:
                     print(payload.decode("utf-8", errors="replace"))
             elif opcode == 0x9:

@@ -203,7 +203,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "http": {"listen_host": "127.0.0.1", "listen_port": 19130},
         "video": {
             "type": "mjpeg",
-            "public_url": "http://192.168.2.211:18182/stream.mjpeg",
+            "public_url": "http://192.168.213.137:18182/stream.mjpeg",
             "sync": "soft",
         },
         "algorithm": {
@@ -215,10 +215,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "classes": {
                 "product_ids": [0],
                 "separator_ids": [1],
+                "lying_ids": [2],
                 "product_names": ["tube_product", "product", "tube"],
                 "separator_names": ["large_separator", "separator", "partition"],
+                "lying_names": ["lying"],
                 "product_min_confidence": 0.50,
                 "separator_min_confidence": 0.50,
+                "lying_min_confidence": 0.50,
                 "output_order": "row_major",
             },
             "depth": {
@@ -423,13 +426,15 @@ def load_config(path: str | None) -> dict[str, Any]:
     class_config = pick_algorithm["classes"]
     product_ids = {int(value) for value in class_config.get("product_ids", [])}
     separator_ids = {int(value) for value in class_config.get("separator_ids", [])}
-    if not product_ids or not separator_ids:
-        raise ValueError("pick.algorithm.classes 的 product_ids 和 separator_ids 不能为空")
-    if product_ids & separator_ids:
-        raise ValueError("pick.algorithm.classes 的 product_ids 和 separator_ids 不得重叠")
+    lying_ids = {int(value) for value in class_config.get("lying_ids", [])}
+    if not product_ids or not separator_ids or not lying_ids:
+        raise ValueError("pick.algorithm.classes 的 product_ids、separator_ids 和 lying_ids 不能为空")
+    if (product_ids & separator_ids) or (product_ids & lying_ids) or (separator_ids & lying_ids):
+        raise ValueError("pick.algorithm.classes 的 product_ids、separator_ids 和 lying_ids 不得重叠")
     class_config["product_ids"] = sorted(product_ids)
     class_config["separator_ids"] = sorted(separator_ids)
-    for key in ("product_min_confidence", "separator_min_confidence"):
+    class_config["lying_ids"] = sorted(lying_ids)
+    for key in ("product_min_confidence", "separator_min_confidence", "lying_min_confidence"):
         class_config[key] = float(class_config[key])
         if not 0.0 <= class_config[key] <= 1.0:
             raise ValueError(f"pick.algorithm.classes.{key} 必须位于 0..1")

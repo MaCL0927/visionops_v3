@@ -1,1 +1,1 @@
-"""Tube product and large-separator detection with RGB-depth coordinates."""
+"""Tube product, large-separator and lying-product detection with RGB-depth coordinates."""

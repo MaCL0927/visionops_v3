@@ -46,7 +46,7 @@ usage() {
   partition-tube  安装“纸隔板 + 纸筒产品”板卡所需服务：
                   partition Runtime、tube Runtime、Modbus Gateway、两个 Collector
 
-  tube-pick       安装“纸筒产品 / 大隔板检测”板卡所需服务：
+  tube-pick       安装“纸筒产品 / 大隔板 / 倒伏纸筒检测”板卡所需服务：
                   pick Runtime、WebSocket Server、pick Collector、帧流 watchdog timer
 
 示例：
@@ -105,7 +105,7 @@ case "${PROFILE}" in
     SELECTED_UNITS=("${TUBE_PICK_UNITS[@]}")
     SELECTED_ENABLE_UNITS=("${TUBE_PICK_ENABLE_UNITS[@]}")
     UNSELECTED_UNITS=("${PARTITION_TUBE_UNITS[@]}")
-    PROFILE_DESCRIPTION="纸筒产品 / 大隔板检测（WebSocket + MJPEG）"
+    PROFILE_DESCRIPTION="纸筒产品 / 大隔板 / 倒伏纸筒检测（WebSocket + MJPEG）"
     ;;
   *)
     log_error "未知 profile: ${PROFILE}"

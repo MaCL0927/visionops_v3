@@ -5,9 +5,9 @@
 ## 任务边界
 
 - RGB 与 D2C 深度固定为 `640×480`；
-- detection 模型：`class_id=0` 产品，`class_id=1` 大隔板；
+- detection 模型：`class_id=0` 正常纸筒产品，`class_id=1` 大隔板，`class_id=2` 倒伏纸筒 `lying`；
 - 模型始终对完整图像推理；ROI 由 VisionOps Web 设置，并在 Runtime 统一后处理阶段过滤；
-- 产品和隔板都以检测框中心取深度；
+- 产品、隔板和倒伏纸筒都以检测框中心取深度；
 - 通过 Orbbec SDK 将 `[u,v,depth_mm]` 反投影成彩色相机坐标系 `[X,Y,Z]`；
 - 深度无效时返回 `[0,0,0]`；
 - 不做手眼标定，不输出 `base_link`；机器人后端负责后续坐标变换。
@@ -32,7 +32,8 @@ ws://盒子IP:9001/vision
 http://盒子IP:18182/stream.mjpeg
 ```
 
-视频只用于显示和标定观察；抓取逻辑使用 `detection.items[].position_camera`。
+视频只用于显示和标定观察；抓取逻辑使用 `detection.items[].position_camera`。检测到
+`class_id=2` 时，视觉盒按普通目标返回完整坐标和置信度，机器人系统负责告警及后续动作。
 
 ## 控制命令
 
@@ -97,6 +98,12 @@ pick:
     public_url: http://192.168.213.137:18182/stream.mjpeg
   algorithm:
     image: {width: 640, height: 480, require_fixed_size: true}
+    classes:
+      product_ids: [0]
+      separator_ids: [1]
+      lying_ids: [2]
+      lying_names: [lying]
+      lying_min_confidence: 0.50
 ```
 
 同时确认 336L Bridge 实际环境文件使用：
@@ -139,6 +146,7 @@ python3 -m production.carton_line.tasks.tube_pick_vision.mock_robot_client \
 ```
 python3 -m \
   production.carton_line.tasks.tube_pick_vision.mock_robot_client \
-  --url ws://192.168.2.211:9001/vision
+  --url ws://192.168.213.137:9001/vision
 
-详细协议见 [PROTOCOL.md](PROTOCOL.md)。
+详细协议见 [PROTOCOL.md](PROTOCOL.md)。新增异常类别的机器人侧对接说明见
+[LYING_CLASS_INTEGRATION.md](LYING_CLASS_INTEGRATION.md)。

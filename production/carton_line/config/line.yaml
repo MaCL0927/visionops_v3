@@ -186,13 +186,16 @@ pick:
     classes:
       product_ids: [0]
       separator_ids: [1]
+      lying_ids: [2]
       product_names: [tube_product, product, tube]
       separator_names: [large_separator, separator, partition]
+      lying_names: [lying]
       product_min_confidence: 0.50
       separator_min_confidence: 0.50
+      lying_min_confidence: 0.50
       output_order: row_major
     depth:
-      # Both product and separator use bbox centre depth. Invalid depth returns
+      # Product, separator and lying all use bbox centre depth. Invalid depth returns
       # position_camera=[0,0,0] as agreed with the robot team.
       roi_radius_px: 4
       percentile: 50

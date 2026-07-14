@@ -4,8 +4,9 @@
 
 The Runtime still receives the complete RGB image. ROI filtering is performed by
 Runtime before this module receives ``inference_result``. This module classifies
-product/separator detections, samples the D2C-aligned depth around each bbox
-centre, and prepares the points that are deprojected by the Orbbec SDK bridge.
+product/separator/lying detections, samples the D2C-aligned depth around each
+bbox centre, and prepares the points that are deprojected by the Orbbec SDK
+bridge.
 """
 from __future__ import annotations
 
@@ -89,10 +90,13 @@ class TubePickAlgorithm:
 
         self.product_ids = _int_set(classes.get("product_ids"), [0])
         self.separator_ids = _int_set(classes.get("separator_ids"), [1])
+        self.lying_ids = _int_set(classes.get("lying_ids"), [2])
         self.product_names = _name_set(classes.get("product_names"))
         self.separator_names = _name_set(classes.get("separator_names"))
+        self.lying_names = _name_set(classes.get("lying_names"))
         self.product_min_confidence = float(classes.get("product_min_confidence", 0.50))
         self.separator_min_confidence = float(classes.get("separator_min_confidence", 0.50))
+        self.lying_min_confidence = float(classes.get("lying_min_confidence", 0.50))
         self.output_order = str(classes.get("output_order", "row_major")).strip().lower()
         if self.output_order not in {"row_major", "column_major", "confidence"}:
             raise ValueError("pick.algorithm.classes.output_order 必须是 row_major/column_major/confidence")
@@ -134,6 +138,8 @@ class TubePickAlgorithm:
             return "product"
         if class_id in self.separator_ids or (self.separator_names and lower_name in self.separator_names):
             return "separator"
+        if class_id in self.lying_ids or (self.lying_names and lower_name in self.lying_names):
+            return "lying"
         return None
 
     def classify(self, runtime_result: Mapping[str, Any]) -> ClassifiedDetections:
@@ -166,13 +172,22 @@ class TubePickAlgorithm:
             if semantic is None:
                 ignored.append({"id": detection_id, "reason": "class_not_used", "class_id": class_id})
                 continue
-            threshold = self.product_min_confidence if semantic == "product" else self.separator_min_confidence
+            threshold_by_semantic = {
+                "product": self.product_min_confidence,
+                "separator": self.separator_min_confidence,
+                "lying": self.lying_min_confidence,
+            }
+            threshold = threshold_by_semantic[semantic]
             if score < threshold or center is None:
                 ignored.append({"id": detection_id, "reason": "low_confidence_or_missing_center"})
                 continue
 
-            default_id = 0 if semantic == "product" else 1
-            default_name = "tube_product" if semantic == "product" else "large_separator"
+            default_by_semantic = {
+                "product": (0, "tube_product"),
+                "separator": (1, "large_separator"),
+                "lying": (2, "lying"),
+            }
+            default_id, default_name = default_by_semantic[semantic]
             accepted.append(
                 {
                     "source_id": detection_id,

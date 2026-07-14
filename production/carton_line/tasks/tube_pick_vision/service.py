@@ -508,9 +508,13 @@ class TubePickVisionService:
             class_id = int(raw.get("class_id") or 0)
             score = float(raw.get("score") or 0.0)
             x1, y1, x2, y2 = [int(round(float(value))) for value in bbox[:4]]
-            color = (0, 255, 0) if class_id == 0 else (255, 180, 0)
+            visual_by_class = {
+                0: ("product", (0, 255, 0)),
+                1: ("separator", (255, 180, 0)),
+                2: ("lying", (0, 0, 255)),
+            }
+            label, color = visual_by_class.get(class_id, (f"class-{class_id}", (200, 200, 200)))
             cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
-            label = "product" if class_id == 0 else "separator"
             z_mm = 0
             source_id = str(raw.get("id") or f"det-{index}")
             sample = sample_by_source.get(source_id, {})
