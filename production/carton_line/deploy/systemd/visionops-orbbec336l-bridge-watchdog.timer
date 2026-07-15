@@ -1,0 +1,11 @@
+[Unit]
+Description=Run VisionOps Orbbec 336L Camera Recovery Watchdog
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

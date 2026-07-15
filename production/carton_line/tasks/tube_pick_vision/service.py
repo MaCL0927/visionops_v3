@@ -54,6 +54,16 @@ class TriggerRequest:
     request_id: object
 
 
+class CameraUnavailableError(RuntimeError):
+    """Fresh RGB/depth frames are unavailable; old results must not be used."""
+
+    code = "CAMERA_DISCONNECTED"
+
+    def __init__(self, message: str, details: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.details = dict(details or {})
+
+
 class ServiceState:
     def __init__(self, config: Mapping[str, Any]) -> None:
         self.config = config
@@ -159,6 +169,7 @@ class TubePickVisionService:
     def __init__(self, config: Mapping[str, Any]) -> None:
         self.config = config
         self.settings = config["pick"]
+        self.camera_health_settings = self.settings.get("camera_health") if isinstance(self.settings.get("camera_health"), Mapping) else {}
         timeout_s = int(config["service"]["request_timeout_ms"]) / 1000.0
         self.runtime = RuntimeClient(config["runtimes"]["pick"]["url"], timeout_s)
         self.http = HttpClient(timeout_s=timeout_s)
@@ -314,15 +325,107 @@ class TubePickVisionService:
                 f"accepted={sorted(accepted_models)}"
             )
 
+    def _bridge_health_status(self) -> dict[str, Any]:
+        stale_ms = max(500, int(self.camera_health_settings.get("stale_ms", 5000)))
+        alarm_after_ms = max(stale_ms, int(self.camera_health_settings.get("alarm_after_ms", 15000)))
+        try:
+            raw = self.bridge.health()
+        except Exception as error:
+            return {
+                "connected": False,
+                "state": "offline",
+                "fault_code": "CAMERA_BRIDGE_UNREACHABLE",
+                "fault_numeric_code": 3104,
+                "severity": "error",
+                "alarm_active": True,
+                "alarm_confirmed": True,
+                "message": str(error),
+                "last_color_age_ms": -1,
+                "last_depth_age_ms": -1,
+                "reconnect_attempt_count": 0,
+                "reconnect_success_count": 0,
+                "raw": {},
+            }
+
+        def integer(name: str, fallback: int = -1) -> int:
+            try:
+                return int(raw.get(name, fallback))
+            except (TypeError, ValueError, OverflowError):
+                return fallback
+
+        color_age = integer("last_color_age_ms")
+        depth_age = integer("last_depth_age_ms")
+        state = str(raw.get("camera_state") or ("running" if raw.get("camera_started") else "offline"))
+        explicit_connected = raw.get("camera_connected")
+        if isinstance(explicit_connected, bool):
+            connected = explicit_connected and 0 <= color_age <= stale_ms and 0 <= depth_age <= stale_ms
+        else:
+            connected = (
+                raw.get("camera_started") is True
+                and 0 <= color_age <= stale_ms
+                and 0 <= depth_age <= stale_ms
+            )
+        state_age_ms = integer("unhealthy_age_ms", integer("state_age_ms", 0))
+        fault_code = str(raw.get("fault_code") or "")
+        numeric_code = integer("fault_numeric_code", 0)
+        if not connected and not fault_code:
+            fault_code = "CAMERA_FRAME_STALE" if raw else "CAMERA_BRIDGE_UNREACHABLE"
+        if not connected and numeric_code <= 0:
+            numeric_code = 3101 if fault_code == "CAMERA_FRAME_STALE" else 3103
+        alarm_confirmed = bool(raw.get("alarm_active")) or (not connected and state_age_ms >= alarm_after_ms)
+        severity = "ok" if connected else ("error" if alarm_confirmed else "warning")
+        message = str(raw.get("last_error") or fault_code or "camera unavailable")
+        return {
+            "connected": connected,
+            "state": state,
+            "fault_code": "" if connected else fault_code,
+            "fault_numeric_code": 0 if connected else numeric_code,
+            "severity": severity,
+            "alarm_active": not connected,
+            "alarm_confirmed": alarm_confirmed,
+            "message": "" if connected else message,
+            "last_color_age_ms": color_age,
+            "last_depth_age_ms": depth_age,
+            "reconnect_attempt_count": integer("reconnect_attempt_count", 0),
+            "reconnect_success_count": integer("reconnect_success_count", 0),
+            "raw": raw,
+        }
+
+    def _require_camera_ready(self) -> dict[str, Any]:
+        status = self._bridge_health_status()
+        suppress = bool(self.camera_health_settings.get("suppress_detection_when_unhealthy", True))
+        if suppress and not status["connected"]:
+            raise CameraUnavailableError(
+                f"camera {status['state']}: {status['message'] or status['fault_code']}",
+                status,
+            )
+        return status
+
     def _new_error_detection(self, frame_id: int, request_id: object | None, error: Exception, started_at: float) -> dict[str, Any]:
+        code = str(getattr(error, "code", type(error).__name__))
+        details = getattr(error, "details", None)
         detection: dict[str, Any] = {
             "type": "detection",
             "frame_id": frame_id,
             "timestamp": started_at,
             "items": [],
             "latency_ms": round((time.time() - started_at) * 1000.0, 3),
-            "error": {"code": type(error).__name__, "message": str(error)},
+            "error": {"code": code, "message": str(error)},
         }
+        if isinstance(details, Mapping):
+            detection["camera_state"] = details.get("state")
+            detection["camera_connected"] = bool(details.get("connected"))
+            detection["alarm"] = {
+                "active": bool(details.get("alarm_active")),
+                "confirmed": bool(details.get("alarm_confirmed")),
+                "source": "camera",
+                "code": details.get("fault_code"),
+                "numeric_code": details.get("fault_numeric_code"),
+                "severity": details.get("severity"),
+                "message": details.get("message"),
+                "modbus_tcp_reserved": True,
+                "modbus_tcp_implemented": False,
+            }
         if request_id is not None:
             detection["request_id"] = request_id
         return detection
@@ -334,6 +437,7 @@ class TubePickVisionService:
         started_monotonic = time.monotonic()
         with self.execution_lock:
             try:
+                camera_health = self._require_camera_ready()
                 runtime_result = self.runtime.infer_once()
                 self._validate_runtime(runtime_result)
                 classified = self.algorithm.classify(runtime_result)
@@ -342,7 +446,7 @@ class TubePickVisionService:
                 bridge_debug: dict[str, Any] = {}
                 depth_bytes = b""
                 if classified.items:
-                    depth, bridge_health, depth_bytes = self.bridge.get_depth()
+                    depth, bridge_health, depth_bytes = self.bridge.get_depth(camera_health.get("raw"))
                     sampled = self.algorithm.sample_items(classified, depth)
                     deproject_input = [
                         [float(item["center_x"]), float(item["center_y"]), float(item["z_mm"])]
@@ -383,6 +487,7 @@ class TubePickVisionService:
                     detection["request_id"] = request_id
                 debug = {
                     "detection": detection,
+                    "camera_health": camera_health,
                     "runtime_result": runtime_result,
                     "sampled_items": sampled,
                     "ignored_detections": classified.ignored,
@@ -433,26 +538,67 @@ class TubePickVisionService:
     def _status_message(self) -> dict[str, Any]:
         snapshot = self.state.snapshot(self.websocket)
         model_name = ""
-        camera_connected = False
+        runtime_camera_connected = False
+        runtime_error: str | None = None
         try:
             runtime = self.runtime.status()
             loaded_model = runtime.get("loaded_model") if isinstance(runtime.get("loaded_model"), Mapping) else {}
             model_name = str(loaded_model.get("model_name") or loaded_model.get("model_id") or "")
-            camera_connected = bool(runtime.get("camera_connected"))
-        except Exception:
-            pass
+            runtime_camera_connected = bool(runtime.get("camera_connected"))
+        except Exception as error:
+            runtime_error = str(error)
+
+        camera = self._bridge_health_status()
+        alarm = {
+            "active": bool(camera["alarm_active"]),
+            "confirmed": bool(camera["alarm_confirmed"]),
+            "source": "camera",
+            "code": camera["fault_code"] or None,
+            "numeric_code": int(camera["fault_numeric_code"]),
+            "severity": camera["severity"],
+            "message": camera["message"] or None,
+            # Stable placeholder for a later PLC Modbus-TCP adapter. No Modbus
+            # socket/register writes are performed by this service today.
+            "modbus_tcp_reserved": True,
+            "modbus_tcp_implemented": False,
+        }
+        error = snapshot["last_error"]
+        if not camera["connected"]:
+            error = {
+                "code": camera["fault_code"] or "CAMERA_DISCONNECTED",
+                "message": camera["message"] or "camera unavailable",
+                "timestamp_ms": _timestamp_ms(),
+            }
+        elif runtime_error:
+            error = {"code": "RUNTIME_STATUS_UNAVAILABLE", "message": runtime_error, "timestamp_ms": _timestamp_ms()}
+
         return {
             "type": "status",
             "online": True,
             "fps": snapshot["detection_fps"],
             "model": model_name,
-            "camera_connected": camera_connected,
+            # Bridge RGB+depth freshness is the source of truth. Runtime status is
+            # exposed separately because it may lag briefly during recovery.
+            "camera_connected": bool(camera["connected"]),
+            "camera_state": camera["state"],
+            "runtime_camera_connected": runtime_camera_connected,
+            "last_color_age_ms": camera["last_color_age_ms"],
+            "last_depth_age_ms": camera["last_depth_age_ms"],
+            "camera_reconnect_attempt_count": camera["reconnect_attempt_count"],
+            "camera_reconnect_success_count": camera["reconnect_success_count"],
+            "error_code": camera["fault_code"] or None,
+            "alarm": alarm,
             "latency_ms": snapshot["last_latency_ms"],
             "continuous_enabled": snapshot["continuous_enabled"],
             "clients": snapshot["websocket"]["clients"],
             "video_url": snapshot["video"]["url"],
-            "error": snapshot["last_error"],
+            "error": error,
         }
+
+    def status_snapshot(self) -> dict[str, Any]:
+        snapshot = self.state.snapshot(self.websocket)
+        snapshot["external_status"] = self._status_message()
+        return snapshot
 
     def _status_loop(self) -> None:
         interval = max(0.5, float(self.settings["websocket"].get("status_interval_s", 2.0)))
@@ -578,10 +724,21 @@ class StatusHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         if path == "/health":
-            snapshot = self.service.state.snapshot(self.service.websocket)
-            self._send(200, {"ok": True, "status": snapshot["health"], "component": "tube_pick_vision_ws"})
+            status = self.service._status_message()
+            self._send(
+                200,
+                {
+                    "ok": True,
+                    "status": "ok" if status["camera_connected"] else "degraded",
+                    "component": "tube_pick_vision_ws",
+                    "camera_connected": status["camera_connected"],
+                    "camera_state": status["camera_state"],
+                    "error_code": status["error_code"],
+                    "alarm": status["alarm"],
+                },
+            )
         elif path in {"/api/app/status", "/api/gateway/status", "/api/ws/status"}:
-            self._send(200, self.service.state.snapshot(self.service.websocket))
+            self._send(200, self.service.status_snapshot())
         elif path == "/api/ws/clients":
             self._send(200, {"status": "ok", "clients": self.service.websocket.client_snapshot()})
         elif path in {"/api/app/registers", "/api/gateway/registers"}:

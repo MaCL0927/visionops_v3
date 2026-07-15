@@ -89,36 +89,23 @@ except Exception:
     data = {}
 
 started = bool(data.get("camera_started", False))
-age = int(data.get("last_color_age_ms", -1))
+connected = data.get("camera_connected")
+color_age = int(data.get("last_color_age_ms", -1))
+depth_age = int(data.get("last_depth_age_ms", color_age))
 limit = int(os.environ["STALE_MS"])
-healthy = bool(data) and started and 0 <= age <= limit
-print(int(bool(data)), int(healthy), age)
+if connected is None:
+    healthy = bool(data) and started and 0 <= color_age <= limit and 0 <= depth_age <= limit
+else:
+    healthy = bool(data) and connected is True and 0 <= color_age <= limit and 0 <= depth_age <= limit
+print(int(bool(data)), int(healthy), max(color_age, depth_age))
 PY
 } 2>/dev/null || echo '0 0 -1')"
 read -r bridge_reachable bridge_healthy bridge_age <<<"${bridge_state}"
 
 if [[ "${bridge_healthy}" != "1" ]]; then
-  log "Bridge 异常，camera_started/帧年龄不满足要求：reachable=${bridge_reachable}, color_age_ms=${bridge_age}；重启 Bridge 与 Pick Runtime"
-  systemctl restart "${BRIDGE_SERVICE}"
-
-  # 最多等待约 10 秒，只在异常恢复路径中执行，不影响正常启动/重启。
-  for _ in $(seq 1 20); do
-    sleep 0.5
-    bridge_json="$(curl -fsS --max-time 1 "${BRIDGE_URL}/health" 2>/dev/null || true)"
-    if BRIDGE_JSON="${bridge_json}" STALE_MS="${STALE_MS}" python3 - <<'PY' >/dev/null 2>&1
-import json
-import os
-
-data = json.loads(os.environ.get("BRIDGE_JSON") or "{}")
-age = int(data.get("last_color_age_ms", -1))
-raise SystemExit(0 if data.get("camera_started") is True and 0 <= age <= int(os.environ["STALE_MS"]) else 1)
-PY
-    then
-      break
-    fi
-  done
-
-  systemctl restart "${RUNTIME_SERVICE}"
+  # Camera/SDK lifecycle is owned by the dedicated Bridge watchdog. Avoid two
+  # independent timers restarting the same process and creating a restart storm.
+  log "Bridge 异常：reachable=${bridge_reachable}, color/depth_age_ms=${bridge_age}；等待 Orbbec Bridge 自恢复/watchdog 处理"
   exit 0
 fi
 

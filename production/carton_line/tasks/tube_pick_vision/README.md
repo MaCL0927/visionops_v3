@@ -70,10 +70,13 @@ visionops-v3-runtime-pick.service
 visionops-v3-ws-pick.service
 visionops-v3-collector-pick.service
 visionops-v3-runtime-pick-watchdog.timer
+visionops-orbbec336l-bridge-watchdog.timer
 ```
 
 sudo systemctl start visionops-v3-runtime-pick.service visionops-v3-ws-pick.service visionops-v3-collector-pick.service visionops-v3-runtime-pick-watchdog.timer
+visionops-orbbec336l-bridge-watchdog.timer
 systemctl status visionops-v3-runtime-pick.service visionops-v3-ws-pick.service visionops-v3-collector-pick.service visionops-v3-runtime-pick-watchdog.timer
+visionops-orbbec336l-bridge-watchdog.timer
 
 
 ## 配置
@@ -150,3 +153,9 @@ python3 -m \
 
 详细协议见 [PROTOCOL.md](PROTOCOL.md)。新增异常类别的机器人侧对接说明见
 [LYING_CLASS_INTEGRATION.md](LYING_CLASS_INTEGRATION.md)。
+
+## USB 相机断线恢复
+
+Bridge 会在 RGB/Depth 超过 3 秒未更新时清除旧缓存、断开 MJPEG、完整重建 Orbbec Pipeline 并指数退避重连。`tube_pick_vision` 在恢复期间只发送空 `items` 和相机告警，不会继续发送旧检测结果。独立 systemd watchdog 仅在 SDK 恢复线程卡死或 HTTP 不可访问时重启 Bridge。
+
+未来 PLC Modbus-TCP 告警已预留稳定故障码与配置段，但当前未实现寄存器通信。详细字段见 [PROTOCOL.md](PROTOCOL.md)。

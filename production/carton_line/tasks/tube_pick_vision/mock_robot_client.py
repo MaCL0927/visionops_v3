@@ -111,14 +111,23 @@ class Client:
                 try:
                     document = json.loads(payload.decode("utf-8"))
                     print(json.dumps(document, ensure_ascii=False, indent=2))
-                    if isinstance(document, dict) and document.get("type") == "detection":
-                        lying_items = [
-                            item
-                            for item in document.get("items", [])
-                            if isinstance(item, dict) and item.get("class_id") == 2
-                        ]
-                        if lying_items:
-                            print(f"[ALARM-DEMO] detected {len(lying_items)} lying tube(s), class_id=2")
+                    if isinstance(document, dict):
+                        alarm = document.get("alarm") if isinstance(document.get("alarm"), dict) else {}
+                        if alarm.get("active"):
+                            print(
+                                "[CAMERA-ALARM-DEMO] "
+                                f"severity={alarm.get('severity')} "
+                                f"code={alarm.get('code')} "
+                                f"message={alarm.get('message')}"
+                            )
+                        if document.get("type") == "detection":
+                            lying_items = [
+                                item
+                                for item in document.get("items", [])
+                                if isinstance(item, dict) and item.get("class_id") == 2
+                            ]
+                            if lying_items:
+                                print(f"[ALARM-DEMO] detected {len(lying_items)} lying tube(s), class_id=2")
                 except Exception:
                     print(payload.decode("utf-8", errors="replace"))
             elif opcode == 0x9:

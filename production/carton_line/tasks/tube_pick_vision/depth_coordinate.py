@@ -25,12 +25,14 @@ class BridgeCoordinateClient:
         self.deproject_url = deproject_url
         self.max_depth_age_ms = max(0, int(max_depth_age_ms))
 
-    def get_depth(self):
-        health: dict[str, Any] = {}
+    def health(self) -> dict[str, Any]:
         try:
-            health = self.http.request("GET", self.health_url).json()
+            return self.http.request("GET", self.health_url).json()
         except Exception as error:
             raise UpstreamError(f"读取 Orbbec Bridge 健康状态失败: {error}") from error
+
+    def get_depth(self, health: Mapping[str, Any] | None = None):
+        health = dict(health) if isinstance(health, Mapping) else self.health()
         age = health.get("last_depth_age_ms")
         try:
             age_ms = int(age)

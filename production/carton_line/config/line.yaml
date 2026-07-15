@@ -177,6 +177,19 @@ pick:
     type: mjpeg
     public_url: http://192.168.213.137:18182/stream.mjpeg
     sync: soft
+  camera_health:
+    # Bridge RGB and D2C depth must both be fresh. When unhealthy, the service
+    # returns empty detection items and a stable camera fault code to the robot.
+    stale_ms: 5000
+    suppress_detection_when_unhealthy: true
+    alarm_after_ms: 15000
+    # Reserved for a future PLC Modbus-TCP alarm adapter. No socket/register
+    # communication is implemented in M24.3.
+    modbus_tcp:
+      enabled: false
+      reserved: true
+      fault_register: null
+      state_register: null
   algorithm:
     image:
       # This production task fixes RGB and D2C depth to the same resolution.

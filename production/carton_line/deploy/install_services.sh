@@ -25,12 +25,15 @@ TUBE_PICK_UNITS=(
   visionops-v3-collector-pick.service
   visionops-v3-runtime-pick-watchdog.service
   visionops-v3-runtime-pick-watchdog.timer
+  visionops-orbbec336l-bridge-watchdog.service
+  visionops-orbbec336l-bridge-watchdog.timer
 )
 TUBE_PICK_ENABLE_UNITS=(
   visionops-v3-runtime-pick.service
   visionops-v3-ws-pick.service
   visionops-v3-collector-pick.service
   visionops-v3-runtime-pick-watchdog.timer
+  visionops-orbbec336l-bridge-watchdog.timer
 )
 
 LEGACY_TUBE_PICK_UNITS=(
@@ -47,7 +50,7 @@ usage() {
                   partition Runtime、tube Runtime、Modbus Gateway、两个 Collector
 
   tube-pick       安装“纸筒产品 / 大隔板 / 倒伏纸筒检测”板卡所需服务：
-                  pick Runtime、WebSocket Server、pick Collector、帧流 watchdog timer
+                  pick Runtime、WebSocket Server、pick Collector、Runtime/相机 watchdog timer
 
 示例：
   sudo bash production/carton_line/deploy/install_services.sh --profile partition-tube
@@ -179,6 +182,12 @@ VISIONOPS_PICK_WS_SERVICE=visionops-v3-ws-pick.service
 VISIONOPS_PICK_WATCHDOG_STALE_MS=5000
 VISIONOPS_PICK_WATCHDOG_COOLDOWN_S=30
 VISIONOPS_PICK_WATCHDOG_RECOVERY_WAIT_S=3
+VISIONOPS_CAMERA_WATCHDOG_STALE_MS=5000
+VISIONOPS_CAMERA_WATCHDOG_NO_PROGRESS_S=45
+VISIONOPS_CAMERA_WATCHDOG_STALE_STATE_NO_PROGRESS_S=15
+VISIONOPS_CAMERA_WATCHDOG_COOLDOWN_S=60
+VISIONOPS_CAMERA_WATCHDOG_RECOVERY_WAIT_S=20
+VISIONOPS_CAMERA_WATCHDOG_RUNTIME_WAIT_S=3
 EOF_ENV
 elif ! grep -q '^VISIONOPS_PICK_MODEL_DIR=' "${ENV_FILE}"; then
   printf '\nVISIONOPS_PICK_MODEL_DIR=%s/models/tube_pick_vision/current\n' "${ROOT}" >> "${ENV_FILE}"
@@ -198,6 +207,12 @@ append_env_default VISIONOPS_PICK_WS_SERVICE visionops-v3-ws-pick.service
 append_env_default VISIONOPS_PICK_WATCHDOG_STALE_MS 5000
 append_env_default VISIONOPS_PICK_WATCHDOG_COOLDOWN_S 30
 append_env_default VISIONOPS_PICK_WATCHDOG_RECOVERY_WAIT_S 3
+append_env_default VISIONOPS_CAMERA_WATCHDOG_STALE_MS 5000
+append_env_default VISIONOPS_CAMERA_WATCHDOG_NO_PROGRESS_S 45
+append_env_default VISIONOPS_CAMERA_WATCHDOG_STALE_STATE_NO_PROGRESS_S 15
+append_env_default VISIONOPS_CAMERA_WATCHDOG_COOLDOWN_S 60
+append_env_default VISIONOPS_CAMERA_WATCHDOG_RECOVERY_WAIT_S 20
+append_env_default VISIONOPS_CAMERA_WATCHDOG_RUNTIME_WAIT_S 3
 
 log_info "清理旧 tube_pick TCP Client 服务..."
 for unit in "${LEGACY_TUBE_PICK_UNITS[@]}"; do
@@ -220,6 +235,10 @@ for unit in "${UNSELECTED_UNITS[@]}"; do
     "${SYSTEMCTL_BIN}" disable --now "${unit}" >/dev/null 2>&1 || true
   fi
 done
+
+if [[ "${PROFILE}" == "tube-pick" ]]; then
+  chmod +x     "${SOURCE_DIR}/scripts/watch_pick_runtime.sh"     "${SOURCE_DIR}/scripts/watch_orbbec336l_bridge.sh"
+fi
 
 log_info "安装当前 profile 的服务..."
 for unit in "${SELECTED_UNITS[@]}"; do

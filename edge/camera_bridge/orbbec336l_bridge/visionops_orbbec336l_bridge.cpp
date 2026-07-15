@@ -89,6 +89,11 @@ static std::string now_string() {
     return std::string(buf);
 }
 
+static int64_t epoch_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 static std::string json_escape(const std::string &s) {
     std::ostringstream os;
     for (char c : s) {
@@ -149,6 +154,9 @@ static std::string frame_format_to_string(OBFormat f) {
 }
 
 class OrbbecBridge {
+private:
+    enum class CameraState { Starting, Running, Stale, Reconnecting, Offline, Stopping };
+
 public:
     OrbbecBridge()
         : http_host_(getenv_str("VISIONOPS_ORBBEC336L_HTTP_HOST", "127.0.0.1")),
@@ -160,69 +168,32 @@ public:
           fps_(getenv_int("VISIONOPS_ORBBEC336L_FPS", 30)),
           jpeg_quality_(getenv_int("VISIONOPS_ORBBEC336L_JPEG_QUALITY", 85)),
           mjpeg_fps_(getenv_int("VISIONOPS_ORBBEC336L_MJPEG_FPS", 10)),
+          stale_timeout_ms_(std::max(500, getenv_int("VISIONOPS_ORBBEC336L_STALE_TIMEOUT_MS", 3000))),
+          first_frame_timeout_ms_(std::max(1000, getenv_int("VISIONOPS_ORBBEC336L_FIRST_FRAME_TIMEOUT_MS", 5000))),
+          reconnect_initial_ms_(std::max(100, getenv_int("VISIONOPS_ORBBEC336L_RECONNECT_INITIAL_MS", 1000))),
+          reconnect_max_ms_(std::max(
+              std::max(100, getenv_int("VISIONOPS_ORBBEC336L_RECONNECT_INITIAL_MS", 1000)),
+              getenv_int("VISIONOPS_ORBBEC336L_RECONNECT_MAX_MS", 30000))),
+          reconnect_alarm_ms_(std::max(1000, getenv_int("VISIONOPS_ORBBEC336L_RECONNECT_FAILURE_ALARM_SEC", 15) * 1000)),
           flip_vertical_(getenv_bool("VISIONOPS_ORBBEC336L_FLIP_VERTICAL", false)),
           flip_horizontal_(getenv_bool("VISIONOPS_ORBBEC336L_FLIP_HORIZONTAL", false)),
           serial_(getenv_str("VISIONOPS_ORBBEC336L_SERIAL", "")) {}
 
     bool start_camera() {
-        try {
-            ctx_ = std::make_shared<ob::Context>();
-            if (!serial_.empty()) {
-                auto dev_list = ctx_->queryDeviceList();
-                bool found = false;
-                for (uint32_t i = 0; i < dev_list->deviceCount(); ++i) {
-                    auto dev = dev_list->getDevice(i);
-                    auto info = dev->getDeviceInfo();
-                    std::string sn = info ? info->serialNumber() : "";
-                    if (sn == serial_) {
-                        pipeline_ = std::make_shared<ob::Pipeline>(dev);
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    std::cerr << "[ERROR] Orbbec serial not found: " << serial_ << std::endl;
-                    return false;
-                }
-            } else {
-                pipeline_ = std::make_shared<ob::Pipeline>();
-            }
-
-            auto cfg = std::make_shared<ob::Config>();
-            enable_color_stream(cfg);
-            enable_depth_stream(cfg);
-            cfg->setAlignMode(ALIGN_D2C_SW_MODE);
-            pipeline_->start(cfg);
-
-            // CoordinateTransformHelper is declared in hpp/Utils.hpp.
-            // Cache the calibration parameters generated from the exact active
-            // color/depth profiles so the HTTP deprojection endpoint can convert
-            // aligned color pixels + depth (mm) into the color-camera 3D frame.
-            calibration_param_ = pipeline_->getCalibrationParam(cfg);
-            calibration_ready_ = true;
-
-            camera_started_ = true;
-            start_ms_ = now_ms();
-            std::cerr << "[INFO] Orbbec Gemini 336L bridge camera started" << std::endl;
-            camera_thread_ = std::thread([this]() { this->camera_loop(); });
-            return true;
-        } catch (const ob::Error &e) {
-            std::cerr << "[ERROR] Orbbec SDK error while starting camera: " << e.getMessage() << std::endl;
-            last_error_ = e.getMessage();
-            return false;
-        } catch (const std::exception &e) {
-            std::cerr << "[ERROR] start camera failed: " << e.what() << std::endl;
-            last_error_ = e.what();
-            return false;
+        start_ms_ = now_ms();
+        camera_stop_requested_ = false;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            set_camera_state_locked(CameraState::Starting, "CAMERA_STARTING", "waiting for Orbbec camera");
         }
+        camera_thread_ = std::thread([this]() { this->camera_loop(); });
+        return true;
     }
 
     void stop_camera() {
-        g_running = false;
+        camera_stop_requested_ = true;
+        cv_.notify_all();
         if (camera_thread_.joinable()) camera_thread_.join();
-        try {
-            if (pipeline_) pipeline_->stop();
-        } catch (...) {}
         camera_started_ = false;
     }
 
@@ -277,47 +248,45 @@ private:
             std::chrono::steady_clock::now().time_since_epoch()).count();
     }
 
-    void enable_color_stream(const std::shared_ptr<ob::Config> &cfg) {
+    std::shared_ptr<ob::VideoStreamProfile> enable_color_stream(
+        const std::shared_ptr<ob::Pipeline> &pipeline,
+        const std::shared_ptr<ob::Config> &cfg) {
+        auto profiles = pipeline->getStreamProfileList(OB_SENSOR_COLOR);
+        std::shared_ptr<ob::VideoStreamProfile> profile;
         try {
-            auto profiles = pipeline_->getStreamProfileList(OB_SENSOR_COLOR);
-            std::shared_ptr<ob::VideoStreamProfile> profile;
-            try {
-                if (color_width_ > 0 && color_height_ > 0) {
-                    profile = profiles->getVideoStreamProfile(color_width_, color_height_, OB_FORMAT_RGB, fps_);
-                }
-            } catch (...) {}
-            if (!profile) {
-                try {
-                    profile = profiles->getVideoStreamProfile(color_width_, color_height_, OB_FORMAT_MJPG, fps_);
-                } catch (...) {}
+            if (color_width_ > 0 && color_height_ > 0) {
+                profile = profiles->getVideoStreamProfile(color_width_, color_height_, OB_FORMAT_RGB, fps_);
             }
-            if (!profile) profile = profiles->getProfile(0)->as<ob::VideoStreamProfile>();
-            cfg->enableStream(profile);
-            color_profile_ = profile;
-            std::cerr << "[INFO] color profile " << profile->width() << "x" << profile->height()
-                      << " fps=" << profile->fps() << " fmt=" << frame_format_to_string(profile->format()) << std::endl;
-        } catch (const std::exception &e) {
-            std::cerr << "[WARN] enable color failed: " << e.what() << std::endl;
+        } catch (...) {}
+        if (!profile) {
+            try {
+                profile = profiles->getVideoStreamProfile(color_width_, color_height_, OB_FORMAT_MJPG, fps_);
+            } catch (...) {}
         }
+        if (!profile) profile = profiles->getProfile(0)->as<ob::VideoStreamProfile>();
+        if (!profile) throw std::runtime_error("no usable color profile");
+        cfg->enableStream(profile);
+        std::cerr << "[INFO] color profile " << profile->width() << "x" << profile->height()
+                  << " fps=" << profile->fps() << " fmt=" << frame_format_to_string(profile->format()) << std::endl;
+        return profile;
     }
 
-    void enable_depth_stream(const std::shared_ptr<ob::Config> &cfg) {
+    std::shared_ptr<ob::VideoStreamProfile> enable_depth_stream(
+        const std::shared_ptr<ob::Pipeline> &pipeline,
+        const std::shared_ptr<ob::Config> &cfg) {
+        auto profiles = pipeline->getStreamProfileList(OB_SENSOR_DEPTH);
+        std::shared_ptr<ob::VideoStreamProfile> profile;
         try {
-            auto profiles = pipeline_->getStreamProfileList(OB_SENSOR_DEPTH);
-            std::shared_ptr<ob::VideoStreamProfile> profile;
-            try {
-                if (depth_width_ > 0 && depth_height_ > 0) {
-                    profile = profiles->getVideoStreamProfile(depth_width_, depth_height_, OB_FORMAT_Y16, fps_);
-                }
-            } catch (...) {}
-            if (!profile) profile = profiles->getProfile(0)->as<ob::VideoStreamProfile>();
-            cfg->enableStream(profile);
-            depth_profile_ = profile;
-            std::cerr << "[INFO] depth profile " << profile->width() << "x" << profile->height()
-                      << " fps=" << profile->fps() << " fmt=" << frame_format_to_string(profile->format()) << std::endl;
-        } catch (const std::exception &e) {
-            std::cerr << "[WARN] enable depth failed: " << e.what() << std::endl;
-        }
+            if (depth_width_ > 0 && depth_height_ > 0) {
+                profile = profiles->getVideoStreamProfile(depth_width_, depth_height_, OB_FORMAT_Y16, fps_);
+            }
+        } catch (...) {}
+        if (!profile) profile = profiles->getProfile(0)->as<ob::VideoStreamProfile>();
+        if (!profile) throw std::runtime_error("no usable depth profile");
+        cfg->enableStream(profile);
+        std::cerr << "[INFO] depth profile " << profile->width() << "x" << profile->height()
+                  << " fps=" << profile->fps() << " fmt=" << frame_format_to_string(profile->format()) << std::endl;
+        return profile;
     }
 
     cv::Mat color_frame_to_bgr(const std::shared_ptr<ob::ColorFrame> &frame) {
@@ -385,46 +354,308 @@ private:
         else if (flip_horizontal_) cv::flip(m, m, 1);
     }
 
-    void camera_loop() {
-        while (g_running) {
-            try {
-                auto frames = pipeline_->waitForFrames(1000);
-                if (!frames) continue;
-                cv::Mat bgr;
-                cv::Mat depth_mm;
-                auto c = frames->colorFrame();
-                auto d = frames->depthFrame();
-                if (c) bgr = color_frame_to_bgr(c);
-                if (d) depth_mm = depth_frame_to_mm(d);
-                auto now = now_ms();
-                {
-                    std::lock_guard<std::mutex> lk(mtx_);
-                    if (!bgr.empty()) {
-                        latest_bgr_ = bgr;
-                        last_color_ms_ = now;
-                        color_format_ = frame_format_to_string(c->format());
-                        color_w_ = bgr.cols;
-                        color_h_ = bgr.rows;
-                    }
-                    if (!depth_mm.empty()) {
-                        latest_depth_mm_ = depth_mm;
-                        last_depth_ms_ = now;
-                        depth_w_ = depth_mm.cols;
-                        depth_h_ = depth_mm.rows;
-                    }
-                    frame_count_++;
+    static const char *camera_state_name(CameraState state) {
+        switch (state) {
+        case CameraState::Starting: return "starting";
+        case CameraState::Running: return "running";
+        case CameraState::Stale: return "stale";
+        case CameraState::Reconnecting: return "reconnecting";
+        case CameraState::Offline: return "offline";
+        case CameraState::Stopping: return "stopping";
+        }
+        return "offline";
+    }
+
+    bool run_requested() const {
+        return g_running.load() && !camera_stop_requested_.load();
+    }
+
+    void set_camera_state_locked(CameraState state, const std::string &fault_code, const std::string &message) {
+        const int64_t now = now_ms();
+        const int64_t epoch = epoch_now_ms();
+        if (camera_state_ != state) {
+            camera_state_ = state;
+            state_since_ms_ = now;
+            state_since_epoch_ms_ = epoch;
+        }
+        if (state == CameraState::Running) {
+            unhealthy_since_ms_ = 0;
+            unhealthy_since_epoch_ms_ = 0;
+        } else if (unhealthy_since_ms_ == 0) {
+            unhealthy_since_ms_ = now;
+            unhealthy_since_epoch_ms_ = epoch;
+        }
+        fault_code_ = fault_code;
+        if (!message.empty()) last_error_ = message;
+    }
+
+    void set_camera_state(CameraState state, const std::string &fault_code, const std::string &message) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        set_camera_state_locked(state, fault_code, message);
+    }
+
+    void record_error(const std::string &message) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        last_error_ = message;
+        last_error_epoch_ms_ = epoch_now_ms();
+    }
+
+    bool color_fresh_locked(int64_t now) const {
+        return !latest_bgr_.empty() && last_color_ms_ > 0 && now - last_color_ms_ <= stale_timeout_ms_;
+    }
+
+    bool depth_fresh_locked(int64_t now) const {
+        return !latest_depth_mm_.empty() && last_depth_ms_ > 0 && now - last_depth_ms_ <= stale_timeout_ms_;
+    }
+
+    bool camera_connected_locked(int64_t now) const {
+        return camera_started_.load() && camera_state_ == CameraState::Running
+            && color_fresh_locked(now) && depth_fresh_locked(now);
+    }
+
+    void invalidate_frames_locked() {
+        latest_bgr_.release();
+        latest_depth_mm_.release();
+        last_color_ms_ = 0;
+        last_depth_ms_ = 0;
+        calibration_ready_ = false;
+        color_w_ = 0;
+        color_h_ = 0;
+        depth_w_ = 0;
+        depth_h_ = 0;
+    }
+
+    void sleep_interruptible(int delay_ms) {
+        int waited = 0;
+        while (run_requested() && waited < delay_ms) {
+            const int chunk = std::min(100, delay_ms - waited);
+            std::this_thread::sleep_for(std::chrono::milliseconds(chunk));
+            waited += chunk;
+        }
+    }
+
+    std::shared_ptr<ob::Pipeline> open_pipeline() {
+        std::shared_ptr<ob::Context> context;
+        std::shared_ptr<ob::Pipeline> pipeline;
+        if (!serial_.empty()) {
+            context = std::make_shared<ob::Context>();
+            auto dev_list = context->queryDeviceList();
+            bool found = false;
+            for (uint32_t i = 0; i < dev_list->deviceCount(); ++i) {
+                auto dev = dev_list->getDevice(i);
+                auto info = dev->getDeviceInfo();
+                std::string sn = info ? info->serialNumber() : "";
+                if (sn == serial_) {
+                    pipeline = std::make_shared<ob::Pipeline>(dev);
+                    found = true;
+                    break;
                 }
-                cv_.notify_all();
-            } catch (const ob::Error &e) {
-                last_error_ = e.getMessage();
-                std::cerr << "[WARN] Orbbec wait frame error: " << e.getMessage() << std::endl;
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            } catch (const std::exception &e) {
-                last_error_ = e.what();
-                std::cerr << "[WARN] camera loop error: " << e.what() << std::endl;
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+            if (!found) throw std::runtime_error("Orbbec serial not found: " + serial_);
+        } else {
+            // Reconstructing Pipeline is intentional: after a USB unplug, the old
+            // SDK device handle is no longer reusable even when the cable is reinserted.
+            pipeline = std::make_shared<ob::Pipeline>();
+        }
+
+        auto cfg = std::make_shared<ob::Config>();
+        auto color_profile = enable_color_stream(pipeline, cfg);
+        auto depth_profile = enable_depth_stream(pipeline, cfg);
+        cfg->setAlignMode(ALIGN_D2C_SW_MODE);
+        pipeline->start(cfg);
+        auto calibration = pipeline->getCalibrationParam(cfg);
+
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            ctx_ = context;
+            pipeline_ = pipeline;
+            color_profile_ = color_profile;
+            depth_profile_ = depth_profile;
+            calibration_param_ = calibration;
+            calibration_ready_ = true;
+            camera_started_ = true;
+            pipeline_started_ms_ = now_ms();
+            invalidate_frames_locked();
+            // invalidate_frames_locked clears calibration_ready_; restore it after
+            // old image/depth buffers have been invalidated.
+            calibration_param_ = calibration;
+            calibration_ready_ = true;
+            set_camera_state_locked(
+                ever_connected_ ? CameraState::Reconnecting : CameraState::Starting,
+                ever_connected_ ? "CAMERA_RECONNECTING" : "CAMERA_STARTING",
+                ever_connected_ ? "pipeline started; waiting for fresh RGB/depth frames" : "waiting for first RGB/depth frames");
+        }
+        cv_.notify_all();
+        return pipeline;
+    }
+
+    void close_pipeline(const std::shared_ptr<ob::Pipeline> &pipeline) {
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (pipeline_ == pipeline) {
+                pipeline_.reset();
+                ctx_.reset();
+                color_profile_.reset();
+                depth_profile_.reset();
+                calibration_ready_ = false;
+                camera_started_ = false;
+                invalidate_frames_locked();
             }
         }
+        cv_.notify_all();
+        if (pipeline) {
+            try {
+                // Some SDK/USB failures can block here. The external systemd
+                // watchdog is the final safety net and will kill/restart the process.
+                pipeline->stop();
+            } catch (const ob::Error &e) {
+                record_error(std::string("pipeline stop failed: ") + e.getMessage());
+            } catch (const std::exception &e) {
+                record_error(std::string("pipeline stop failed: ") + e.what());
+            } catch (...) {
+                record_error("pipeline stop failed: unknown error");
+            }
+        }
+    }
+
+    void process_frames(const std::shared_ptr<ob::FrameSet> &frames) {
+        if (!frames) return;
+        cv::Mat bgr;
+        cv::Mat depth_mm;
+        auto c = frames->colorFrame();
+        auto d = frames->depthFrame();
+        if (c) bgr = color_frame_to_bgr(c);
+        if (d) depth_mm = depth_frame_to_mm(d);
+        const auto now = now_ms();
+        bool became_running = false;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (!bgr.empty()) {
+                latest_bgr_ = bgr;
+                last_color_ms_ = now;
+                ++color_frame_count_;
+                color_format_ = frame_format_to_string(c->format());
+                color_w_ = bgr.cols;
+                color_h_ = bgr.rows;
+            }
+            if (!depth_mm.empty()) {
+                latest_depth_mm_ = depth_mm;
+                last_depth_ms_ = now;
+                ++depth_frame_count_;
+                depth_w_ = depth_mm.cols;
+                depth_h_ = depth_mm.rows;
+            }
+            ++frame_count_;
+            if (color_fresh_locked(now) && depth_fresh_locked(now) && camera_state_ != CameraState::Running) {
+                set_camera_state_locked(CameraState::Running, "", "");
+                last_error_.clear();
+                fault_code_.clear();
+                ever_connected_ = true;
+                ++reconnect_success_count_;
+                consecutive_reconnect_failures_ = 0;
+                last_reconnect_success_epoch_ms_ = epoch_now_ms();
+                became_running = true;
+            }
+        }
+        if (became_running) {
+            std::cerr << "[INFO] Orbbec RGB/depth frames healthy; camera running" << std::endl;
+        }
+        cv_.notify_all();
+    }
+
+    void camera_loop() {
+        camera_thread_alive_ = true;
+        int backoff_ms = reconnect_initial_ms_;
+        while (run_requested()) {
+            std::shared_ptr<ob::Pipeline> pipeline;
+            bool reached_running = false;
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                ++reconnect_attempt_count_;
+                last_reconnect_attempt_epoch_ms_ = epoch_now_ms();
+                set_camera_state_locked(
+                    ever_connected_ ? CameraState::Reconnecting : CameraState::Starting,
+                    ever_connected_ ? "CAMERA_RECONNECTING" : "CAMERA_STARTING",
+                    ever_connected_ ? "rebuilding Orbbec pipeline" : "opening Orbbec camera");
+            }
+            try {
+                pipeline = open_pipeline();
+                std::cerr << "[INFO] Orbbec pipeline opened; waiting for RGB/depth frames" << std::endl;
+                while (run_requested()) {
+                    std::shared_ptr<ob::FrameSet> frames;
+                    try {
+                        frames = pipeline->waitForFrames(1000);
+                        if (frames) process_frames(frames);
+                    } catch (const ob::Error &e) {
+                        record_error(std::string("wait frame failed: ") + e.getMessage());
+                        std::cerr << "[WARN] Orbbec wait frame error: " << e.getMessage() << std::endl;
+                    } catch (const std::exception &e) {
+                        record_error(std::string("camera loop failed: ") + e.what());
+                        std::cerr << "[WARN] camera loop error: " << e.what() << std::endl;
+                    }
+
+                    const int64_t now = now_ms();
+                    bool stale = false;
+                    std::string stale_message;
+                    {
+                        std::lock_guard<std::mutex> lk(mtx_);
+                        reached_running = reached_running || camera_state_ == CameraState::Running;
+                        const int64_t color_age = last_color_ms_ > 0 ? now - last_color_ms_ : now - pipeline_started_ms_;
+                        const int64_t depth_age = last_depth_ms_ > 0 ? now - last_depth_ms_ : now - pipeline_started_ms_;
+                        const int64_t limit = reached_running ? stale_timeout_ms_ : first_frame_timeout_ms_;
+                        stale = color_age > limit || depth_age > limit;
+                        if (stale) {
+                            std::ostringstream message;
+                            message << "RGB/depth frame stale: color_age_ms=" << color_age
+                                    << ", depth_age_ms=" << depth_age << ", limit_ms=" << limit;
+                            stale_message = message.str();
+                            ++stale_event_count_;
+                            set_camera_state_locked(CameraState::Stale, "CAMERA_FRAME_STALE", stale_message);
+                            invalidate_frames_locked();
+                        }
+                    }
+                    if (stale) {
+                        std::cerr << "[WARN] " << stale_message << "; rebuilding pipeline" << std::endl;
+                        cv_.notify_all();
+                        break;
+                    }
+                }
+            } catch (const ob::Error &e) {
+                record_error(std::string("camera open failed: ") + e.getMessage());
+                std::cerr << "[WARN] Orbbec camera open failed: " << e.getMessage() << std::endl;
+            } catch (const std::exception &e) {
+                record_error(std::string("camera open failed: ") + e.what());
+                std::cerr << "[WARN] Orbbec camera open failed: " << e.what() << std::endl;
+            } catch (...) {
+                record_error("camera open failed: unknown error");
+                std::cerr << "[WARN] Orbbec camera open failed: unknown error" << std::endl;
+            }
+
+            close_pipeline(pipeline);
+            if (!run_requested()) break;
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                ++consecutive_reconnect_failures_;
+                set_camera_state_locked(
+                    reached_running ? CameraState::Reconnecting : CameraState::Offline,
+                    reached_running ? "CAMERA_RECONNECTING" : "CAMERA_OFFLINE",
+                    last_error_.empty() ? "camera unavailable; retry scheduled" : last_error_);
+            }
+            cv_.notify_all();
+            std::cerr << "[WARN] camera unavailable; retry in " << backoff_ms << " ms" << std::endl;
+            sleep_interruptible(backoff_ms);
+            if (reached_running) backoff_ms = reconnect_initial_ms_;
+            else backoff_ms = std::min(reconnect_max_ms_, std::max(reconnect_initial_ms_, backoff_ms * 2));
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            set_camera_state_locked(CameraState::Stopping, "", "camera thread stopped");
+            camera_started_ = false;
+            invalidate_frames_locked();
+        }
+        cv_.notify_all();
+        camera_thread_alive_ = false;
     }
 
     struct DeprojectInput {
@@ -533,6 +764,7 @@ private:
         std::shared_ptr<ob::VideoStreamProfile> profile;
         OBCalibrationParam calibration_param{};
         bool calibration_ready = false;
+        bool camera_connected = false;
         int width = 0;
         int height = 0;
         {
@@ -540,8 +772,13 @@ private:
             profile = color_profile_;
             calibration_param = calibration_param_;
             calibration_ready = calibration_ready_;
+            camera_connected = camera_connected_locked(now_ms());
             width = color_w_ > 0 ? color_w_ : color_width_;
             height = color_h_ > 0 ? color_h_ : color_height_;
+        }
+        if (!camera_connected) {
+            status_code = 503;
+            return "{\"ok\":false,\"error\":\"camera frame stale or reconnecting\"}";
         }
         if (!profile) {
             status_code = 503;
@@ -666,53 +903,104 @@ private:
 
     std::string status_json() {
         std::lock_guard<std::mutex> lk(mtx_);
-        int64_t now = now_ms();
+        const int64_t now = now_ms();
+        const int64_t state_age_ms = state_since_ms_ > 0 ? now - state_since_ms_ : 0;
+        const int64_t unhealthy_age_ms = unhealthy_since_ms_ > 0 ? now - unhealthy_since_ms_ : 0;
+        const int64_t color_age_ms = last_color_ms_ > 0 ? now - last_color_ms_ : -1;
+        const int64_t depth_age_ms = last_depth_ms_ > 0 ? now - last_depth_ms_ : -1;
+        const bool connected = camera_connected_locked(now);
+        const bool stale = !connected;
+        std::string severity = "ok";
+        bool alarm_active = false;
+        int numeric_fault_code = 0;
+        if (!connected) {
+            alarm_active = unhealthy_age_ms >= reconnect_alarm_ms_;
+            severity = alarm_active ? "error" : "warning";
+            if (camera_state_ == CameraState::Stale) numeric_fault_code = 3101;
+            else if (camera_state_ == CameraState::Reconnecting) numeric_fault_code = 3102;
+            else if (camera_state_ == CameraState::Offline) numeric_fault_code = 3103;
+            else numeric_fault_code = 3100;
+        }
         std::ostringstream os;
         os << "{"
            << "\"ok\":true,"
            << "\"component\":\"orbbec336l_bridge\","
+           << "\"health\":\"" << severity << "\","
            << "\"camera_started\":" << (camera_started_ ? "true" : "false") << ","
+           << "\"camera_connected\":" << (connected ? "true" : "false") << ","
+           << "\"camera_state\":\"" << camera_state_name(camera_state_) << "\","
+           << "\"camera_thread_alive\":" << (camera_thread_alive_ ? "true" : "false") << ","
+           << "\"frame_stale\":" << (stale ? "true" : "false") << ","
+           << "\"fault_code\":\"" << json_escape(connected ? "" : fault_code_) << "\","
+           << "\"fault_numeric_code\":" << numeric_fault_code << ","
+           << "\"alarm_active\":" << (alarm_active ? "true" : "false") << ","
+           << "\"fault_since_timestamp_ms\":" << (connected ? 0 : unhealthy_since_epoch_ms_) << ","
+           << "\"state_age_ms\":" << state_age_ms << ","
+           << "\"unhealthy_age_ms\":" << unhealthy_age_ms << ","
            << "\"frame_count\":" << frame_count_ << ","
+           << "\"color_frame_count\":" << color_frame_count_ << ","
+           << "\"depth_frame_count\":" << depth_frame_count_ << ","
            << "\"color_width\":" << color_w_ << ","
            << "\"color_height\":" << color_h_ << ","
            << "\"depth_width\":" << depth_w_ << ","
            << "\"depth_height\":" << depth_h_ << ","
            << "\"color_format\":\"" << json_escape(color_format_) << "\","
            << "\"depth_scale\":" << std::fixed << std::setprecision(6) << depth_scale_ << ","
-           << "\"last_color_age_ms\":" << (last_color_ms_ > 0 ? now - last_color_ms_ : -1) << ","
-           << "\"last_depth_age_ms\":" << (last_depth_ms_ > 0 ? now - last_depth_ms_ : -1) << ","
+           << "\"last_color_age_ms\":" << color_age_ms << ","
+           << "\"last_depth_age_ms\":" << depth_age_ms << ","
+           << "\"stale_timeout_ms\":" << stale_timeout_ms_ << ","
+           << "\"reconnect_attempt_count\":" << reconnect_attempt_count_ << ","
+           << "\"reconnect_success_count\":" << reconnect_success_count_ << ","
+           << "\"consecutive_reconnect_failures\":" << consecutive_reconnect_failures_ << ","
+           << "\"stale_event_count\":" << stale_event_count_ << ","
+           << "\"last_reconnect_attempt_timestamp_ms\":" << last_reconnect_attempt_epoch_ms_ << ","
+           << "\"last_reconnect_success_timestamp_ms\":" << last_reconnect_success_epoch_ms_ << ","
+           << "\"last_error_timestamp_ms\":" << last_error_epoch_ms_ << ","
            << "\"uptime_ms\":" << (start_ms_ > 0 ? now - start_ms_ : 0) << ","
            << "\"time\":\"" << json_escape(now_string()) << "\","
-           << "\"last_error\":\"" << json_escape(last_error_) << "\""
+           << "\"last_error\":\"" << json_escape(last_error_) << "\","
+           << "\"alarm_interface\":{\"modbus_tcp_reserved\":true,\"implemented\":false}"
            << "}";
         return os.str();
     }
 
     std::string depth_meta_json() {
         std::lock_guard<std::mutex> lk(mtx_);
+        const int64_t now = now_ms();
+        const int64_t age = last_depth_ms_ > 0 ? now - last_depth_ms_ : -1;
+        const bool fresh = !latest_depth_mm_.empty() && age >= 0 && age <= stale_timeout_ms_;
         std::ostringstream os;
         os << "{"
-           << "\"ok\":" << (!latest_depth_mm_.empty() ? "true" : "false") << ","
+           << "\"ok\":" << (fresh ? "true" : "false") << ","
+           << "\"fresh\":" << (fresh ? "true" : "false") << ","
+           << "\"camera_state\":\"" << camera_state_name(camera_state_) << "\","
            << "\"width\":" << depth_w_ << ","
            << "\"height\":" << depth_h_ << ","
            << "\"encoding\":\"16UC1\","
            << "\"unit\":\"mm\","
            << "\"scale\":" << std::fixed << std::setprecision(6) << depth_scale_ << ","
-           << "\"last_depth_ms\":" << last_depth_ms_
+           << "\"last_depth_ms\":" << last_depth_ms_ << ","
+           << "\"last_depth_age_ms\":" << age
            << "}";
         return os.str();
     }
+
 
 
     void append_profile_array(std::ostringstream &os, OBSensorType sensor_type, const std::string &sensor_name) {
         std::set<std::string> seen;
         bool first = true;
         try {
-            if (!pipeline_) {
+            std::shared_ptr<ob::Pipeline> pipeline;
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                pipeline = pipeline_;
+            }
+            if (!pipeline) {
                 os << "]";
                 return;
             }
-            auto profiles = pipeline_->getStreamProfileList(sensor_type);
+            auto profiles = pipeline->getStreamProfileList(sensor_type);
             uint32_t count = profiles ? profiles->count() : 0;
             for (uint32_t i = 0; i < count; ++i) {
                 std::shared_ptr<ob::VideoStreamProfile> profile;
@@ -745,9 +1033,9 @@ private:
                 os << "}";
             }
         } catch (const std::exception &e) {
-            last_error_ = std::string("enumerate profiles failed: ") + e.what();
+            record_error(std::string("enumerate profiles failed: ") + e.what());
         } catch (...) {
-            last_error_ = "enumerate profiles failed";
+            record_error("enumerate profiles failed");
         }
         os << "]";
     }
@@ -774,12 +1062,36 @@ private:
         return os.str();
     }
 
+    bool copy_fresh_color(cv::Mat &img, uint64_t *frame_sequence = nullptr, int wait_ms = 0) {
+        std::unique_lock<std::mutex> lk(mtx_);
+        if (wait_ms > 0 && !camera_connected_locked(now_ms())) {
+            cv_.wait_for(lk, std::chrono::milliseconds(wait_ms), [this]() {
+                return !run_requested() || camera_connected_locked(now_ms());
+            });
+        }
+        if (!camera_connected_locked(now_ms())) return false;
+        img = latest_bgr_.clone();
+        if (frame_sequence) *frame_sequence = color_frame_count_;
+        return !img.empty();
+    }
+
+    bool copy_fresh_depth(cv::Mat &depth, int wait_ms = 0) {
+        std::unique_lock<std::mutex> lk(mtx_);
+        if (wait_ms > 0 && !camera_connected_locked(now_ms())) {
+            cv_.wait_for(lk, std::chrono::milliseconds(wait_ms), [this]() {
+                return !run_requested() || camera_connected_locked(now_ms());
+            });
+        }
+        if (!camera_connected_locked(now_ms())) return false;
+        depth = latest_depth_mm_.clone();
+        return !depth.empty();
+    }
+
     void send_snapshot(int fd) {
         cv::Mat img;
-        {
-            std::unique_lock<std::mutex> lk(mtx_);
-            if (latest_bgr_.empty()) cv_.wait_for(lk, std::chrono::milliseconds(1500));
-            if (!latest_bgr_.empty()) img = latest_bgr_.clone();
+        if (!copy_fresh_color(img, nullptr, 1500)) {
+            send_text(fd, 503, "application/json", "{\"ok\":false,\"error\":\"camera frame stale or reconnecting\"}");
+            return;
         }
         std::vector<uchar> jpg;
         if (!encode_jpeg(img, jpeg_quality_, jpg)) {
@@ -791,10 +1103,9 @@ private:
 
     void send_depth_png(int fd) {
         cv::Mat depth;
-        {
-            std::unique_lock<std::mutex> lk(mtx_);
-            if (latest_depth_mm_.empty()) cv_.wait_for(lk, std::chrono::milliseconds(1500));
-            if (!latest_depth_mm_.empty()) depth = latest_depth_mm_.clone();
+        if (!copy_fresh_depth(depth, 1500)) {
+            send_text(fd, 503, "application/json", "{\"ok\":false,\"error\":\"depth frame stale or reconnecting\"}");
+            return;
         }
         std::vector<uchar> png;
         if (!encode_png16(depth, png)) {
@@ -806,10 +1117,9 @@ private:
 
     void send_depth_vis(int fd) {
         cv::Mat depth;
-        {
-            std::unique_lock<std::mutex> lk(mtx_);
-            if (latest_depth_mm_.empty()) cv_.wait_for(lk, std::chrono::milliseconds(1500));
-            if (!latest_depth_mm_.empty()) depth = latest_depth_mm_.clone();
+        if (!copy_fresh_depth(depth, 1500)) {
+            send_text(fd, 503, "application/json", "{\"ok\":false,\"error\":\"depth frame stale or reconnecting\"}");
+            return;
         }
         std::vector<uchar> jpg;
         if (!encode_jpeg(depth_to_vis(depth), jpeg_quality_, jpg)) {
@@ -820,6 +1130,12 @@ private:
     }
 
     void send_mjpeg(int fd) {
+        cv::Mat initial;
+        uint64_t last_sequence = 0;
+        if (!copy_fresh_color(initial, &last_sequence, 1500)) {
+            send_text(fd, 503, "application/json", "{\"ok\":false,\"error\":\"camera stream unavailable\"}");
+            return;
+        }
         std::string boundary = "visionops-orbbec336l";
         std::ostringstream h;
         h << "HTTP/1.1 200 OK\r\n"
@@ -829,13 +1145,18 @@ private:
         auto hs = h.str();
         send_all(fd, hs.data(), hs.size());
 
-        int delay_ms = std::max(10, 1000 / std::max(1, mjpeg_fps_));
-        while (g_running) {
-            cv::Mat img;
-            {
+        const int delay_ms = std::max(10, 1000 / std::max(1, mjpeg_fps_));
+        cv::Mat img = initial;
+        while (run_requested()) {
+            if (img.empty()) {
                 std::unique_lock<std::mutex> lk(mtx_);
-                if (latest_bgr_.empty()) cv_.wait_for(lk, std::chrono::milliseconds(1000));
-                if (!latest_bgr_.empty()) img = latest_bgr_.clone();
+                cv_.wait_for(lk, std::chrono::milliseconds(std::max(100, delay_ms)), [this, last_sequence]() {
+                    return !run_requested() || !camera_connected_locked(now_ms()) || color_frame_count_ != last_sequence;
+                });
+                if (!run_requested() || !camera_connected_locked(now_ms())) break;
+                if (color_frame_count_ == last_sequence) continue;
+                img = latest_bgr_.clone();
+                last_sequence = color_frame_count_;
             }
             std::vector<uchar> jpg;
             if (encode_jpeg(img, jpeg_quality_, jpg)) {
@@ -846,9 +1167,10 @@ private:
                 auto ps = ph.str();
                 if (::send(fd, ps.data(), ps.size(), MSG_NOSIGNAL) <= 0) break;
                 if (::send(fd, jpg.data(), jpg.size(), MSG_NOSIGNAL) <= 0) break;
-                std::string tail = "\r\n";
+                const std::string tail = "\r\n";
                 if (::send(fd, tail.data(), tail.size(), MSG_NOSIGNAL) <= 0) break;
             }
+            img.release();
             std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
         }
     }
@@ -901,6 +1223,11 @@ private:
     int fps_;
     int jpeg_quality_;
     int mjpeg_fps_;
+    int stale_timeout_ms_;
+    int first_frame_timeout_ms_;
+    int reconnect_initial_ms_;
+    int reconnect_max_ms_;
+    int reconnect_alarm_ms_;
     bool flip_vertical_;
     bool flip_horizontal_;
     std::string serial_;
@@ -913,6 +1240,8 @@ private:
     std::shared_ptr<ob::VideoStreamProfile> depth_profile_;
     std::thread camera_thread_;
     std::atomic<bool> camera_started_{false};
+    std::atomic<bool> camera_thread_alive_{false};
+    std::atomic<bool> camera_stop_requested_{false};
 
     std::mutex mtx_;
     std::condition_variable cv_;
@@ -920,14 +1249,31 @@ private:
     cv::Mat latest_depth_mm_;
     int64_t last_color_ms_ = 0;
     int64_t last_depth_ms_ = 0;
+    int64_t pipeline_started_ms_ = 0;
     int64_t start_ms_ = 0;
     uint64_t frame_count_ = 0;
+    uint64_t color_frame_count_ = 0;
+    uint64_t depth_frame_count_ = 0;
+    CameraState camera_state_ = CameraState::Starting;
+    int64_t state_since_ms_ = 0;
+    int64_t state_since_epoch_ms_ = 0;
+    int64_t unhealthy_since_ms_ = 0;
+    int64_t unhealthy_since_epoch_ms_ = 0;
+    int64_t last_error_epoch_ms_ = 0;
+    int64_t last_reconnect_attempt_epoch_ms_ = 0;
+    int64_t last_reconnect_success_epoch_ms_ = 0;
+    uint64_t reconnect_attempt_count_ = 0;
+    uint64_t reconnect_success_count_ = 0;
+    uint64_t consecutive_reconnect_failures_ = 0;
+    uint64_t stale_event_count_ = 0;
+    bool ever_connected_ = false;
     int color_w_ = 0;
     int color_h_ = 0;
     int depth_w_ = 0;
     int depth_h_ = 0;
     float depth_scale_ = 1.0f;
     std::string color_format_ = "";
+    std::string fault_code_ = "CAMERA_STARTING";
     std::string last_error_ = "";
 
     int server_fd_ = -1;

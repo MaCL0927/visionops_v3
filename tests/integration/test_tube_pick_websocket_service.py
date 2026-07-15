@@ -69,7 +69,22 @@ class _FakeUpstreamHandler(BaseHTTPRequestHandler):
             assert ok
             self._send(200, encoded.tobytes(), "image/png")
         elif self.path == "/health":
-            self._send(200, json.dumps({"ok": True, "last_depth_age_ms": 10}).encode(), "application/json")
+            self._send(
+                200,
+                json.dumps(
+                    {
+                        "ok": True,
+                        "camera_started": True,
+                        "camera_connected": True,
+                        "camera_state": "running",
+                        "last_color_age_ms": 10,
+                        "last_depth_age_ms": 10,
+                        "reconnect_attempt_count": 1,
+                        "reconnect_success_count": 1,
+                    }
+                ).encode(),
+                "application/json",
+            )
         else:
             self._send(404, b"{}", "application/json")
 

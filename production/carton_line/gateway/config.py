@@ -206,6 +206,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "public_url": "http://192.168.213.137:18182/stream.mjpeg",
             "sync": "soft",
         },
+        "camera_health": {
+            "stale_ms": 5000,
+            "suppress_detection_when_unhealthy": True,
+            "alarm_after_ms": 15000,
+            "modbus_tcp": {
+                "enabled": False,
+                "reserved": True,
+                "fault_register": None,
+                "state_register": None,
+            },
+        },
         "algorithm": {
             "image": {
                 "width": 640,
@@ -328,6 +339,19 @@ def load_config(path: str | None) -> dict[str, Any]:
     pick_http = config["pick"]["http"]
     pick_ws["listen_port"] = _port(pick_ws["listen_port"], "pick.websocket.listen_port")
     pick_http["listen_port"] = _port(pick_http["listen_port"], "pick.http.listen_port")
+    camera_health = config["pick"]["camera_health"]
+    camera_health["stale_ms"] = max(500, int(camera_health.get("stale_ms", 5000)))
+    camera_health["alarm_after_ms"] = max(
+        camera_health["stale_ms"], int(camera_health.get("alarm_after_ms", 15000))
+    )
+    camera_health["suppress_detection_when_unhealthy"] = bool(
+        camera_health.get("suppress_detection_when_unhealthy", True)
+    )
+    modbus_camera_alarm = camera_health.get("modbus_tcp")
+    if not isinstance(modbus_camera_alarm, Mapping):
+        raise ValueError("pick.camera_health.modbus_tcp 必须是对象")
+    modbus_camera_alarm["enabled"] = bool(modbus_camera_alarm.get("enabled", False))
+    modbus_camera_alarm["reserved"] = bool(modbus_camera_alarm.get("reserved", True))
 
     used_ports = [
         service["listen_port"], service["partition_app_port"], service["tube_app_port"],

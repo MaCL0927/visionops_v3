@@ -139,7 +139,15 @@ def test_service_builds_camera_coordinate_detection(tmp_path) -> None:
     config["pick"]["debug"] = {"save_every_trigger": False, "save_root": str(tmp_path)}
     service = TubePickVisionService(config)
     service.runtime.infer_once = _runtime_result  # type: ignore[method-assign]
-    service.bridge.get_depth = lambda: (decode_depth_png(_depth_png(987)), {"last_depth_age_ms": 10}, _depth_png(987))  # type: ignore[method-assign]
+    service.bridge.health = lambda: {  # type: ignore[method-assign]
+        "ok": True,
+        "camera_started": True,
+        "camera_connected": True,
+        "camera_state": "running",
+        "last_color_age_ms": 10,
+        "last_depth_age_ms": 10,
+    }
+    service.bridge.get_depth = lambda _health=None: (decode_depth_png(_depth_png(987)), {"last_depth_age_ms": 10}, _depth_png(987))  # type: ignore[method-assign]
     service.bridge.deproject = lambda points: ([[float(i), float(i + 1), float(point[2])] for i, point in enumerate(points)], {"ok": True})  # type: ignore[method-assign]
 
     response = service.evaluate_once("req-7")
@@ -188,3 +196,67 @@ def test_status_http_exposes_collector_compatibility_endpoints(tmp_path) -> None
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_camera_disconnect_suppresses_old_detection_results(tmp_path) -> None:
+    config = deepcopy(DEFAULT_CONFIG)
+    config["pick"]["debug"] = {"save_every_trigger": False, "save_root": str(tmp_path)}
+    service = TubePickVisionService(config)
+    called = {"runtime": 0}
+
+    def infer_once() -> dict:
+        called["runtime"] += 1
+        return _runtime_result()
+
+    service.runtime.infer_once = infer_once  # type: ignore[method-assign]
+    service.bridge.health = lambda: {  # type: ignore[method-assign]
+        "ok": True,
+        "camera_started": True,
+        "camera_connected": False,
+        "camera_state": "reconnecting",
+        "fault_code": "CAMERA_RECONNECTING",
+        "fault_numeric_code": 3102,
+        "alarm_active": True,
+        "state_age_ms": 20000,
+        "last_color_age_ms": 8000,
+        "last_depth_age_ms": 8100,
+        "last_error": "USB camera disconnected",
+        "reconnect_attempt_count": 4,
+    }
+
+    response = service.evaluate_once("camera-offline-1")
+    assert called["runtime"] == 0
+    assert response["items"] == []
+    assert response["error"]["code"] == "CAMERA_DISCONNECTED"
+    assert response["camera_state"] == "reconnecting"
+    assert response["alarm"]["numeric_code"] == 3102
+    assert response["alarm"]["modbus_tcp_reserved"] is True
+
+
+def test_status_uses_bridge_freshness_as_camera_source_of_truth(tmp_path) -> None:
+    config = deepcopy(DEFAULT_CONFIG)
+    config["pick"]["debug"] = {"save_every_trigger": False, "save_root": str(tmp_path)}
+    service = TubePickVisionService(config)
+    service.runtime.status = lambda: {  # type: ignore[method-assign]
+        "camera_connected": True,
+        "loaded_model": {"model_id": "test-model"},
+    }
+    service.bridge.health = lambda: {  # type: ignore[method-assign]
+        "ok": True,
+        "camera_connected": False,
+        "camera_state": "offline",
+        "fault_code": "CAMERA_OFFLINE",
+        "fault_numeric_code": 3103,
+        "alarm_active": True,
+        "last_color_age_ms": -1,
+        "last_depth_age_ms": -1,
+        "last_error": "device not found",
+    }
+
+    status = service._status_message()
+    assert status["camera_connected"] is False
+    assert status["runtime_camera_connected"] is True
+    assert status["camera_state"] == "offline"
+    assert status["error_code"] == "CAMERA_OFFLINE"
+    assert status["alarm"]["active"] is True
+    assert status["alarm"]["modbus_tcp_implemented"] is False

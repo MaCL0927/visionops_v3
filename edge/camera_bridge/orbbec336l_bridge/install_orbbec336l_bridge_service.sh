@@ -7,6 +7,11 @@ DST_DIR="/opt/visionops_v3/edge/camera_bridge/orbbec336l_bridge"
 BIN_DIR="/opt/visionops_v3/bin"
 ENV_FILE="$DST_DIR/orbbec336l_bridge.env"
 BIN_PATH="$BIN_DIR/visionops_orbbec336l_bridge"
+ROOT_DIR="$(cd "$SRC_DIR/../../.." && pwd)"
+WATCHDOG_SCRIPT="$ROOT_DIR/production/carton_line/scripts/watch_orbbec336l_bridge.sh"
+WATCHDOG_UNIT_DIR="$ROOT_DIR/production/carton_line/deploy/systemd"
+WATCHDOG_SERVICE="visionops-orbbec336l-bridge-watchdog.service"
+WATCHDOG_TIMER="visionops-orbbec336l-bridge-watchdog.timer"
 
 log() { echo "[INFO] $*"; }
 warn() { echo "[WARN] $*"; }
@@ -40,6 +45,19 @@ if [[ ! -f "$ENV_FILE" ]]; then
   err "missing env file: $ENV_FILE"
   exit 1
 fi
+
+append_env_default() {
+  local key="$1"
+  local value="$2"
+  if ! sudo grep -q "^${key}=" "$ENV_FILE"; then
+    printf '%s=%s\n' "$key" "$value" | sudo tee -a "$ENV_FILE" >/dev/null
+  fi
+}
+append_env_default VISIONOPS_ORBBEC336L_STALE_TIMEOUT_MS 3000
+append_env_default VISIONOPS_ORBBEC336L_FIRST_FRAME_TIMEOUT_MS 5000
+append_env_default VISIONOPS_ORBBEC336L_RECONNECT_INITIAL_MS 1000
+append_env_default VISIONOPS_ORBBEC336L_RECONNECT_MAX_MS 30000
+append_env_default VISIONOPS_ORBBEC336L_RECONNECT_FAILURE_ALARM_SEC 15
 
 # shellcheck disable=SC1090
 source "$ENV_FILE"
@@ -131,6 +149,8 @@ sudo tee "/etc/systemd/system/$SERVICE_NAME" >/dev/null <<EOF_SERVICE
 Description=VisionOps Orbbec Gemini 336L SDK HTTP Bridge
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -145,12 +165,12 @@ Environment=OB_LOG_TO_FILE=0
 ExecStartPre=/bin/rm -rf $DST_DIR/Log
 ExecStart=$BIN_PATH
 Restart=always
-RestartSec=1
-StartLimitIntervalSec=60
-StartLimitBurst=10
+RestartSec=2
 TimeoutStartSec=30
-TimeoutStopSec=3
+TimeoutStopSec=8
 KillSignal=SIGTERM
+KillMode=mixed
+SendSIGKILL=yes
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=visionops-orbbec336l-bridge
@@ -159,9 +179,21 @@ SyslogIdentifier=visionops-orbbec336l-bridge
 WantedBy=multi-user.target
 EOF_SERVICE
 
+if [[ -f "$WATCHDOG_SCRIPT" && -f "$WATCHDOG_UNIT_DIR/$WATCHDOG_SERVICE" && -f "$WATCHDOG_UNIT_DIR/$WATCHDOG_TIMER" ]]; then
+  sudo chmod +x "$WATCHDOG_SCRIPT"
+  sudo install -m 0644 "$WATCHDOG_UNIT_DIR/$WATCHDOG_SERVICE" "/etc/systemd/system/$WATCHDOG_SERVICE"
+  sudo install -m 0644 "$WATCHDOG_UNIT_DIR/$WATCHDOG_TIMER" "/etc/systemd/system/$WATCHDOG_TIMER"
+else
+  warn "camera watchdog source files not found; install tube-pick profile later to add them"
+fi
+
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE_NAME"
+if [[ -f "/etc/systemd/system/$WATCHDOG_TIMER" ]]; then
+  sudo systemctl enable "$WATCHDOG_TIMER"
+fi
 
 log "installed $SERVICE_NAME"
 log "NEXT: sudo systemctl restart $SERVICE_NAME"
 log "CHECK: curl -s http://127.0.0.1:${VISIONOPS_ORBBEC336L_HTTP_PORT:-18182}/health | python3 -m json.tool"
+log "WATCHDOG: sudo systemctl enable --now $WATCHDOG_TIMER"
