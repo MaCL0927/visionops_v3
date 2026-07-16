@@ -87,7 +87,14 @@ async function loadConfig() {
     const backendConfig = normalizeConfig(await requestJson(endpoints.frontendConfig));
     const persistedConfig = loadPersistedConfig();
     updateState({
-      config: persistedConfig ? normalizeConfig({ ...backendConfig, ...persistedConfig }) : backendConfig,
+      config: persistedConfig
+        ? normalizeConfig({
+            ...backendConfig,
+            ...persistedConfig,
+            // 生产推理来源属于部署拓扑，不能被浏览器旧缓存覆盖。
+            production_inference_source: backendConfig.production_inference_source,
+          })
+        : backendConfig,
       savedConfig: { ...backendConfig },
     });
   } catch (_error) {

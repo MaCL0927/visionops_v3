@@ -98,13 +98,103 @@ function drawOutputRoi(ctx, roi, sourceWidth, sourceHeight, sx, sy, canvasWidth)
   ctx.restore();
 }
 
+
+function drawPlacementArrow(ctx, slot, sx, sy, strokeStyle) {
+  const center = point(slot?.center_xy);
+  if (!center) return;
+  const angle = Number(slot.orientation_deg || 0) * Math.PI / 180;
+  const bbox = Array.isArray(slot.bbox_xyxy) ? slot.bbox_xyxy.map(Number) : null;
+  const baseLength = bbox?.length === 4
+    ? Math.max(18, Math.min(Math.abs(bbox[2] - bbox[0]) * sx, Math.abs(bbox[3] - bbox[1]) * sy) * 0.28)
+    : 30;
+  const cx = center[0] * sx;
+  const cy = center[1] * sy;
+  const dx = Math.cos(angle) * baseLength;
+  const dy = Math.sin(angle) * baseLength;
+  ctx.save();
+  ctx.strokeStyle = strokeStyle;
+  ctx.fillStyle = strokeStyle;
+  ctx.lineWidth = Math.max(2, ctx.lineWidth);
+  ctx.beginPath();
+  ctx.moveTo(cx - dx, cy - dy);
+  ctx.lineTo(cx + dx, cy + dy);
+  ctx.stroke();
+  const tipX = cx + dx;
+  const tipY = cy + dy;
+  const wing = Math.max(7, baseLength * 0.22);
+  ctx.beginPath();
+  ctx.moveTo(tipX, tipY);
+  ctx.lineTo(tipX - Math.cos(angle - Math.PI / 5) * wing, tipY - Math.sin(angle - Math.PI / 5) * wing);
+  ctx.lineTo(tipX - Math.cos(angle + Math.PI / 5) * wing, tipY - Math.sin(angle + Math.PI / 5) * wing);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawPlacementOverlay(ctx, placement, sx, sy, canvasWidth, canvasHeight) {
+  if (!placement || Number(placement.layer) !== 1) return;
+  const slots = Array.isArray(placement.slots) ? placement.slots : [];
+  const nextSlotId = String(placement.next_slot_id || "");
+  const fontSize = Math.max(14, Math.round(canvasWidth / 72));
+
+  for (const slot of slots) {
+    if (slot?.visible_mask === false || slot?.occupied === true) continue;
+    const ring = Array.isArray(slot?.polygon) ? slot.polygon.map(point).filter(Boolean) : [];
+    if (ring.length < 3) continue;
+    const isTarget = String(slot.slot_id || "") === nextSlotId;
+    const stroke = isTarget ? "#22c55e" : "#facc15";
+    const fill = isTarget ? "rgba(34,197,94,.30)" : "rgba(250,204,21,.24)";
+    drawRing(ctx, ring, sx, sy);
+    ctx.save();
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = Math.max(3, Math.round(canvasWidth / 380));
+    ctx.setLineDash(isTarget ? [] : [12, 7]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    drawPlacementArrow(ctx, slot, sx, sy, stroke);
+
+    const anchorX = Math.min(...ring.map(([x]) => x)) * sx;
+    const anchorY = Math.min(...ring.map(([, y]) => y)) * sy;
+    ctx.font = `bold ${fontSize}px system-ui`;
+    const orientation = slot.orientation_label || (Math.abs((Number((slot.template_orientation_deg ?? slot.orientation_deg) || 0) % 180)) < 45 ? "横向" : "竖向");
+    const label = `${slot.slot_id || "P?"} ${orientation}${isTarget ? " · 下一位置" : ""}`;
+    const labelWidth = ctx.measureText(label).width + 16;
+    const labelHeight = fontSize + 10;
+    ctx.fillStyle = isTarget ? "rgba(22,163,74,.94)" : "rgba(202,138,4,.94)";
+    ctx.fillRect(anchorX, Math.max(0, anchorY - labelHeight), labelWidth, labelHeight);
+    ctx.fillStyle = "#fff";
+    ctx.fillText(label, anchorX + 8, Math.max(fontSize + 2, anchorY - 7));
+    ctx.restore();
+  }
+
+  ctx.save();
+  ctx.font = `bold ${Math.max(16, Math.round(canvasWidth / 62))}px system-ui`;
+  let summary = "等待检测托盘";
+  if (placement.state !== "WAIT_TRAY") {
+    const occupied = Number(placement.occupied_count || 0);
+    const total = Number(placement.slot_count || slots.length || 0);
+    summary = placement.complete ? `第一层已放满 ${occupied}/${total}` : `第一层摆放 ${occupied}/${total}`;
+  }
+  const width = ctx.measureText(summary).width + 24;
+  const height = Math.max(34, Math.round(canvasHeight / 22));
+  ctx.fillStyle = placement.complete ? "rgba(22,163,74,.94)" : "rgba(17,24,39,.86)";
+  ctx.fillRect(12, 12, width, height);
+  ctx.fillStyle = "#fff";
+  ctx.fillText(summary, 24, 12 + Math.round(height * 0.68));
+  ctx.restore();
+}
+
 export function clearOverlay(canvas) { canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height); }
 
 export function drawInferenceOverlay(canvas, image, result) {
   if (!image.naturalWidth || !image.naturalHeight) return;
   const rect = image.getBoundingClientRect();
+  const parentRect = image.parentElement?.getBoundingClientRect() || rect;
   canvas.width = Math.max(1, Math.round(rect.width)); canvas.height = Math.max(1, Math.round(rect.height));
-  canvas.style.left = `${image.offsetLeft}px`; canvas.style.top = `${image.offsetTop}px`;
+  canvas.style.left = `${Math.max(0, rect.left - parentRect.left)}px`;
+  canvas.style.top = `${Math.max(0, rect.top - parentRect.top)}px`;
   canvas.style.width = `${rect.width}px`; canvas.style.height = `${rect.height}px`;
   const sourceWidth = Number(result?.image?.width) || image.naturalWidth;
   const sourceHeight = Number(result?.image?.height) || image.naturalHeight;
@@ -116,6 +206,7 @@ export function drawInferenceOverlay(canvas, image, result) {
   const maskOpacity = clamp(Number(overlay.mask_opacity ?? 0.28), 0, 1);
 
   drawOutputRoi(ctx, result?.roi, sourceWidth, sourceHeight, sx, sy, canvas.width);
+  drawPlacementOverlay(ctx, result?.placement, sx, sy, canvas.width, canvas.height);
 
   const classifications = Array.isArray(result?.classifications) ? result.classifications : [];
   if (classifications.length && (!Array.isArray(result?.detections) || !result.detections.length)) {

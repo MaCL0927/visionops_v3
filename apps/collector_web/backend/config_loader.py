@@ -27,6 +27,7 @@ class CollectorConfig:
     device_id: str = "example-edge-001"
     component: str = "collector_web"
     models_root: str = ""
+    production_inference_source: str = "runtime"
 
 
 def _port(value: str) -> int:
@@ -90,6 +91,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device-id", help="设备标识")
     parser.add_argument("--component", help="组件名称")
     parser.add_argument("--models-root", type=_path_text, help="模型包根目录")
+    parser.add_argument(
+        "--production-inference-source",
+        choices=("runtime", "app"),
+        help="生产画面推理来源：runtime 直接推理，app 由业务应用推理并返回可视化结果",
+    )
     return parser
 
 
@@ -104,6 +110,7 @@ def load_config(argv: Sequence[str] | None = None) -> CollectorConfig:
     downstream = yaml_config.get("downstream", {}) if isinstance(yaml_config.get("downstream"), dict) else {}
     refresh = yaml_config.get("refresh", {}) if isinstance(yaml_config.get("refresh"), dict) else {}
     models = yaml_config.get("models", {}) if isinstance(yaml_config.get("models"), dict) else {}
+    production = yaml_config.get("production", {}) if isinstance(yaml_config.get("production"), dict) else {}
     project_root = Path(__file__).resolve().parents[3]
     values = {
         "host": args.host or service.get("listen_host") or "0.0.0.0",
@@ -116,7 +123,14 @@ def load_config(argv: Sequence[str] | None = None) -> CollectorConfig:
         "device_id": args.device_id or yaml_config.get("device_id") or "example-edge-001",
         "component": args.component or yaml_config.get("component") or "collector_web",
         "models_root": args.models_root or models.get("models_root") or str(default_models_root(project_root)),
+        "production_inference_source": (
+            args.production_inference_source
+            or production.get("inference_source")
+            or "runtime"
+        ),
     }
+    if values["production_inference_source"] not in {"runtime", "app"}:
+        build_parser().error("production_inference_source 必须为 runtime 或 app")
     if not values["host"] or not values["device_id"] or not values["component"]:
         build_parser().error("host、device-id 和 component 不能为空")
     for key in ("port", "snapshot_refresh_interval_ms", "status_refresh_interval_ms"):

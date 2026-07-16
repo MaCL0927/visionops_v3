@@ -18,6 +18,7 @@ const state = {
     runtime_url: "",
     gateway_url: "",
     business_app_url: "",
+    production_inference_source: "runtime",
     device_id: "",
     preview_refresh_interval_ms: 200,
     inference_interval_ms: 500,
@@ -121,6 +122,9 @@ export function normalizeConfig(config = {}) {
     camera_contrast: clampNumber(config.camera_contrast, 50, 0, 100),
     disk_warning_percent: clampNumber(config.disk_warning_percent, 85, 50, 99),
     default_mode: ["factory", "production"].includes(config.default_mode) ? config.default_mode : "factory",
+    production_inference_source: ["runtime", "app"].includes(config.production_inference_source)
+      ? config.production_inference_source
+      : "runtime",
     upload: {
       ...state.config.upload,
       ...(config.upload || {}),

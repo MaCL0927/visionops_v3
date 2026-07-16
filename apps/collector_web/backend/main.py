@@ -218,6 +218,7 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
                 "gateway_url": config.gateway_url,
                 "business_app_url": config.business_app_url,
                 "models_root": config.models_root,
+                "production_inference_source": config.production_inference_source,
             },
         )
 
@@ -236,6 +237,7 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             "gateway_url": config.gateway_url,
             "business_app_url": config.business_app_url,
             "models_root": config.models_root,
+            "production_inference_source": config.production_inference_source,
             "device_id": config.device_id,
             "snapshot_refresh_interval_ms": config.snapshot_refresh_interval_ms,
             "status_refresh_interval_ms": board.get("status_refresh_interval_ms", config.status_refresh_interval_ms),

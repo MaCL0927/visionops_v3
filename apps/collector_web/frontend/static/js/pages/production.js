@@ -14,6 +14,7 @@ const liveView = document.getElementById("production-live-view");
 const statusView = document.getElementById("production-status-view");
 const viewToggle = document.getElementById("production-view-toggle");
 const refreshButton = document.getElementById("production-refresh");
+const liveStage = image?.parentElement;
 
 let snapshotUrl = null;
 let latestResult = null;
@@ -22,6 +23,7 @@ let liveBusy = false;
 let liveEnabled = false;
 let activeView = "live";
 let lastLoopFinishedAt = null;
+let overlayResizeFrame = null;
 
 function formatMs(value) {
   const number = Number(value);
@@ -46,6 +48,17 @@ function modelDisplay(result) {
   return model.model_name || model.model_id || "--";
 }
 
+function placementSummary(result) {
+  const placement = result?.placement;
+  if (!placement || Number(placement.layer) !== 1) return null;
+  const occupied = Number(placement.occupied_count || 0);
+  const total = Number(placement.slot_count || placement.slots?.length || 0);
+  if (placement.state === "WAIT_TRAY") return "等待托盘";
+  if (placement.complete) return `第一层已放满 ${occupied}/${total}`;
+  const next = placement.next_slot_id ? ` · 下一位置 ${placement.next_slot_id}` : "";
+  return `第一层 ${occupied}/${total}${next}`;
+}
+
 function updateLiveSummary(result, elapsedMs = null) {
   latestResult = result;
   updateState({ latestResult: result });
@@ -53,12 +66,48 @@ function updateLiveSummary(result, elapsedMs = null) {
   const count = countResults(result);
   const total = result?.timing?.total_ms ?? result?.timing_detail?.total_ms;
   currentModel.textContent = modelDisplay(result);
-  resultBrief.textContent = `${task} / ${count} 个结果`;
+  resultBrief.textContent = placementSummary(result) || `${task} / ${count} 个结果`;
   timingTotal.textContent = formatMs(total);
   const configuredFps = 1000 / Math.max(100, Number(getState().config.inference_interval_ms || 500));
   const actualFps = elapsedMs ? 1000 / elapsedMs : configuredFps;
   fpsText.textContent = `${formatFps(actualFps)} / 设定 ${formatFps(configuredFps)}`;
   liveStatus.textContent = `实时检测中 · ${task}`;
+}
+
+/**
+ * 将图像元素本身缩放到舞台内能容纳的最大尺寸。
+ *
+ * 不能只依赖 img { width:auto; max-width:100% }，因为浏览器不会把图像
+ * 从固有尺寸主动放大。这里显式计算 contain 尺寸，使图像保持完整、保持
+ * 长宽比，并在当前舞台内尽可能铺满。Canvas 随后直接对齐该图像元素。
+ */
+function fitProductionImage() {
+  if (!liveStage || !image?.naturalWidth || !image?.naturalHeight) return false;
+  const availableWidth = Math.max(1, liveStage.clientWidth);
+  const availableHeight = Math.max(1, liveStage.clientHeight);
+  const scale = Math.min(
+    availableWidth / image.naturalWidth,
+    availableHeight / image.naturalHeight,
+  );
+  if (!Number.isFinite(scale) || scale <= 0) return false;
+  const width = Math.max(1, Math.floor(image.naturalWidth * scale));
+  const height = Math.max(1, Math.floor(image.naturalHeight * scale));
+  image.style.width = `${width}px`;
+  image.style.height = `${height}px`;
+  return true;
+}
+
+function redrawOverlayAfterLayout() {
+  if (overlayResizeFrame) cancelAnimationFrame(overlayResizeFrame);
+  overlayResizeFrame = requestAnimationFrame(() => {
+    overlayResizeFrame = requestAnimationFrame(() => {
+      overlayResizeFrame = null;
+      fitProductionImage();
+      if (latestResult && image.complete && image.naturalWidth) {
+        drawInferenceOverlay(canvas, image, latestResult);
+      }
+    });
+  });
 }
 
 async function displaySnapshot() {
@@ -71,13 +120,20 @@ async function displaySnapshot() {
     image.src = snapshotUrl;
   });
   empty.classList.add("hidden");
-  if (latestResult) drawInferenceOverlay(canvas, image, latestResult);
+  redrawOverlayAfterLayout();
 }
 
 export async function productionInferOnce() {
   const startedAt = performance.now();
   try {
-    const result = await postJson(endpoints.inferOnce);
+    const source = getState().config.production_inference_source || "runtime";
+    const response = source === "app"
+      ? await postJson(endpoints.appEvaluate)
+      : await postJson(endpoints.inferOnce);
+    const result = response?.visualization_result || response?.runtime_result || response;
+    if (!result || result.message_type !== "inference_result") {
+      throw new Error("生产业务应用未返回 visualization_result/inference_result");
+    }
     const finishedAt = performance.now();
     const elapsedMs = lastLoopFinishedAt ? finishedAt - lastLoopFinishedAt : finishedAt - startedAt;
     lastLoopFinishedAt = finishedAt;
@@ -176,7 +232,7 @@ function showProductionView(view) {
     refreshProductionStatus();
   } else {
     startLive();
-    setTimeout(() => latestResult && drawInferenceOverlay(canvas, image, latestResult), 0);
+    redrawOverlayAfterLayout();
   }
 }
 
@@ -195,8 +251,8 @@ export function initProduction() {
     else await productionInferOnce();
   });
   viewToggle.addEventListener("click", () => showProductionView(activeView === "live" ? "status" : "live"));
-  window.addEventListener("resize", () => latestResult && activeView === "live" && drawInferenceOverlay(canvas, image, latestResult));
-  window.addEventListener("visionops:settings-saved", () => latestResult && activeView === "live" && drawInferenceOverlay(canvas, image, latestResult));
+  window.addEventListener("resize", redrawOverlayAfterLayout);
+  window.addEventListener("visionops:settings-saved", redrawOverlayAfterLayout);
   const evaluateBtn = document.getElementById("production-app-evaluate");
   if (evaluateBtn) {
     evaluateBtn.addEventListener("click", async () => {
@@ -210,4 +266,9 @@ export function initProduction() {
       if (activeView === "status") await refreshProductionStatus();
     });
   }
+}
+
+if (typeof ResizeObserver !== "undefined" && liveStage) {
+  const productionResizeObserver = new ResizeObserver(redrawOverlayAfterLayout);
+  productionResizeObserver.observe(liveStage);
 }

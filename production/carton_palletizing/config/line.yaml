@@ -1,0 +1,107 @@
+schema_version: "1.0"
+kind: production_line
+line_id: carton_palletizing
+device_id: lb3576-carton-palletizing
+component: carton_palletizing_app
+
+camera_bridge:
+  base_url: http://127.0.0.1:18182
+  snapshot_path: /stream/snapshot.jpg
+  health_path: /health
+
+runtime_recovery:
+  stale_frame_timeout_ms: 3000
+  failure_threshold: 3
+  initial_backoff_ms: 200
+  max_backoff_ms: 2000
+
+runtime:
+  url: http://127.0.0.1:28084
+  model_dir: models/carton_palletizing/current
+  roi_config_path: data/runtime/roi_carton_palletizing.json
+  device_id: lb3576-carton-palletizing-runtime
+  component: rknn_runtime_carton_palletizing
+  accepted_task_types: [obb, obb_detection]
+
+app:
+  listen_host: 127.0.0.1
+  listen_port: 19210
+  request_timeout_ms: 5000
+
+collector:
+  listen_host: 0.0.0.0
+  listen_port: 18094
+  device_id: lb3576-carton-palletizing
+  component: collector_carton_palletizing
+  models_root: models/carton_palletizing
+  snapshot_refresh_interval_ms: 200
+  status_refresh_interval_ms: 2000
+  # 工厂模式仍直接访问 Runtime；只有生产画面走业务应用，才能绘制摆放掩膜。
+  production_inference_source: app
+
+task:
+  task_id: first_layer_placement
+  algorithm:
+    classes:
+      # 当前 OBB 模型类别固定：0=纸箱，1=托盘。class_name 仅作为兼容兜底。
+      tray_class_ids: [1]
+      tray_class_names: [tray, pallet]
+      box_class_ids: [0]
+      box_class_names: [box, carton, carton_box]
+      tray_min_confidence: 0.50
+      box_min_confidence: 0.50
+
+    geometry:
+      # 第一阶段严格按 OBB 四点构建托盘坐标系和纸箱占位判断。
+      require_obb: true
+      # 托盘为上下长、左右窄的矩形：以短边构建居中的正方形垛型区域。
+      # 这样左右占满，长边方向上下等距留白，避免四个纸箱被拉成长方形。
+      footprint_mode: centered_square_by_short_edge
+      footprint_fill_ratio: 1.0
+
+    tray_tracking:
+      # 托盘被纸箱遮挡后继续使用已锁定位置；更换托盘时调用 reset 或重启应用。
+      lock_after_first_detection: true
+      ema_alpha: 0.35
+      update_min_iou: 0.30
+
+    matching:
+      min_iou: 0.12
+      max_center_distance_ratio: 0.60
+      max_orientation_diff_deg: 45.0
+      center_inside_bonus: 0.45
+      iou_weight: 0.35
+      center_weight: 0.20
+      orientation_weight: 0.10
+
+    temporal:
+      occupied_confirm_frames: 2
+      empty_confirm_frames: 5
+      # 第一阶段按真实放箱流程锁定占位，防止短时漏检后掩膜重新出现。
+      sticky_occupied: true
+
+    template:
+      # 从左下角 P3 开始，按画面中的顺时针方向：左下 -> 左上 -> 右上 -> 右下。
+      slot_order: [P3, P1, P2, P4]
+      # 下列坐标不是相对整个长方形托盘，而是相对 geometry 生成的居中正方形垛型区域。
+      # 0.65 / 0.35 对应纸箱长短边比例，四个矩形以横竖交错方式围成正方形。
+      slots:
+        - slot_id: P1
+          name: top_left_horizontal
+          orientation_deg: 0
+          polygon_norm: [[0.00, 0.00], [0.65, 0.00], [0.65, 0.35], [0.00, 0.35]]
+        - slot_id: P2
+          name: top_right_vertical
+          orientation_deg: 90
+          polygon_norm: [[0.65, 0.00], [1.00, 0.00], [1.00, 0.65], [0.65, 0.65]]
+        - slot_id: P3
+          name: bottom_left_vertical
+          orientation_deg: 90
+          polygon_norm: [[0.00, 0.35], [0.35, 0.35], [0.35, 1.00], [0.00, 1.00]]
+        - slot_id: P4
+          name: bottom_right_horizontal
+          orientation_deg: 0
+          polygon_norm: [[0.35, 0.65], [1.00, 0.65], [1.00, 1.00], [0.35, 1.00]]
+
+debug:
+  allow_injected_runtime_result: false
