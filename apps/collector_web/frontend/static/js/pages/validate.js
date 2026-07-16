@@ -602,6 +602,16 @@ export function initValidate() {
     roiResizeObserver.observe(roiStage);
   }
   window.addEventListener("visionops:settings-saved", () => currentResult && drawInferenceOverlay(canvas, image, currentResult));
+  window.addEventListener("visionops:camera-switched", () => {
+    window.setTimeout(async () => {
+      try {
+        await refreshRuntimeStatus();
+        await refreshLatestResult();
+      } catch (_) {
+        // Runtime restart is asynchronous; the normal realtime/status loop will retry.
+      }
+    }, 1500);
+  });
   renderEmptySummary("执行检测后显示目标摘要");
   setRealtimeButtonState(false);
   renderCapturePicker();

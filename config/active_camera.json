@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0",
+  "active_camera": "orbbec336l",
+  "cameras": {
+    "orbbec336l": {
+      "camera_model": "orbbec336l",
+      "display_name": "Orbbec Gemini 336L",
+      "base_url": "http://127.0.0.1:18182",
+      "public_port": 18182,
+      "service": "visionops-orbbec336l-bridge.service",
+      "watchdog_timer": "visionops-orbbec336l-bridge-watchdog.timer",
+      "snapshot_path": "/stream/snapshot.jpg",
+      "depth_path": "/stream/depth.png",
+      "depth_meta_path": "/stream/depth_meta",
+      "health_path": "/health",
+      "profiles_path": "/stream/profiles",
+      "mjpeg_path": "/stream.mjpeg",
+      "camera_info_path": "/stream/camera_info",
+      "deproject_path": "/api/coordinate/deproject"
+    },
+    "hp60c": {
+      "camera_model": "hp60c",
+      "display_name": "HP60C / HP60CN",
+      "base_url": "http://127.0.0.1:18181",
+      "public_port": 18181,
+      "service": "visionops-hp60c-sdk-bridge.service",
+      "watchdog_timer": "visionops-hp60c-sdk-bridge-watchdog.timer",
+      "snapshot_path": "/stream/snapshot.jpg",
+      "depth_path": "/stream/depth.png",
+      "depth_meta_path": "/stream/depth_meta",
+      "health_path": "/health",
+      "profiles_path": "/stream/profiles",
+      "mjpeg_path": "/stream.mjpeg",
+      "camera_info_path": "/stream/camera_info",
+      "deproject_path": "/api/coordinate/deproject"
+    }
+  }
+}

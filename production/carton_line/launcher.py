@@ -40,7 +40,7 @@ def _runtime(task: str, config: dict) -> int:
     )
     model_override = os.environ.get(f"VISIONOPS_{task.upper()}_MODEL_DIR")
     model_dir = Path(model_override or runtime["model_dir"])
-    bridge_url = os.environ.get("VISIONOPS_CAMERA_BRIDGE_URL", config["camera_bridge"]["base_url"])
+    bridge_url = os.environ.get("VISIONOPS_CAMERA_BRIDGE_URL_OVERRIDE", config["camera_bridge"]["base_url"])
     recovery = config.get("runtime_recovery", {})
 
     if not runtime_bin.is_file() or not os.access(runtime_bin, os.X_OK):
@@ -73,6 +73,10 @@ def _runtime(task: str, config: dict) -> int:
 
 def _collector(task: str, config: dict) -> int:
     collector = config["collectors"][task]
+    os.environ["VISIONOPS_COLLECTOR_RUNTIME_SERVICE"] = f"visionops-v3-runtime-{task}.service"
+    os.environ["VISIONOPS_COLLECTOR_CAMERA_DEPENDENT_SERVICES"] = (
+        "visionops-v3-ws-pick.service" if task == "pick" else "visionops-v3-robot-gateway.service"
+    )
     runtime_url = config["runtimes"][task]["url"]
     gateway_host = str(config["service"]["listen_host"])
     if gateway_host in {"0.0.0.0", "::"}:

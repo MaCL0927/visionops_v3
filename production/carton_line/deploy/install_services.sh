@@ -27,6 +27,8 @@ TUBE_PICK_UNITS=(
   visionops-v3-runtime-pick-watchdog.timer
   visionops-orbbec336l-bridge-watchdog.service
   visionops-orbbec336l-bridge-watchdog.timer
+  visionops-hp60c-sdk-bridge-watchdog.service
+  visionops-hp60c-sdk-bridge-watchdog.timer
 )
 TUBE_PICK_ENABLE_UNITS=(
   visionops-v3-runtime-pick.service
@@ -34,6 +36,7 @@ TUBE_PICK_ENABLE_UNITS=(
   visionops-v3-collector-pick.service
   visionops-v3-runtime-pick-watchdog.timer
   visionops-orbbec336l-bridge-watchdog.timer
+  visionops-hp60c-sdk-bridge-watchdog.timer
 )
 
 LEGACY_TUBE_PICK_UNITS=(
@@ -151,6 +154,14 @@ log_info "仓库目录: ${ROOT}"
 log_info "配置目录: ${CONFIG_DIR}"
 
 install -d -m 0755 "${CONFIG_DIR}" "${UNIT_DIR}"
+install -d -m 0775 "${ROOT}/config"
+if [[ ! -f "${ROOT}/config/active_camera.json" ]]; then
+  cat > "${ROOT}/config/active_camera.json" <<'EOF_CAMERA'
+{"schema_version":"1.0","active_camera":"orbbec336l"}
+EOF_CAMERA
+fi
+chmod 0664 "${ROOT}/config/active_camera.json" || true
+chown "${VISIONOPS_SERVICE_USER:-neardi}:${VISIONOPS_SERVICE_GROUP:-neardi}" "${ROOT}/config/active_camera.json" 2>/dev/null || true
 
 PYTHON_BIN="${VISIONOPS_VENV:-/opt/visionops/venv}/bin/python3"
 if [[ ! -x "${PYTHON_BIN}" ]]; then
@@ -171,12 +182,11 @@ if [[ ! -f "${ENV_FILE}" ]]; then
 VISIONOPS_V3_ROOT=${ROOT}
 VISIONOPS_VENV=/opt/visionops/venv
 VISIONOPS_CARTON_LINE_CONFIG=${LINE_CONFIG}
-VISIONOPS_CAMERA_BRIDGE_URL=http://127.0.0.1:18182
+VISIONOPS_CAMERA_SELECTION_FILE=${ROOT}/config/active_camera.json
 VISIONOPS_PARTITION_MODEL_DIR=${ROOT}/models/carton_partition_check/current
 VISIONOPS_TUBE_MODEL_DIR=${ROOT}/models/carton_tube_check/current
 VISIONOPS_PICK_MODEL_DIR=${ROOT}/models/tube_pick_vision/current
 VISIONOPS_PICK_RUNTIME_URL=http://127.0.0.1:28083
-VISIONOPS_CAMERA_BRIDGE_SERVICE=visionops-orbbec336l-bridge.service
 VISIONOPS_PICK_RUNTIME_SERVICE=visionops-v3-runtime-pick.service
 VISIONOPS_PICK_WS_SERVICE=visionops-v3-ws-pick.service
 VISIONOPS_PICK_WATCHDOG_STALE_MS=5000
@@ -208,7 +218,7 @@ append_env_default() {
   fi
 }
 append_env_default VISIONOPS_PICK_RUNTIME_URL http://127.0.0.1:28083
-append_env_default VISIONOPS_CAMERA_BRIDGE_SERVICE visionops-orbbec336l-bridge.service
+append_env_default VISIONOPS_CAMERA_SELECTION_FILE ${ROOT}/config/active_camera.json
 append_env_default VISIONOPS_PICK_RUNTIME_SERVICE visionops-v3-runtime-pick.service
 append_env_default VISIONOPS_PICK_WS_SERVICE visionops-v3-ws-pick.service
 append_env_default VISIONOPS_PICK_WATCHDOG_STALE_MS 5000
@@ -227,6 +237,16 @@ append_env_default VISIONOPS_CAMERA_WATCHDOG_REBOOT_ENABLED true
 append_env_default VISIONOPS_CAMERA_WATCHDOG_REBOOT_DELAY_S 5
 append_env_default VISIONOPS_CAMERA_WATCHDOG_REBOOT_ONCE_PER_INCIDENT true
 append_env_default VISIONOPS_CAMERA_WATCHDOG_PERSIST_DIR /var/lib/visionops_v3/watchdog
+append_env_default VISIONOPS_HP60C_BRIDGE_URL http://127.0.0.1:18181
+append_env_default VISIONOPS_HP60C_BRIDGE_SERVICE visionops-hp60c-sdk-bridge.service
+append_env_default VISIONOPS_HP60C_WATCHDOG_STALE_MS 5000
+append_env_default VISIONOPS_HP60C_WATCHDOG_UNHEALTHY_RESTART_AFTER_S 30
+append_env_default VISIONOPS_HP60C_WATCHDOG_COOLDOWN_S 60
+append_env_default VISIONOPS_HP60C_WATCHDOG_RECOVERY_WAIT_S 20
+append_env_default VISIONOPS_HP60C_WATCHDOG_MAX_SERVICE_RESTARTS 10
+append_env_default VISIONOPS_HP60C_WATCHDOG_REBOOT_ENABLED true
+append_env_default VISIONOPS_HP60C_WATCHDOG_REBOOT_DELAY_S 5
+append_env_default VISIONOPS_HP60C_WATCHDOG_PERSIST_DIR /var/lib/visionops_v3/watchdog
 
 log_info "清理旧 tube_pick TCP Client 服务..."
 for unit in "${LEGACY_TUBE_PICK_UNITS[@]}"; do
@@ -251,7 +271,10 @@ for unit in "${UNSELECTED_UNITS[@]}"; do
 done
 
 if [[ "${PROFILE}" == "tube-pick" ]]; then
-  chmod +x     "${SOURCE_DIR}/scripts/watch_pick_runtime.sh"     "${SOURCE_DIR}/scripts/watch_orbbec336l_bridge.sh"
+  chmod +x \
+    "${SOURCE_DIR}/scripts/watch_pick_runtime.sh" \
+    "${SOURCE_DIR}/scripts/watch_orbbec336l_bridge.sh" \
+    "${SOURCE_DIR}/scripts/watch_hp60c_bridge.sh"
 fi
 
 log_info "安装当前 profile 的服务..."

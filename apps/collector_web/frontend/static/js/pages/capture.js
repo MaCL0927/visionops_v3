@@ -483,6 +483,9 @@ export function initCapture() {
   document.getElementById("capture-timed-cancel")?.addEventListener("click", () => hideModal(timedModal));
   document.getElementById("capture-timed-confirm")?.addEventListener("click", startTimedCapture);
 
+  window.addEventListener("visionops:camera-switched", () => {
+    window.setTimeout(() => refreshCapture().catch(() => null), 1500);
+  });
   loadRecords(0);
   refreshTimedStatus();
   if (!timedStatusTimer) timedStatusTimer = window.setInterval(refreshTimedStatus, 2000);

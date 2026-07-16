@@ -55,7 +55,7 @@ visionops_v3/
 
 ### `edge/camera_bridge`
 
-封装厂商相机 SDK 和取流差异。当前包含 Orbbec Gemini 336L Bridge。
+封装厂商相机 SDK 和取流差异。当前包含 Orbbec Gemini 336L Bridge（18182）和 HP60C / HP60CN Angstrong SDK Bridge（18181）。两款 Bridge 可同时运行，`config/active_camera.json` 决定 Runtime、采集、模型验证和生产任务使用哪一款；详见 `docs/HP60C_ORBBEC_DUAL_CAMERA_INTEGRATION.md`。
 
 ### `edge/modbus_adapter`
 

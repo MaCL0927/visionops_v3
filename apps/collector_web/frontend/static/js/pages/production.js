@@ -265,6 +265,12 @@ export function initProduction() {
   viewToggle.addEventListener("click", () => showProductionView(activeView === "live" ? "status" : "live"));
   window.addEventListener("resize", redrawOverlayAfterLayout);
   window.addEventListener("visionops:settings-saved", redrawOverlayAfterLayout);
+  window.addEventListener("visionops:camera-switched", () => {
+    window.setTimeout(() => {
+      if (activeView === "live") productionInferOnce().catch(() => null);
+      else refreshProductionStatus().catch(() => null);
+    }, 1500);
+  });
   const evaluateBtn = document.getElementById("production-app-evaluate");
   if (evaluateBtn) {
     evaluateBtn.addEventListener("click", async () => {

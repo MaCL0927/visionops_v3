@@ -274,7 +274,7 @@
           <div>
             <div class="kicker">系统配置</div>
             <h2 id="settings-title">设置中心</h2>
-            <p>按现场使用习惯拆分为相机、视觉盒子、算法三个设置页面；相机设置已接入 Orbbec 336L SDK Bridge 设置 API；未检测到变更时不会重启服务。</p>
+            <p>按现场使用习惯拆分为相机、视觉盒子、算法三个设置页面；相机设置已接入 Orbbec 336L 与 HP60C 双 SDK Bridge 设置 API；未检测到变更时不会重启服务。</p>
           </div>
           <button id="close-settings" class="close-btn" aria-label="关闭设置">×</button>
         </div>
@@ -292,7 +292,7 @@
             <div class="settings-panel-head">
               <div>
                 <h3>相机设置</h3>
-                <p>统一管理 SDK Bridge 相机链路，当前优先接入 Orbbec Gemini 336L。</p>
+                <p>统一管理 SDK Bridge 相机链路，支持 Orbbec Gemini 336L 与 HP60C / HP60CN，并可切换当前图像源。</p>
               </div>
               <span class="settings-status-badge">SDK Bridge API</span>
             </div>
@@ -302,9 +302,8 @@
               <div class="settings-grid three">
                 <label class="setting-field">相机型号
                   <select id="setting-camera-model">
-                    <option value="orbbec336l">Orbbec Gemini 336L</option>
-                    <option value="hp60c" disabled>HP60C / HP60CN（后续接入）</option>
-                    <option value="auto">自动 / 当前按 Orbbec 处理</option>
+                    <option value="orbbec336l">Orbbec Gemini 336L（端口 18182）</option>
+                    <option value="hp60c">HP60C / HP60CN（端口 18181）</option>
                   </select>
                 </label>
                 <label class="setting-field">画面帧率 FPS
@@ -352,9 +351,9 @@
                 <label class="setting-field">RGB 数据优先级
                   <select id="setting-rgb-source-preference">
                     <option value="auto">自动</option>
-                    <option value="prefer_mjpeg">优先 MJPEG</option>
-                    <option value="prefer_rgb">优先 RGB</option>
-                    <option value="prefer_yuyv">优先 YUYV</option>
+                    <option value="mjpeg">优先 MJPEG</option>
+                    <option value="rgb">优先 RGB</option>
+                    <option value="yuyv">优先 YUYV</option>
                   </select>
                 </label>
               </div>
@@ -392,11 +391,20 @@
                 <label class="setting-field">RGB 通道顺序
                   <select id="setting-rgb-order"><option value="bgr">BGR</option><option value="rgb">RGB</option><option value="auto">自动</option></select>
                 </label>
-                <label class="setting-field">Orbbec 序列号
+                <label id="setting-orbbec-serial-field" class="setting-field">Orbbec 序列号
                   <input id="setting-orbbec-serial" placeholder="留空表示使用第一台设备">
                 </label>
+                <label id="setting-hp60c-config-field" class="setting-field" hidden>HP60C SDK 配置文件
+                  <input id="setting-hp60c-config-path" placeholder="Angstrong configurationfiles/*.json">
+                </label>
               </div>
-              <div class="settings-inline-status">这些字段变化时会写入 /opt/visionops_v3/edge/camera_bridge/orbbec336l_bridge/orbbec336l_bridge.env，并重启 visionops-orbbec336l-bridge.service。</div>
+              <div id="setting-hp60c-intrinsics" class="settings-grid four" hidden>
+                <label class="setting-field">HP60C fx<input id="setting-hp60c-fx" type="number" min="0" step="0.001" placeholder="0 表示未配置"></label>
+                <label class="setting-field">HP60C fy<input id="setting-hp60c-fy" type="number" min="0" step="0.001" placeholder="0 表示未配置"></label>
+                <label class="setting-field">HP60C cx<input id="setting-hp60c-cx" type="number" step="0.001" placeholder="主点 x"></label>
+                <label class="setting-field">HP60C cy<input id="setting-hp60c-cy" type="number" step="0.001" placeholder="主点 y"></label>
+              </div>
+              <div id="setting-camera-apply-hint" class="settings-inline-status">两款 Bridge 可同时运行。保存相机型号后会更新 active_camera.json 并重启当前 Runtime，采集、模型验证和生产画面将统一切换。</div>
             </div>
           </section>
 

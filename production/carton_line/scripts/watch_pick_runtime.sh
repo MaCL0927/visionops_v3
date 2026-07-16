@@ -9,9 +9,18 @@ set -euo pipefail
 #   3. Bridge 自身帧过期/不可访问：先重启 Bridge，再重启 Pick Runtime
 
 RUNTIME_SERVICE="${VISIONOPS_PICK_RUNTIME_SERVICE:-visionops-v3-runtime-pick.service}"
-BRIDGE_SERVICE="${VISIONOPS_CAMERA_BRIDGE_SERVICE:-visionops-orbbec336l-bridge.service}"
 RUNTIME_URL="${VISIONOPS_PICK_RUNTIME_URL:-http://127.0.0.1:28083}"
-BRIDGE_URL="${VISIONOPS_CAMERA_BRIDGE_URL:-http://127.0.0.1:18182}"
+SELECTION_FILE="${VISIONOPS_CAMERA_SELECTION_FILE:-/opt/visionops_v3/config/active_camera.json}"
+active_camera="$(sed -nE 's/.*"active_camera"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$SELECTION_FILE" 2>/dev/null | head -n1)"
+if [[ "$active_camera" == "hp60c" ]]; then
+  SELECTED_BRIDGE_SERVICE="visionops-hp60c-sdk-bridge.service"
+  SELECTED_BRIDGE_URL="http://127.0.0.1:18181"
+else
+  SELECTED_BRIDGE_SERVICE="visionops-orbbec336l-bridge.service"
+  SELECTED_BRIDGE_URL="http://127.0.0.1:18182"
+fi
+BRIDGE_SERVICE="${VISIONOPS_CAMERA_BRIDGE_SERVICE_OVERRIDE:-$SELECTED_BRIDGE_SERVICE}"
+BRIDGE_URL="${VISIONOPS_CAMERA_BRIDGE_URL_OVERRIDE:-$SELECTED_BRIDGE_URL}"
 STALE_MS="${VISIONOPS_PICK_WATCHDOG_STALE_MS:-5000}"
 COOLDOWN_S="${VISIONOPS_PICK_WATCHDOG_COOLDOWN_S:-30}"
 RECOVERY_WAIT_S="${VISIONOPS_PICK_WATCHDOG_RECOVERY_WAIT_S:-3}"

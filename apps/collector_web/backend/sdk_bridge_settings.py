@@ -1,4 +1,9 @@
-"""SDK Bridge 设置 API：读取 / 写入 Orbbec 336L env，并触发受限 systemd 重启。"""
+"""Unified SDK Bridge settings for Orbbec 336L and HP60C.
+
+Both bridges run on dedicated ports. Saving camera_model updates the shared active
+camera selection and restarts the current Runtime service, so every Web page
+continues to use /api/runtime/snapshot.jpg while the underlying bridge changes.
+"""
 
 from __future__ import annotations
 
@@ -10,20 +15,51 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
-from urllib.error import URLError, HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
-ORBBEC_ENV_DEFAULT = Path("/opt/visionops_v3/edge/camera_bridge/orbbec336l_bridge/orbbec336l_bridge.env")
-ORBBEC_SERVICE_NAME_DEFAULT = "visionops-orbbec336l-bridge.service"
-PROFILE_RE = re.compile(r"^orbbec:(\d+)x(\d+)@(\d+)$")
+from edge.camera_bridge.camera_selection import (
+    CAMERA_SPECS,
+    active_camera_spec,
+    normalize_camera_model,
+    read_camera_selection,
+    write_camera_selection,
+)
 
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROFILE_RE = re.compile(r"^[a-zA-Z0-9_-]+:(\d+)x(\d+)@(\d+)$")
 
-def orbbec_env_path() -> Path:
-    return Path(os.environ.get("VISIONOPS_ORBBEC336L_BRIDGE_ENV", str(ORBBEC_ENV_DEFAULT)))
-
-
-def orbbec_service_name() -> str:
-    return os.environ.get("VISIONOPS_ORBBEC336L_SERVICE", ORBBEC_SERVICE_NAME_DEFAULT)
+CAMERA_CONFIG: dict[str, dict[str, Any]] = {
+    "orbbec336l": {
+        "prefix": "VISIONOPS_ORBBEC336L_",
+        "env_path": Path(os.environ.get(
+            "VISIONOPS_ORBBEC336L_BRIDGE_ENV",
+            "/opt/visionops_v3/edge/camera_bridge/orbbec336l_bridge/orbbec336l_bridge.env",
+        )),
+        "service": os.environ.get("VISIONOPS_ORBBEC336L_SERVICE", "visionops-orbbec336l-bridge.service"),
+        "defaults": {
+            "HTTP_HOST": "0.0.0.0", "HTTP_PORT": "18182", "COLOR_WIDTH": "640", "COLOR_HEIGHT": "480",
+            "DEPTH_WIDTH": "640", "DEPTH_HEIGHT": "480", "FPS": "30", "MJPEG_FPS": "10",
+            "JPEG_QUALITY": "85", "FLIP_VERTICAL": "false", "FLIP_HORIZONTAL": "false",
+            "DEPTH_UNIT": "mm", "SERIAL": "",
+        },
+    },
+    "hp60c": {
+        "prefix": "VISIONOPS_HP60C_",
+        "env_path": Path(os.environ.get(
+            "VISIONOPS_HP60C_BRIDGE_ENV",
+            "/opt/visionops_v3/edge/camera_bridge/hp60c_bridge/hp60c_sdk_bridge.env",
+        )),
+        "service": os.environ.get("VISIONOPS_HP60C_SERVICE", "visionops-hp60c-sdk-bridge.service"),
+        "defaults": {
+            "HTTP_HOST": "0.0.0.0", "HTTP_PORT": "18181", "COLOR_WIDTH": "640", "COLOR_HEIGHT": "480",
+            "DEPTH_WIDTH": "640", "DEPTH_HEIGHT": "480", "FPS": "30", "MJPEG_FPS": "10",
+            "JPEG_QUALITY": "85", "FLIP_VERTICAL": "true", "FLIP_HORIZONTAL": "false",
+            "DEPTH_UNIT": "mm", "RGB_SOURCE": "auto", "RGB_ORDER": "bgr", "CONFIG": "",
+            "FX": "0", "FY": "0", "CX": "0", "CY": "0",
+        },
+    },
+}
 
 
 def read_env_file(path: Path) -> tuple[dict[str, str], list[str]]:
@@ -39,49 +75,61 @@ def read_env_file(path: Path) -> tuple[dict[str, str], list[str]]:
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, value = stripped.split("=", 1)
-        key = key.strip()
-        if not key or any(c.isspace() for c in key):
-            continue
-        values[key] = value.strip().strip('"').strip("'")
+        values[key.strip()] = value.strip().strip('"').strip("'")
     return values, lines
 
 
 def write_env_file(path: Path, existing_lines: list[str], updates: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     seen: set[str] = set()
-    out: list[str] = []
+    output: list[str] = []
     for line in existing_lines:
         stripped = line.strip()
         if stripped and not stripped.startswith("#") and "=" in stripped:
             key = stripped.split("=", 1)[0].strip()
             if key in updates:
-                out.append(f"{key}={updates[key]}")
+                output.append(f"{key}={updates[key]}")
                 seen.add(key)
                 continue
-        out.append(line)
+        output.append(line)
     missing = [key for key in updates if key not in seen]
     if missing:
-        if out and out[-1].strip():
-            out.append("")
-        out.append("# Updated by VisionOps Collector Web settings API")
-        for key in missing:
-            out.append(f"{key}={updates[key]}")
-    body = "\n".join(out).rstrip() + "\n"
-    tmp_fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+        if output and output[-1].strip():
+            output.append("")
+        output.append("# Updated by VisionOps Collector camera settings")
+        output.extend(f"{key}={updates[key]}" for key in missing)
+    body = "\n".join(output).rstrip() + "\n"
+
+    def direct_write(directory: Path) -> None:
+        fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(directory))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(body)
+            os.chmod(tmp_name, 0o664)
+            os.replace(tmp_name, path)
+        finally:
+            try:
+                if os.path.exists(tmp_name):
+                    os.unlink(tmp_name)
+            except OSError:
+                pass
+
     try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            f.write(body)
-        try:
-            os.chmod(tmp_name, path.stat().st_mode & 0o777)
-        except OSError:
-            os.chmod(tmp_name, 0o644)
-        os.replace(tmp_name, path)
+        direct_write(path.parent)
+        return
+    except PermissionError:
+        pass
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        command = ["install", "-m", "0664", tmp_name, str(path)] if os.geteuid() == 0 else ["sudo", "-n", "install", "-m", "0664", tmp_name, str(path)]
+        proc = subprocess.run(command, text=True, capture_output=True, timeout=8, check=False)
+        if proc.returncode != 0:
+            raise PermissionError(proc.stderr.strip() or f"无法写入 {path}")
     finally:
-        try:
-            if os.path.exists(tmp_name):
-                os.unlink(tmp_name)
-        except OSError:
-            pass
+        try: os.unlink(tmp_name)
+        except OSError: pass
 
 
 def parse_bool(value: Any, fallback: bool = False) -> bool:
@@ -89,12 +137,7 @@ def parse_bool(value: Any, fallback: bool = False) -> bool:
         return value
     if value is None:
         return fallback
-    s = str(value).strip().lower()
-    if s in {"1", "true", "yes", "on", "开启", "开"}:
-        return True
-    if s in {"0", "false", "no", "off", "关闭", "关"}:
-        return False
-    return fallback
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "开启", "开"}
 
 
 def clamp_int(value: Any, fallback: int, lo: int, hi: int) -> int:
@@ -105,401 +148,351 @@ def clamp_int(value: Any, fallback: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, number))
 
 
-def parse_orbbec_profile(profile_id: str) -> dict[str, int]:
-    match = PROFILE_RE.match(str(profile_id or "").strip())
+def camera_config(camera_model: str) -> dict[str, Any]:
+    model = normalize_camera_model(camera_model, "")
+    if model not in CAMERA_CONFIG:
+        raise ValueError(f"不支持的相机型号: {camera_model}")
+    return CAMERA_CONFIG[model]
+
+
+def env_value(values: dict[str, str], cfg: dict[str, Any], suffix: str) -> str:
+    return values.get(cfg["prefix"] + suffix, cfg["defaults"].get(suffix, ""))
+
+
+def profile_id(model: str, width: int, height: int, fps: int) -> str:
+    return f"{model}:{int(width)}x{int(height)}@{int(fps)}"
+
+
+def parse_profile(profile: str, expected_model: str) -> dict[str, int]:
+    match = PROFILE_RE.match(str(profile or "").strip())
     if not match:
-        raise ValueError(f"profile 格式非法: {profile_id!r}，期望 orbbec:WIDTHxHEIGHT@FPS")
-    return {
-        "width": int(match.group(1)),
-        "height": int(match.group(2)),
-        "fps": int(match.group(3)),
-    }
+        raise ValueError(f"profile 格式非法: {profile!r}")
+    prefix = str(profile).split(":", 1)[0]
+    if normalize_camera_model(prefix, "") != expected_model:
+        raise ValueError(f"profile {profile!r} 不属于 {expected_model}")
+    return {"width": int(match.group(1)), "height": int(match.group(2)), "fps": int(match.group(3))}
 
 
-def profile_id(width: int, height: int, fps: int) -> str:
-    return f"orbbec:{int(width)}x{int(height)}@{int(fps)}"
-
-
-def profile_label(width: int, height: int, fps: int, sensor: str, formats: list[str] | None = None) -> str:
+def make_profile(model: str, width: int, height: int, fps: int, sensor: str,
+                 formats: list[str] | None = None, source: str = "env") -> dict[str, Any]:
     prefix = "RGB" if sensor == "color" else "Depth"
-    suffix = f" ({'/'.join(formats)})" if formats else ""
-    return f"{prefix} {width}×{height} @ {fps} FPS{suffix}"
-
-
-def make_profile(width: int, height: int, fps: int, sensor: str, formats: list[str] | None = None, source: str = "env") -> dict[str, Any]:
+    suffix = f" ({'/'.join(formats or [])})" if formats else ""
     return {
-        "id": profile_id(width, height, fps),
-        "sensor": sensor,
-        "width": int(width),
-        "height": int(height),
-        "fps": int(fps),
-        "formats": formats or [],
-        "label": profile_label(width, height, fps, sensor, formats),
+        "id": profile_id(model, width, height, fps), "sensor": sensor,
+        "width": int(width), "height": int(height), "fps": int(fps),
+        "formats": formats or [], "label": f"{prefix} {width}×{height} @ {fps} FPS{suffix}",
         "source": source,
     }
 
 
-def current_profiles_from_env(values: dict[str, str]) -> tuple[dict[str, Any], dict[str, Any]]:
-    fps = clamp_int(values.get("VISIONOPS_ORBBEC336L_FPS"), 30, 1, 120)
-    color_w = clamp_int(values.get("VISIONOPS_ORBBEC336L_COLOR_WIDTH"), 1280, 0, 8192)
-    color_h = clamp_int(values.get("VISIONOPS_ORBBEC336L_COLOR_HEIGHT"), 720, 0, 8192)
-    depth_w = clamp_int(values.get("VISIONOPS_ORBBEC336L_DEPTH_WIDTH"), color_w or 1280, 0, 8192)
-    depth_h = clamp_int(values.get("VISIONOPS_ORBBEC336L_DEPTH_HEIGHT"), color_h or 720, 0, 8192)
+def current_profiles_from_env(model: str, values: dict[str, str]) -> tuple[dict[str, Any], dict[str, Any]]:
+    cfg = camera_config(model)
+    fps = clamp_int(env_value(values, cfg, "FPS"), 30, 1, 120)
+    color_w = clamp_int(env_value(values, cfg, "COLOR_WIDTH"), 640, 1, 8192)
+    color_h = clamp_int(env_value(values, cfg, "COLOR_HEIGHT"), 480, 1, 8192)
+    depth_w = clamp_int(env_value(values, cfg, "DEPTH_WIDTH"), color_w, 1, 8192)
+    depth_h = clamp_int(env_value(values, cfg, "DEPTH_HEIGHT"), color_h, 1, 8192)
     return (
-        make_profile(color_w, color_h, fps, "color", [], "env_current"),
-        make_profile(depth_w, depth_h, fps, "depth", ["Y16"], "env_current"),
+        make_profile(model, color_w, color_h, fps, "color", [], "env_current"),
+        make_profile(model, depth_w, depth_h, fps, "depth", ["Y16"], "env_current"),
     )
 
 
-def normalize_bridge_profiles(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    profiles = payload.get("profiles") if isinstance(payload.get("profiles"), dict) else payload
-    color_raw = profiles.get("color", []) if isinstance(profiles, dict) else []
-    depth_raw = profiles.get("depth", []) if isinstance(profiles, dict) else []
-
-    def normalize(items: list[Any], sensor: str) -> list[dict[str, Any]]:
-        grouped: dict[tuple[int, int, int], set[str]] = {}
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            width = clamp_int(item.get("width"), 0, 0, 8192)
-            height = clamp_int(item.get("height"), 0, 0, 8192)
-            fps = clamp_int(item.get("fps"), 0, 0, 240)
-            if width <= 0 or height <= 0 or fps <= 0:
-                continue
-            formats = item.get("formats")
-            if isinstance(formats, list):
-                fmt_values = {str(v) for v in formats if str(v)}
-            elif item.get("format"):
-                fmt_values = {str(item.get("format"))}
-            else:
-                fmt_values = set()
-            grouped.setdefault((width, height, fps), set()).update(fmt_values)
-        out = [make_profile(w, h, fps, sensor, sorted(fmts), "bridge_api") for (w, h, fps), fmts in grouped.items()]
-        return sorted(out, key=lambda p: (-p["width"] * p["height"], -p["fps"], p["id"]))
-
-    return normalize(color_raw, "color"), normalize(depth_raw, "depth")
-
-
-def bridge_base_url(values: dict[str, str]) -> str:
-    host = values.get("VISIONOPS_ORBBEC336L_HTTP_HOST", "127.0.0.1") or "127.0.0.1"
-    port = clamp_int(values.get("VISIONOPS_ORBBEC336L_HTTP_PORT"), 18182, 1, 65535)
+def bridge_base_url(model: str, values: dict[str, str]) -> str:
+    cfg = camera_config(model)
+    # HTTP_HOST=0.0.0.0 is a listen address, not a client target.
+    host = env_value(values, cfg, "HTTP_HOST") or "127.0.0.1"
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    port = clamp_int(env_value(values, cfg, "HTTP_PORT"), int(CAMERA_SPECS[model]["public_port"]), 1, 65535)
     return f"http://{host}:{port}"
 
 
 def fetch_json(url: str, timeout_s: float = 2.5) -> dict[str, Any]:
-    with urlopen(url, timeout=timeout_s) as response:  # noqa: S310 - local bridge URL only
-        content_type = response.headers.get("Content-Type", "")
+    with urlopen(url, timeout=timeout_s) as response:  # noqa: S310 - local bridge URL
         body = response.read(1024 * 1024)
-    if "json" not in content_type.lower():
-        raise ValueError(f"非 JSON 响应: {content_type}")
     data = json.loads(body.decode("utf-8"))
     if not isinstance(data, dict):
         raise ValueError("JSON 顶层不是对象")
     return data
 
 
-def collect_orbbec_profiles(values: dict[str, str], timeout_s: float = 2.5) -> dict[str, Any]:
-    base = bridge_base_url(values)
-    profile_url = f"{base}/stream/profiles"
-    current_color, current_depth = current_profiles_from_env(values)
-    try:
-        payload = fetch_json(profile_url, timeout_s=timeout_s)
-        color, depth = normalize_bridge_profiles(payload)
-        if color and depth:
-            return {
-                "source": "bridge_api",
-                "profile_url": profile_url,
-                "color": color,
-                "depth": depth,
-                "warning": None,
-            }
-        warning = "Bridge profile API 返回空列表，已回退到当前 env profile"
-    except (OSError, URLError, HTTPError, ValueError, json.JSONDecodeError) as error:
-        warning = f"无法从 Bridge 枚举 SDK profile，已回退到当前 env profile: {error}"
-    return {
-        "source": "env_current_fallback",
-        "profile_url": profile_url,
-        "color": [current_color],
-        "depth": [current_depth],
-        "warning": warning,
-    }
-
-
-def command_result(args: list[str], timeout_s: float = 8.0) -> dict[str, Any]:
-    started = time.monotonic()
-    try:
-        proc = subprocess.run(args, text=True, capture_output=True, timeout=timeout_s, check=False)
-    except FileNotFoundError as error:
-        return {"ok": False, "returncode": 127, "stdout": "", "stderr": str(error), "args": args, "elapsed_ms": round((time.monotonic() - started) * 1000, 3)}
-    except subprocess.TimeoutExpired as error:
-        return {"ok": False, "returncode": 124, "stdout": error.stdout or "", "stderr": error.stderr or "timeout", "args": args, "elapsed_ms": round((time.monotonic() - started) * 1000, 3)}
-    return {"ok": proc.returncode == 0, "returncode": proc.returncode, "stdout": proc.stdout.strip(), "stderr": proc.stderr.strip(), "args": args, "elapsed_ms": round((time.monotonic() - started) * 1000, 3)}
-
-
-def systemd_status() -> dict[str, Any]:
-    service = orbbec_service_name()
-    active = command_result(["systemctl", "is-active", service], timeout_s=3)
-    enabled = command_result(["systemctl", "is-enabled", service], timeout_s=3)
-    return {
-        "name": service,
-        "active": active.get("stdout") or "unknown",
-        "enabled": enabled.get("stdout") or "unknown",
-        "active_ok": active.get("ok", False),
-    }
-
-
-def restart_orbbec_service() -> dict[str, Any]:
-    service = orbbec_service_name()
-    result = command_result(["systemctl", "restart", service], timeout_s=12)
-    if not result["ok"] and os.geteuid() != 0:
-        sudo_result = command_result(["sudo", "-n", "systemctl", "restart", service], timeout_s=12)
-        sudo_result["fallback_from"] = result
-        result = sudo_result
-    return result
-
-
-def wait_bridge_health(values: dict[str, str], timeout_s: float = 4.0) -> dict[str, Any]:
-    base = bridge_base_url(values)
-    deadline = time.monotonic() + timeout_s
-    last_error = ""
-    while time.monotonic() < deadline:
-        try:
-            data = fetch_json(f"{base}/health", timeout_s=1.0)
-            return {"ok": True, "url": f"{base}/health", "response": data}
-        except Exception as error:  # noqa: BLE001 - convert to diagnostic JSON
-            last_error = str(error)
-            time.sleep(0.2)
-    return {"ok": False, "url": f"{base}/health", "error": last_error or "timeout"}
-
-
-def current_settings(values: dict[str, str]) -> dict[str, Any]:
-    color_profile, depth_profile = current_profiles_from_env(values)
-    return {
-        "camera_model": "orbbec336l",
-        "rgb_profile": color_profile["id"],
-        "depth_profile": depth_profile["id"],
-        "display_fps": clamp_int(values.get("VISIONOPS_ORBBEC336L_MJPEG_FPS"), 10, 1, 30),
-        "camera_jpeg_quality": clamp_int(values.get("VISIONOPS_ORBBEC336L_JPEG_QUALITY"), 85, 10, 100),
-        "flip_vertical": str(parse_bool(values.get("VISIONOPS_ORBBEC336L_FLIP_VERTICAL"), False)).lower(),
-        "flip_horizontal": str(parse_bool(values.get("VISIONOPS_ORBBEC336L_FLIP_HORIZONTAL"), False)).lower(),
-        "depth_unit": values.get("VISIONOPS_ORBBEC336L_DEPTH_UNIT", "mm") or "mm",
-        "orbbec_serial": values.get("VISIONOPS_ORBBEC336L_SERIAL", ""),
-        "bridge_url": bridge_base_url(values),
-    }
-
-
-def get_orbbec_settings_payload() -> dict[str, Any]:
-    path = orbbec_env_path()
-    values, _lines = read_env_file(path)
-    profiles = collect_orbbec_profiles(values)
-    return {
-        "schema_version": "1.0",
-        "message_type": "sdk_bridge_settings",
-        "camera_model": "orbbec336l",
-        "env_path": str(path),
-        "env_exists": path.exists(),
-        "service": systemd_status(),
-        "settings": current_settings(values),
-        "profiles": profiles,
-    }
-
-
-def validate_profile_against(profile: dict[str, int], candidates: list[dict[str, Any]]) -> bool:
-    wanted = profile_id(profile["width"], profile["height"], profile["fps"])
-    return any(item.get("id") == wanted for item in candidates)
-
-
-BOOL_ENV_KEYS = {
-    "VISIONOPS_ORBBEC336L_FLIP_VERTICAL",
-    "VISIONOPS_ORBBEC336L_FLIP_HORIZONTAL",
-}
-INT_ENV_KEYS = {
-    "VISIONOPS_ORBBEC336L_COLOR_WIDTH",
-    "VISIONOPS_ORBBEC336L_COLOR_HEIGHT",
-    "VISIONOPS_ORBBEC336L_DEPTH_WIDTH",
-    "VISIONOPS_ORBBEC336L_DEPTH_HEIGHT",
-    "VISIONOPS_ORBBEC336L_FPS",
-    "VISIONOPS_ORBBEC336L_JPEG_QUALITY",
-    "VISIONOPS_ORBBEC336L_MJPEG_FPS",
-}
-
-
-def env_value_matches(values: dict[str, str], key: str, wanted: str) -> bool:
-    if key not in values:
-        return False
-    current = values.get(key, "")
-    if key in BOOL_ENV_KEYS:
-        return parse_bool(current) == parse_bool(wanted)
-    if key in INT_ENV_KEYS:
-        try:
-            return int(str(current).strip()) == int(str(wanted).strip())
-        except (TypeError, ValueError):
-            return str(current).strip() == str(wanted).strip()
-    return str(current).strip() == str(wanted).strip()
-
-
-def changed_env_keys(values: dict[str, str], updates: dict[str, str]) -> list[str]:
-    return [key for key, wanted in updates.items() if not env_value_matches(values, key, wanted)]
-
-
-def profiles_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
-    """Use profiles previously enumerated by GET /settings to avoid re-enumerating SDK during POST."""
-    profiles = payload.get("known_profiles")
-    if not isinstance(profiles, dict):
-        return None
-    color = profiles.get("color")
-    depth = profiles.get("depth")
-    if not isinstance(color, list) or not isinstance(depth, list) or not color or not depth:
-        return None
-
-    def clean(items: list[Any], sensor: str) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for item in items:
+def normalize_bridge_profiles(model: str, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    profiles = payload.get("profiles") if isinstance(payload.get("profiles"), dict) else payload
+    def normalize(items: Any, sensor: str) -> list[dict[str, Any]]:
+        grouped: dict[tuple[int, int, int], set[str]] = {}
+        for item in items if isinstance(items, list) else []:
             if not isinstance(item, dict):
                 continue
             width = clamp_int(item.get("width"), 0, 0, 8192)
             height = clamp_int(item.get("height"), 0, 0, 8192)
             fps = clamp_int(item.get("fps"), 0, 0, 240)
-            if width <= 0 or height <= 0 or fps <= 0:
+            if not width or not height or not fps:
                 continue
-            formats_raw = item.get("formats")
-            formats = [str(v) for v in formats_raw] if isinstance(formats_raw, list) else []
-            out.append(make_profile(width, height, fps, sensor, formats, "frontend_cached"))
-        return out
+            formats = item.get("formats") if isinstance(item.get("formats"), list) else [item.get("format")]
+            grouped.setdefault((width, height, fps), set()).update(str(v) for v in formats if v)
+        return sorted(
+            [make_profile(model, w, h, fps, sensor, sorted(fmts), "bridge_api") for (w, h, fps), fmts in grouped.items()],
+            key=lambda p: (-p["width"] * p["height"], -p["fps"], p["id"]),
+        )
+    return normalize(profiles.get("color", []) if isinstance(profiles, dict) else [], "color"), normalize(profiles.get("depth", []) if isinstance(profiles, dict) else [], "depth")
 
-    color_clean = clean(color, "color")
-    depth_clean = clean(depth, "depth")
-    if not color_clean or not depth_clean:
-        return None
+
+def collect_profiles(model: str, values: dict[str, str]) -> dict[str, Any]:
+    profile_url = bridge_base_url(model, values) + CAMERA_SPECS[model]["profiles_path"]
+    fallback_color, fallback_depth = current_profiles_from_env(model, values)
+    try:
+        color, depth = normalize_bridge_profiles(model, fetch_json(profile_url))
+        if color and depth:
+            return {"source": "bridge_api", "profile_url": profile_url, "color": color, "depth": depth, "warning": None}
+        warning = "Bridge profile API 返回空列表，已回退到 env"
+    except (OSError, URLError, HTTPError, ValueError, json.JSONDecodeError) as error:
+        warning = f"无法从 Bridge 枚举 profile，已回退到 env: {error}"
+    return {"source": "env_current_fallback", "profile_url": profile_url, "color": [fallback_color], "depth": [fallback_depth], "warning": warning}
+
+
+def command_result(args: list[str], timeout_s: float = 15.0) -> dict[str, Any]:
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(args, text=True, capture_output=True, timeout=timeout_s, check=False)
+        return {"ok": proc.returncode == 0, "returncode": proc.returncode, "stdout": proc.stdout.strip(), "stderr": proc.stderr.strip(), "args": args, "elapsed_ms": round((time.monotonic()-started)*1000, 3)}
+    except FileNotFoundError as error:
+        return {"ok": False, "returncode": 127, "stdout": "", "stderr": str(error), "args": args}
+    except subprocess.TimeoutExpired as error:
+        return {"ok": False, "returncode": 124, "stdout": error.stdout or "", "stderr": error.stderr or "timeout", "args": args}
+
+
+def service_status(service: str) -> dict[str, Any]:
+    active = command_result(["systemctl", "is-active", service], 3)
+    enabled = command_result(["systemctl", "is-enabled", service], 3)
+    return {"name": service, "active": active.get("stdout") or "unknown", "enabled": enabled.get("stdout") or "unknown", "active_ok": active.get("ok", False)}
+
+
+def restart_service(service: str) -> dict[str, Any]:
+    result = command_result(["systemctl", "restart", service], 18)
+    if not result["ok"] and os.geteuid() != 0:
+        fallback = command_result(["sudo", "-n", "systemctl", "restart", service], 18)
+        fallback["fallback_from"] = result
+        result = fallback
+    return result
+
+
+def wait_bridge_health(model: str, values: dict[str, str], timeout_s: float = 12.0) -> dict[str, Any]:
+    """Wait until the selected Bridge is reachable and has fresh RGB/depth frames."""
+    url = bridge_base_url(model, values) + CAMERA_SPECS[model]["health_path"]
+    deadline = time.monotonic() + timeout_s
+    last_error = ""
+    last_response: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        try:
+            data = fetch_json(url, 1.0)
+            last_response = data
+            if data.get("camera_connected") is True:
+                return {"ok": True, "url": url, "response": data}
+            last_error = str(data.get("error") or data.get("camera_state") or "camera has no fresh RGB/depth frame")
+        except Exception as error:  # noqa: BLE001
+            last_error = str(error)
+        time.sleep(0.25)
+    return {"ok": False, "url": url, "error": last_error or "timeout", "response": last_response}
+
+
+def current_settings(model: str, values: dict[str, str]) -> dict[str, Any]:
+    cfg = camera_config(model)
+    color, depth = current_profiles_from_env(model, values)
+    result = {
+        "camera_model": model, "rgb_profile": color["id"], "depth_profile": depth["id"],
+        "display_fps": clamp_int(env_value(values, cfg, "MJPEG_FPS"), 10, 1, 30),
+        "camera_jpeg_quality": clamp_int(env_value(values, cfg, "JPEG_QUALITY"), 85, 10, 100),
+        "flip_vertical": str(parse_bool(env_value(values, cfg, "FLIP_VERTICAL"), model == "hp60c")).lower(),
+        "flip_horizontal": str(parse_bool(env_value(values, cfg, "FLIP_HORIZONTAL"), False)).lower(),
+        "depth_unit": env_value(values, cfg, "DEPTH_UNIT") or "mm",
+        "bridge_url": bridge_base_url(model, values),
+        "orbbec_serial": env_value(values, cfg, "SERIAL") if model == "orbbec336l" else "",
+        "rgb_source_preference": env_value(values, cfg, "RGB_SOURCE") if model == "hp60c" else "auto",
+        "rgb_order": env_value(values, cfg, "RGB_ORDER") if model == "hp60c" else "auto",
+        "hp60c_config_path": env_value(values, cfg, "CONFIG") if model == "hp60c" else "",
+        "hp60c_fx": env_value(values, cfg, "FX") if model == "hp60c" else "",
+        "hp60c_fy": env_value(values, cfg, "FY") if model == "hp60c" else "",
+        "hp60c_cx": env_value(values, cfg, "CX") if model == "hp60c" else "",
+        "hp60c_cy": env_value(values, cfg, "CY") if model == "hp60c" else "",
+        "profile_edit_mode": "vendor_config_file" if model == "hp60c" else "sdk_profile",
+    }
+    return result
+
+
+def get_sdk_bridge_settings_payload(camera_model: str | None = None) -> dict[str, Any]:
+    selection = read_camera_selection()
+    active = normalize_camera_model(selection.get("active_camera"), "orbbec336l")
+    model = normalize_camera_model(camera_model, active)
+    cfg = camera_config(model)
+    path: Path = cfg["env_path"]
+    values, _ = read_env_file(path)
     return {
-        "source": "frontend_cached",
-        "profile_url": profiles.get("profile_url"),
-        "color": color_clean,
-        "depth": depth_clean,
-        "warning": "使用设置页已枚举的 SDK profile 校验，保存时不重复访问 /stream/profiles。",
+        "schema_version": "2.0", "message_type": "sdk_bridge_settings",
+        "active_camera": active, "camera_model": model,
+        "available_cameras": [
+            {"camera_model": key, "display_name": CAMERA_SPECS[key]["display_name"], "base_url": CAMERA_SPECS[key]["base_url"], "service": CAMERA_CONFIG[key]["service"]}
+            for key in ("orbbec336l", "hp60c")
+        ],
+        "selection_path": selection["path"], "env_path": str(path), "env_exists": path.exists(),
+        "service": service_status(cfg["service"]), "settings": current_settings(model, values),
+        "profiles": collect_profiles(model, values),
     }
 
 
-def apply_orbbec_settings(payload: dict[str, Any]) -> dict[str, Any]:
-    apply_started = time.monotonic()
-    timings: dict[str, float] = {}
+def _changed(values: dict[str, str], updates: dict[str, str]) -> list[str]:
+    return [key for key, value in updates.items() if str(values.get(key, "")).strip().lower() != str(value).strip().lower()]
 
-    def mark(name: str, started: float) -> None:
-        timings[name] = round((time.monotonic() - started) * 1000, 3)
 
-    if str(payload.get("camera_model", "orbbec336l")) not in {"orbbec336l", "auto", ""}:
-        raise ValueError("当前设置 API 只支持 Orbbec Gemini 336L")
-    rgb = parse_orbbec_profile(str(payload.get("rgb_profile") or ""))
-    depth = parse_orbbec_profile(str(payload.get("depth_profile") or ""))
-    if rgb["fps"] != depth["fps"]:
-        raise ValueError("当前 Orbbec Bridge env 只有一个 VISIONOPS_ORBBEC336L_FPS，RGB 与 Depth FPS 必须一致")
+def _ordered_unique(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for item in items:
+        value = item.strip()
+        if value and value not in seen:
+            seen.add(value)
+            output.append(value)
+    return output
 
-    path = orbbec_env_path()
-    step_started = time.monotonic()
+
+def _runtime_service_candidates() -> list[str]:
+    explicit = [item.strip() for item in os.environ.get("VISIONOPS_COLLECTOR_RUNTIME_SERVICE", "").split(",") if item.strip()]
+    return _ordered_unique(explicit + [
+        "visionops-v3-runtime-partition.service",
+        "visionops-v3-runtime-tube.service",
+        "visionops-v3-runtime-pick.service",
+        "visionops-v3-carton-palletizing-runtime.service",
+    ])
+
+
+def _camera_dependent_service_candidates() -> list[str]:
+    explicit = [item.strip() for item in os.environ.get("VISIONOPS_COLLECTOR_CAMERA_DEPENDENT_SERVICES", "").split(",") if item.strip()]
+    return _ordered_unique(explicit + [
+        "visionops-v3-robot-gateway.service",
+        "visionops-v3-ws-pick.service",
+        "visionops-v3-carton-palletizing-app.service",
+    ])
+
+
+def restart_camera_consumers() -> list[dict[str, Any]]:
+    """Restart every active process that reads the selected Bridge at process start."""
+    results: list[dict[str, Any]] = []
+    # Runtime first, then RGB-D business services so consumers see the new Runtime/Bridge.
+    for role, services in (
+        ("runtime", _runtime_service_candidates()),
+        ("business", _camera_dependent_service_candidates()),
+    ):
+        for service in services:
+            active = command_result(["systemctl", "is-active", "--quiet", service], 3)
+            if not active["ok"]:
+                continue
+            result = restart_service(service)
+            result["service"] = service
+            result["role"] = role
+            results.append(result)
+    return results
+
+
+def apply_sdk_bridge_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    started = time.monotonic()
+    model = normalize_camera_model(payload.get("camera_model"), "")
+    if model not in CAMERA_CONFIG:
+        raise ValueError("camera_model 必须为 orbbec336l 或 hp60c")
+    cfg = camera_config(model)
+    path: Path = cfg["env_path"]
     values, lines = read_env_file(path)
-    mark("read_env_ms", step_started)
-
-    step_started = time.monotonic()
-    profiles = profiles_from_payload(payload)
-    if profiles is None:
-        # Fallback only. Normal Web flow sends known_profiles from the previous GET request.
-        profiles = collect_orbbec_profiles(values, timeout_s=1.0)
-    mark("profile_validation_ms", step_started)
-
-    if profiles.get("source") in {"bridge_api", "frontend_cached"}:
-        if not validate_profile_against(rgb, profiles.get("color", [])):
-            raise ValueError(f"RGB profile 不在 SDK 支持列表中: {profile_id(**rgb)}")
-        if not validate_profile_against(depth, profiles.get("depth", [])):
-            raise ValueError(f"Depth profile 不在 SDK 支持列表中: {profile_id(**depth)}")
-
-    jpeg_quality = clamp_int(payload.get("camera_jpeg_quality"), 85, 10, 100)
-    display_fps = clamp_int(payload.get("display_fps"), clamp_int(values.get("VISIONOPS_ORBBEC336L_MJPEG_FPS"), 10, 1, 30), 1, 30)
-    depth_unit = str(payload.get("depth_unit") or values.get("VISIONOPS_ORBBEC336L_DEPTH_UNIT") or "mm").strip()
-    if depth_unit not in {"mm", "raw_uint16"}:
-        raise ValueError("depth_unit 只支持 mm 或 raw_uint16")
-
+    color = parse_profile(str(payload.get("rgb_profile") or ""), model)
+    depth = parse_profile(str(payload.get("depth_profile") or ""), model)
+    if color["fps"] != depth["fps"]:
+        raise ValueError("RGB 与 Depth FPS 必须一致")
+    prefix = cfg["prefix"]
     updates = {
-        "VISIONOPS_ORBBEC336L_COLOR_WIDTH": str(rgb["width"]),
-        "VISIONOPS_ORBBEC336L_COLOR_HEIGHT": str(rgb["height"]),
-        "VISIONOPS_ORBBEC336L_DEPTH_WIDTH": str(depth["width"]),
-        "VISIONOPS_ORBBEC336L_DEPTH_HEIGHT": str(depth["height"]),
-        "VISIONOPS_ORBBEC336L_FPS": str(rgb["fps"]),
-        "VISIONOPS_ORBBEC336L_JPEG_QUALITY": str(jpeg_quality),
-        "VISIONOPS_ORBBEC336L_MJPEG_FPS": str(display_fps),
-        "VISIONOPS_ORBBEC336L_FLIP_VERTICAL": "true" if parse_bool(payload.get("flip_vertical"), False) else "false",
-        "VISIONOPS_ORBBEC336L_FLIP_HORIZONTAL": "true" if parse_bool(payload.get("flip_horizontal"), False) else "false",
-        "VISIONOPS_ORBBEC336L_DEPTH_UNIT": depth_unit,
-        "VISIONOPS_ORBBEC336L_SERIAL": str(payload.get("orbbec_serial") or "").strip(),
+        prefix + "COLOR_WIDTH": str(color["width"]),
+        prefix + "COLOR_HEIGHT": str(color["height"]),
+        prefix + "DEPTH_WIDTH": str(depth["width"]),
+        prefix + "DEPTH_HEIGHT": str(depth["height"]),
+        prefix + "FPS": str(color["fps"]),
+        prefix + "MJPEG_FPS": str(clamp_int(payload.get("display_fps"), 10, 1, 30)),
+        prefix + "JPEG_QUALITY": str(clamp_int(payload.get("camera_jpeg_quality"), 85, 10, 100)),
+        prefix + "FLIP_VERTICAL": str(parse_bool(payload.get("flip_vertical"), model == "hp60c")).lower(),
+        prefix + "FLIP_HORIZONTAL": str(parse_bool(payload.get("flip_horizontal"), False)).lower(),
+        prefix + "DEPTH_UNIT": str(payload.get("depth_unit") or "mm"),
     }
+    if model == "orbbec336l":
+        updates[prefix + "SERIAL"] = str(payload.get("orbbec_serial") or "").strip()
+    else:
+        source = str(payload.get("rgb_source_preference") or "auto").strip().lower()
+        if source not in {"auto", "mjpeg", "rgb", "yuyv"}:
+            raise ValueError("HP60C RGB source 必须为 auto/mjpeg/rgb/yuyv")
+        order = str(payload.get("rgb_order") or "bgr").strip().lower()
+        if order not in {"bgr", "rgb"}:
+            raise ValueError("HP60C RGB order 必须为 bgr/rgb")
+        updates[prefix + "RGB_SOURCE"] = source
+        updates[prefix + "RGB_ORDER"] = order
+        config_path = str(payload.get("hp60c_config_path") or env_value(values, cfg, "CONFIG")).strip()
+        if config_path:
+            updates[prefix + "CONFIG"] = config_path
+        for suffix, key in (("FX", "hp60c_fx"), ("FY", "hp60c_fy"), ("CX", "hp60c_cx"), ("CY", "hp60c_cy")):
+            raw = payload.get(key, env_value(values, cfg, suffix))
+            try:
+                value = float(raw or 0)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"{key} 必须为数字") from error
+            if suffix in {"FX", "FY"} and value < 0:
+                raise ValueError(f"{key} 不能小于 0")
+            updates[prefix + suffix] = f"{value:.9g}"
 
-    changed_keys = changed_env_keys(values, updates)
-    merged_values = {**values, **updates}
+    changed_keys = _changed(values, updates)
+    if changed_keys:
+        write_env_file(path, lines, updates)
 
-    if not changed_keys:
-        timings["write_env_ms"] = 0.0
-        timings["restart_service_ms"] = 0.0
-        timings["wait_health_ms"] = 0.0
-        step_started = time.monotonic()
-        service = systemd_status()
-        mark("systemd_status_ms", step_started)
-        timings["total_apply_ms"] = round((time.monotonic() - apply_started) * 1000, 3)
-        return {
-            "schema_version": "1.0",
-            "message_type": "sdk_bridge_settings_apply_result",
-            "status": "ok",
-            "camera_model": "orbbec336l",
-            "env_path": str(path),
-            "backup_path": None,
-            "backup_enabled": False,
-            "changed": False,
-            "changed_keys": [],
-            "skipped_restart": True,
-            "applied": updates,
-            "restart": {"ok": True, "skipped": True, "reason": "env unchanged"},
-            "health": {"ok": True, "skipped": True, "reason": "env unchanged"},
-            "service": service,
-            "settings": current_settings(merged_values),
-            "profiles": profiles,
-            "profile_refresh_skipped_after_apply": True,
-            "apply_timings_ms": timings,
-        }
+    selection_before = active_camera_spec()["camera_model"]
+    switch_changed = selection_before != model
+    bridge_restart: dict[str, Any] | None = None
+    bridge_health: dict[str, Any] | None = None
 
-    step_started = time.monotonic()
-    write_env_file(path, lines, updates)
-    mark("write_env_ms", step_started)
+    # Verify the selected Bridge before publishing the camera selection. This prevents
+    # a failed HP60C/336L startup from switching every Web page to a dead source.
+    if changed_keys or switch_changed:
+        bridge_restart = restart_service(cfg["service"])
+        if not bridge_restart.get("ok"):
+            raise RuntimeError(
+                f"重启 {cfg['service']} 失败: "
+                f"{bridge_restart.get('stderr') or bridge_restart.get('stdout') or 'unknown error'}"
+            )
+        updated_values, _ = read_env_file(path)
+        bridge_health = wait_bridge_health(model, updated_values)
+        if not bridge_health.get("ok"):
+            raise RuntimeError(
+                f"{CAMERA_SPECS[model]['display_name']} Bridge 重启后没有新 RGB/Depth 帧: "
+                f"{bridge_health.get('error') or 'health timeout'}"
+            )
 
-    step_started = time.monotonic()
-    restart = restart_orbbec_service()
-    mark("restart_service_ms", step_started)
+    selection = write_camera_selection(model) if switch_changed else read_camera_selection()
+    consumer_restarts: list[dict[str, Any]] = []
+    if switch_changed or changed_keys:
+        consumer_restarts = restart_camera_consumers()
+        failed = [item for item in consumer_restarts if not item.get("ok")]
+        if failed:
+            details = "; ".join(
+                f"{item.get('service')}: {item.get('stderr') or item.get('stdout') or item.get('returncode')}"
+                for item in failed
+            )
+            raise RuntimeError(f"相机已应用，但重启图像消费者失败: {details}")
 
-    step_started = time.monotonic()
-    health = wait_bridge_health(merged_values, timeout_s=4.0) if restart.get("ok") else {"ok": False, "error": "service restart failed"}
-    mark("wait_health_ms", step_started)
-
-    step_started = time.monotonic()
-    service = systemd_status()
-    mark("systemd_status_ms", step_started)
-    timings["total_apply_ms"] = round((time.monotonic() - apply_started) * 1000, 3)
-
-    # Do not call /stream/profiles again here. SDK profile enumeration can be slow and was already done on GET.
-    return {
-        "schema_version": "1.0",
-        "message_type": "sdk_bridge_settings_apply_result",
-        "status": "ok" if restart.get("ok") and health.get("ok") else "error",
-        "camera_model": "orbbec336l",
-        "env_path": str(path),
-        "backup_path": None,
-        "backup_enabled": False,
-        "changed": True,
-        "changed_keys": changed_keys,
-        "skipped_restart": False,
-        "applied": updates,
-        "restart": restart,
-        "health": health,
-        "service": service,
-        "settings": current_settings(merged_values),
-        "profiles": profiles,
-        "profile_refresh_skipped_after_apply": True,
-        "apply_timings_ms": timings,
-    }
+    response = get_sdk_bridge_settings_payload(model)
+    response.update({
+        "changed": bool(changed_keys or switch_changed),
+        "changed_env_keys": changed_keys,
+        "camera_switched": switch_changed,
+        "active_camera": model,
+        "selection": selection,
+        "bridge_restart": bridge_restart,
+        "bridge_health": bridge_health,
+        "consumer_restarts": consumer_restarts,
+        # Backward-compatible response field used by earlier frontend/tests.
+        "runtime_restarts": [item for item in consumer_restarts if item.get("role") == "runtime"],
+        "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+    })
+    return response
 

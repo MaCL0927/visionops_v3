@@ -9,6 +9,8 @@ from urllib.parse import urlparse
 
 import yaml
 
+from edge.camera_bridge.camera_selection import apply_active_camera_to_config
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 LINE_ROOT = Path(__file__).resolve().parents[1]
@@ -329,6 +331,7 @@ def load_config(path: str | None) -> dict[str, Any]:
             raise ValueError("产线配置 kind 必须为 production_line")
         config = _merge(config, document)
 
+    apply_active_camera_to_config(config)
     service = config["service"]
     modbus = config["modbus"]
     for key in ("listen_port", "partition_app_port", "tube_app_port"):

@@ -18,7 +18,7 @@ from .config_loader import CollectorConfig, load_config
 from .model_catalog import find_scanned_model, scan_model_catalog
 from .response_utils import error_document, send_bytes, send_json, timestamp_ms
 from .runtime_client import RuntimeClient, RuntimeResponse, RuntimeUnavailable
-from .sdk_bridge_settings import apply_orbbec_settings, get_orbbec_settings_payload
+from .sdk_bridge_settings import apply_sdk_bridge_settings, get_sdk_bridge_settings_payload
 from .algorithm_settings import apply_algorithm_settings, get_algorithm_settings_payload
 from .vision_box_settings import apply_vision_box_settings, get_vision_box_settings_payload, load_vision_box_settings
 from .timed_capture import TimedCaptureController
@@ -101,8 +101,8 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/models":
             self._send_model_catalog()
             return
-        if path == "/api/settings/sdk_bridge/orbbec336l":
-            self._send_orbbec_settings()
+        if path in {"/api/settings/sdk_bridge", "/api/settings/sdk_bridge/orbbec336l", "/api/settings/sdk_bridge/hp60c"}:
+            self._send_sdk_bridge_settings(path)
             return
         if path == "/api/settings/algorithm":
             self._send_algorithm_settings()
@@ -145,8 +145,8 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/models/switch":
             self._switch_model()
             return
-        if path == "/api/settings/sdk_bridge/orbbec336l":
-            self._apply_orbbec_settings()
+        if path in {"/api/settings/sdk_bridge", "/api/settings/sdk_bridge/orbbec336l", "/api/settings/sdk_bridge/hp60c"}:
+            self._apply_sdk_bridge_settings(path)
             return
         if path == "/api/settings/algorithm":
             self._apply_algorithm_settings()
@@ -486,54 +486,49 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             result["runtime_reload"] = {"attempted": False, "ok": None}
         send_json(self, 200, result)
 
-    def _send_orbbec_settings(self) -> None:
+    def _send_sdk_bridge_settings(self, route_path: str) -> None:
+        query = parse_qs(urlsplit(self.path).query)
+        requested = (query.get("camera_model") or [""])[0].strip() or None
+        if route_path.endswith("/orbbec336l"):
+            requested = "orbbec336l"
+        elif route_path.endswith("/hp60c"):
+            requested = "hp60c"
         try:
-            payload = get_orbbec_settings_payload()
-        except Exception as error:  # noqa: BLE001 - expose local settings diagnostics
+            payload = get_sdk_bridge_settings_payload(requested)
+        except Exception as error:  # noqa: BLE001
             self._send_collector_error(
-                500,
-                "SDK_BRIDGE_SETTINGS_READ_FAILED",
-                "读取 Orbbec 336L SDK Bridge 设置失败",
-                True,
-                detail=str(error),
+                500, "SDK_BRIDGE_SETTINGS_READ_FAILED",
+                "读取相机 SDK Bridge 设置失败", True, detail=str(error),
             )
             return
         send_json(self, 200, payload)
 
-    def _apply_orbbec_settings(self) -> None:
+    def _apply_sdk_bridge_settings(self, route_path: str) -> None:
         payload = self._read_json_body()
         if payload is None:
             return
+        if route_path.endswith("/orbbec336l"):
+            payload["camera_model"] = "orbbec336l"
+        elif route_path.endswith("/hp60c"):
+            payload["camera_model"] = "hp60c"
         try:
-            result = apply_orbbec_settings(payload)
+            result = apply_sdk_bridge_settings(payload)
         except ValueError as error:
-            self._send_collector_error(
-                400,
-                "SDK_BRIDGE_SETTINGS_INVALID",
-                str(error),
-                True,
-            )
+            self._send_collector_error(400, "SDK_BRIDGE_SETTINGS_INVALID", str(error), True)
             return
         except PermissionError as error:
             self._send_collector_error(
-                403,
-                "SDK_BRIDGE_SETTINGS_PERMISSION_DENIED",
-                "写入 Bridge env 或重启服务权限不足",
-                True,
-                detail=str(error),
+                403, "SDK_BRIDGE_SETTINGS_PERMISSION_DENIED",
+                "写入 Bridge env、相机选择文件或重启服务权限不足", True, detail=str(error),
             )
             return
-        except Exception as error:  # noqa: BLE001 - expose local apply diagnostics
+        except Exception as error:  # noqa: BLE001
             self._send_collector_error(
-                500,
-                "SDK_BRIDGE_SETTINGS_APPLY_FAILED",
-                "应用 Orbbec 336L SDK Bridge 设置失败",
-                True,
-                detail=str(error),
+                500, "SDK_BRIDGE_SETTINGS_APPLY_FAILED",
+                "应用相机 SDK Bridge 设置失败", True, detail=str(error),
             )
             return
-        status_code = 200 if result.get("status") == "ok" else 500
-        send_json(self, status_code, result)
+        send_json(self, 200, result)
 
     def _send_model_catalog(self) -> None:
         current_model: dict[str, Any] | None = None

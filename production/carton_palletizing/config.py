@@ -9,6 +9,8 @@ from urllib.parse import urlparse
 
 import yaml
 
+from edge.camera_bridge.camera_selection import apply_active_camera_to_config
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "production/carton_palletizing/config/line.yaml"
@@ -337,6 +339,7 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     elif path:
         raise ValueError(f"配置文件不存在: {source}")
 
+    apply_active_camera_to_config(config)
     config["camera_bridge"]["base_url"] = _url(config["camera_bridge"]["base_url"], "camera_bridge.base_url")
     for key, default in (("snapshot_path", "/stream/snapshot.jpg"), ("depth_path", "/stream/depth.png"), ("health_path", "/health")):
         value = str(config["camera_bridge"].get(key) or default).strip()

@@ -167,6 +167,7 @@ pre { margin:0; max-height:390px; overflow:auto; padding:14px; border-radius:12p
 .settings-grid { display:grid; gap:12px; }
 .settings-grid.two { grid-template-columns:repeat(2,minmax(0,1fr)); }
 .settings-grid.three { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.settings-grid.four { grid-template-columns:repeat(4,minmax(0,1fr)); }
 .setting-field { display:flex; flex-direction:column; gap:7px; min-width:0; padding:11px; border-radius:18px; background:#f8fbff; font-size:16px; font-weight:900; color:#334155; }
 .setting-field input,.setting-field select,.setting-field textarea { width:100%; min-height:52px; border:2px solid #dce6f0; background:#fff; border-radius:16px; padding:10px 13px; font-size:18px; font-weight:800; color:#0f172a; }
 .setting-field input:focus,.setting-field select:focus,.setting-field textarea:focus { outline:0; border-color:#2563eb; box-shadow:0 0 0 4px rgba(37,99,235,.09); }
@@ -191,8 +192,8 @@ pre { margin:0; max-height:390px; overflow:auto; padding:14px; border-radius:12p
 .setting-check em { color:#64748b; font-size:14px; font-style:normal; font-weight:700; }
 .m14-settings-dialog .settings-actions { flex-shrink:0; border-top:1px solid #dce6f0; background:#fff; padding:14px 22px!important; align-items:center; }
 .settings-footer-note { flex:1 1 auto; color:#64748b; font-size:15px; font-weight:900; line-height:1.45; text-align:left; }
-@media(max-width:1300px){ .m14-settings-dialog { width:calc(100vw - 8px); height:calc(100vh - 8px); max-height:calc(100vh - 8px); } .settings-grid.three { grid-template-columns:repeat(2,minmax(0,1fr)); } .settings-main-tab { font-size:23px; } }
-@media(max-width:760px){ .settings-tab-row,.settings-grid.two,.settings-grid.three,.settings-panel-head { grid-template-columns:1fr; } .settings-main-tab { min-height:60px; font-size:22px; } .settings-section-title { display:block; } .settings-section-title span { display:block; margin-top:6px; text-align:left; } .m14-settings-dialog .settings-actions { flex-direction:column; } .m14-settings-dialog .settings-actions button { width:100%; } }
+@media(max-width:1300px){ .settings-grid.four { grid-template-columns:repeat(2,minmax(0,1fr)); } .m14-settings-dialog { width:calc(100vw - 8px); height:calc(100vh - 8px); max-height:calc(100vh - 8px); } .settings-grid.three { grid-template-columns:repeat(2,minmax(0,1fr)); } .settings-main-tab { font-size:23px; } }
+@media(max-width:760px){ .settings-tab-row,.settings-grid.two,.settings-grid.three,.settings-grid.four,.settings-panel-head { grid-template-columns:1fr; } .settings-main-tab { min-height:60px; font-size:22px; } .settings-section-title { display:block; } .settings-section-title span { display:block; margin-top:6px; text-align:left; } .m14-settings-dialog .settings-actions { flex-direction:column; } .m14-settings-dialog .settings-actions button { width:100%; } }
 .settings-notice[data-kind="ok"] { border-left-color:#16a34a; background:#ecfdf5; color:#14532d; }
 .settings-notice[data-kind="error"] { border-left-color:#dc2626; background:#fef2f2; color:#7f1d1d; }
 .settings-footer-note[data-kind="ok"] { color:#166534; }

@@ -27,6 +27,7 @@ sudo bash production/carton_line/deploy/install_services.sh --profile partition-
 部署到“箱中取物：产品 / 大隔板”盒子：
 
 ```text
+HP60C Bridge             :18181
 336L Bridge              :18182
 Pick Runtime             :28083
 External-box WebSocket   :9001/vision
@@ -120,6 +121,11 @@ cd /opt/visionops_v3
 ```text
 production/carton_line/tasks/tube_pick_vision/PROTOCOL.md
 ```
+
+
+## 双相机选择
+
+Orbbec 336L（18182）与 HP60C（18181）可以同时连接同一视觉盒。Web“设置 → 相机设置”保存型号后，系统先验证目标 Bridge，再更新 `config/active_camera.json`，随后重启正在运行的 Runtime 和 RGB-D 业务服务。浏览器仍访问 Runtime 的 `snapshot.jpg`，因此采集、模型验证和生产画面统一切换，不需要分别修改各页面 URL。详细安装和验收见 `docs/HP60C_ORBBEC_DUAL_CAMERA_INTEGRATION.md`。
 
 ## 5. 336L 配置
 

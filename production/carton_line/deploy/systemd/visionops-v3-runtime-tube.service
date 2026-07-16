@@ -1,7 +1,7 @@
 [Unit]
 Description=VisionOps v3 Carton Line - Tube Runtime
-After=network-online.target visionops-orbbec336l-bridge.service
-Wants=network-online.target visionops-orbbec336l-bridge.service
+After=network-online.target visionops-orbbec336l-bridge.service visionops-hp60c-sdk-bridge.service
+Wants=network-online.target visionops-orbbec336l-bridge.service visionops-hp60c-sdk-bridge.service
 
 [Service]
 Type=simple

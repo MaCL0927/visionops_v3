@@ -17,6 +17,11 @@ const fields = {
   flip_horizontal: "setting-flip-horizontal",
   rgb_order: "setting-rgb-order",
   orbbec_serial: "setting-orbbec-serial",
+  hp60c_config_path: "setting-hp60c-config-path",
+  hp60c_fx: "setting-hp60c-fx",
+  hp60c_fy: "setting-hp60c-fy",
+  hp60c_cx: "setting-hp60c-cx",
+  hp60c_cy: "setting-hp60c-cy",
   camera_jpeg_quality: "setting-camera-jpeg-quality",
   default_mode: "setting-default-mode",
   models_root: "setting-models-root",
@@ -205,22 +210,50 @@ function populateProfileSelect(id, profiles, selected, emptyText) {
 
 function updateBridgeStatus(settings) {
   const serviceNode = element("setting-bridge-service-status");
+  const model = settings?.camera_model || getValue(fields.camera_model, "orbbec336l");
+  const name = model === "hp60c" ? "HP60C / HP60CN" : "Orbbec Gemini 336L";
   if (serviceNode) {
     const service = settings?.service || {};
     const active = service.active || "unknown";
-    serviceNode.textContent = `${service.name || "visionops-orbbec336l-bridge.service"}: ${active}`;
+    const activeMark = settings?.active_camera === model ? "当前图像源" : "待切换";
+    serviceNode.textContent = `${name} / ${service.name || "SDK Bridge"}: ${active}；${activeMark}`;
     serviceNode.className = active === "active" ? "profile-match-hint ok" : "profile-match-hint warn";
   }
   const sourceNode = element("setting-bridge-profile-source");
   if (sourceNode) {
     const profiles = settings?.profiles || {};
+    const hpNote = model === "hp60c" ? "；HP60C 的实际曝光/profile 由 Angstrong 配置文件控制" : "";
     if (profiles.source === "bridge_api") {
-      sourceNode.textContent = `Profile 来源：SDK Bridge 实时枚举 (${profiles.profile_url || ""})`;
+      sourceNode.textContent = `Profile 来源：${name} Bridge 实时接口 (${profiles.profile_url || ""})${hpNote}`;
       sourceNode.className = "settings-inline-status";
     } else {
-      sourceNode.textContent = profiles.warning || "Profile 来源：当前 env 回退值；请升级 / 重启 Orbbec Bridge 以启用 SDK 实时枚举。";
+      sourceNode.textContent = `${profiles.warning || "Profile 来源：当前 env 回退值"}${hpNote}`;
       sourceNode.className = "settings-inline-status warn";
     }
+  }
+}
+
+function updateCameraSpecificFields(model) {
+  const hp = model === "hp60c";
+  const serialField = element("setting-orbbec-serial-field");
+  const hpConfigField = element("setting-hp60c-config-field");
+  const hpIntrinsics = element("setting-hp60c-intrinsics");
+  if (serialField) serialField.hidden = hp;
+  if (hpConfigField) hpConfigField.hidden = !hp;
+  if (hpIntrinsics) hpIntrinsics.hidden = !hp;
+  const source = element(fields.rgb_source_preference);
+  const order = element(fields.rgb_order);
+  const rgbProfile = element(fields.rgb_profile);
+  const depthProfile = element(fields.depth_profile);
+  if (source) source.disabled = !hp;
+  if (order) order.disabled = !hp;
+  if (rgbProfile) rgbProfile.disabled = hp;
+  if (depthProfile) depthProfile.disabled = hp;
+  const hint = element("setting-camera-apply-hint");
+  if (hint) {
+    hint.textContent = hp
+      ? "HP60C 参数写入 hp60c_sdk_bridge.env，Bridge 端口 18181。保存后重启 HP60C Bridge 与当前 Runtime。实际曝光/profile 仍由 Angstrong 配置文件决定。"
+      : "Orbbec 参数写入 orbbec336l_bridge.env，Bridge 端口 18182。保存后重启 Orbbec Bridge 与当前 Runtime。";
   }
 }
 
@@ -369,27 +402,39 @@ async function saveVisionBoxSettings(config) {
   return { skipped: false, message: "视觉盒子设置已保存" };
 }
 
-async function loadOrbbecSettings() {
+async function loadCameraSettings(requestedModel = "") {
   if (bridgeSettingsLoading) return;
   bridgeSettingsLoading = true;
-  showSaveStatus("正在读取 Orbbec 336L SDK Bridge 设置...", "loading");
+  const selected = requestedModel || getValue(fields.camera_model, "");
+  const suffix = selected ? `?camera_model=${encodeURIComponent(selected)}` : "";
+  showSaveStatus("正在读取相机 SDK Bridge 设置...", "loading");
   try {
-    const settings = await requestJson(endpoints.orbbecSettings);
+    const settings = await requestJson(`${endpoints.sdkBridgeSettings}${suffix}`);
     latestBridgeSettings = settings;
     const current = settings.settings || {};
+    const model = settings.camera_model || settings.active_camera || "orbbec336l";
     populateProfileSelect(fields.rgb_profile, settings.profiles?.color || [], current.rgb_profile, "未读取到 RGB profile");
     populateProfileSelect(fields.depth_profile, settings.profiles?.depth || [], current.depth_profile, "未读取到 Depth profile");
-    setValue(fields.camera_model, "orbbec336l");
+    setValue(fields.camera_model, model);
     setValue(fields.display_fps, current.display_fps ?? getState().config.display_fps);
     setValue(fields.camera_jpeg_quality, current.camera_jpeg_quality ?? getState().config.camera_jpeg_quality);
     setValue(fields.flip_vertical, String(current.flip_vertical ?? getState().config.flip_vertical));
     setValue(fields.flip_horizontal, String(current.flip_horizontal ?? getState().config.flip_horizontal));
     setValue(fields.depth_unit, current.depth_unit ?? getState().config.depth_unit);
     setValue(fields.orbbec_serial, current.orbbec_serial ?? "");
+    setValue(fields.hp60c_config_path, current.hp60c_config_path ?? "");
+    setValue(fields.hp60c_fx, current.hp60c_fx ?? 0);
+    setValue(fields.hp60c_fy, current.hp60c_fy ?? 0);
+    setValue(fields.hp60c_cx, current.hp60c_cx ?? 0);
+    setValue(fields.hp60c_cy, current.hp60c_cy ?? 0);
+    setValue(fields.rgb_source_preference, current.rgb_source_preference ?? "auto");
+    setValue(fields.rgb_order, current.rgb_order === "auto" ? "bgr" : (current.rgb_order ?? "bgr"));
+    updateCameraSpecificFields(model);
     updateDepthMatchHint();
     updateBridgeStatus(settings);
-    const source = settings.profiles?.source === "bridge_api" ? "SDK 实时枚举" : "env 回退";
-    showSaveStatus(`已读取 Orbbec 设置，profile 来源：${source}`);
+    const source = settings.profiles?.source === "bridge_api" ? "Bridge 实时接口" : "env 回退";
+    const activeText = settings.active_camera === model ? "当前已选中" : "保存后切换";
+    showSaveStatus(`已读取 ${model === "hp60c" ? "HP60C" : "Orbbec 336L"} 设置，${activeText}，profile 来源：${source}`);
   } catch (error) {
     latestBridgeSettings = null;
     populateProfileSelect(fields.rgb_profile, [], "", "读取 profile 失败");
@@ -397,7 +442,7 @@ async function loadOrbbecSettings() {
     updateDepthMatchHint();
     updateBridgeStatus(null);
     const detail = error instanceof ApiError && error.body?.error?.message ? error.body.error.message : error.message;
-    showSaveStatus(`读取 Orbbec 设置失败：${detail}`, "error");
+    showSaveStatus(`读取相机设置失败：${detail}`, "error");
   } finally {
     bridgeSettingsLoading = false;
   }
@@ -537,6 +582,11 @@ function readConfigFromForm() {
     flip_horizontal: getValue(fields.flip_horizontal, "false"),
     rgb_order: getValue(fields.rgb_order, "bgr"),
     orbbec_serial: getValue(fields.orbbec_serial, ""),
+    hp60c_config_path: getValue(fields.hp60c_config_path, ""),
+    hp60c_fx: getNumber(fields.hp60c_fx, 0),
+    hp60c_fy: getNumber(fields.hp60c_fy, 0),
+    hp60c_cx: getNumber(fields.hp60c_cx, 0),
+    hp60c_cy: getNumber(fields.hp60c_cy, 0),
     camera_read_fps: rgbParsed.fps,
     camera_resolution: rgbParsed.resolution,
     camera_jpeg_quality: getNumber(fields.camera_jpeg_quality, 100),
@@ -562,9 +612,9 @@ function readConfigFromForm() {
   });
 }
 
-function buildOrbbecPayload(config) {
+function buildCameraPayload(config) {
   return {
-    camera_model: "orbbec336l",
+    camera_model: config.camera_model,
     rgb_profile: config.rgb_profile,
     depth_profile: config.depth_profile,
     display_fps: config.display_fps,
@@ -573,6 +623,13 @@ function buildOrbbecPayload(config) {
     flip_horizontal: config.flip_horizontal,
     depth_unit: config.depth_unit,
     orbbec_serial: config.orbbec_serial,
+    hp60c_config_path: config.hp60c_config_path,
+    hp60c_fx: config.hp60c_fx,
+    hp60c_fy: config.hp60c_fy,
+    hp60c_cx: config.hp60c_cx,
+    hp60c_cy: config.hp60c_cy,
+    rgb_source_preference: config.rgb_source_preference,
+    rgb_order: config.rgb_order,
     known_profiles: latestBridgeSettings?.profiles || null,
   };
 }
@@ -606,8 +663,8 @@ function open() {
   const modal = element("settings-modal");
   modal.classList.add("active");
   modal.setAttribute("aria-hidden", "false");
-  setNotice("相机设置已接入 Orbbec 336L SDK Bridge API；算法设置会按模型任务类型写入对应 model.yaml。", "");
-  loadOrbbecSettings();
+  setNotice("Orbbec 336L 与 HP60C Bridge 可同时运行；相机型号保存后会切换 Runtime、采集、模型验证和生产画面。", "");
+  loadCameraSettings();
   loadVisionBoxSettings();
   loadAlgorithmSettings();
 }
@@ -627,7 +684,7 @@ function activateSettingsTab(panelId) {
   document.querySelectorAll(".settings-panel").forEach((panel) => panel.classList.toggle("active", panel.id === panelId));
   if (panelId === "algorithm-settings-panel") loadAlgorithmSettings(getValue(fields.algorithm_model, ""));
   if (panelId === "board-settings-panel") loadVisionBoxSettings();
-  if (panelId === "camera-settings-panel") loadOrbbecSettings();
+  if (panelId === "camera-settings-panel") loadCameraSettings();
 }
 
 function markUnsaved() { showSaveStatus("有未保存的修改"); }
@@ -638,27 +695,25 @@ async function saveSettings() {
   showSaveStatus("正在保存设置...", "loading");
   const messages = [];
 
-  if (cameraModel === "orbbec336l" || cameraModel === "auto") {
-    try {
-      const result = await postJson(endpoints.orbbecSettings, buildOrbbecPayload(config));
-      latestBridgeSettings = result;
-      updateBridgeStatus(result);
-      populateProfileSelect(fields.rgb_profile, result.profiles?.color || [], result.settings?.rgb_profile || config.rgb_profile, "未读取到 RGB profile");
-      populateProfileSelect(fields.depth_profile, result.profiles?.depth || [], result.settings?.depth_profile || config.depth_profile, "未读取到 Depth profile");
-      updateDepthMatchHint();
-      const timings = result.apply_timings_ms || {};
-      if (result.changed === false || result.skipped_restart) {
-        messages.push("相机设置未变化");
-      } else {
-        const totalMs = timings.total_apply_ms != null ? `(${timings.total_apply_ms}ms)` : "";
-        messages.push(`相机设置已应用${totalMs}`);
-      }
-    } catch (error) {
-      const detail = error instanceof ApiError && error.body?.error?.message ? error.body.error.message : error.message;
-      showSaveStatus(`保存失败：${detail}`, "error");
-      setNotice(`Orbbec 设置未生效：${detail}`, "error");
-      return;
+  try {
+    const result = await postJson(endpoints.sdkBridgeSettings, buildCameraPayload(config));
+    latestBridgeSettings = result;
+    updateBridgeStatus(result);
+    populateProfileSelect(fields.rgb_profile, result.profiles?.color || [], result.settings?.rgb_profile || config.rgb_profile, "未读取到 RGB profile");
+    populateProfileSelect(fields.depth_profile, result.profiles?.depth || [], result.settings?.depth_profile || config.depth_profile, "未读取到 Depth profile");
+    updateDepthMatchHint();
+    updateCameraSpecificFields(cameraModel);
+    if (result.changed === false) messages.push("相机设置未变化");
+    else if (result.camera_switched) messages.push(`相机已切换为 ${cameraModel === "hp60c" ? "HP60C" : "Orbbec 336L"}，Runtime 图像源已重启`);
+    else messages.push("相机 Bridge 参数已应用");
+    if (result.camera_switched) {
+      window.dispatchEvent(new CustomEvent("visionops:camera-switched", { detail: { camera_model: cameraModel } }));
     }
+  } catch (error) {
+    const detail = error instanceof ApiError && error.body?.error?.message ? error.body.error.message : error.message;
+    showSaveStatus(`保存失败：${detail}`, "error");
+    setNotice(`相机设置未生效：${detail}`, "error");
+    return;
   }
 
   try {
@@ -698,16 +753,18 @@ export function initSettings() {
     const node = element(id);
     if (node) node.addEventListener("change", updateDepthMatchHint);
   });
+  const cameraModelSelect = element(fields.camera_model);
+  if (cameraModelSelect) cameraModelSelect.addEventListener("change", () => loadCameraSettings(cameraModelSelect.value));
   const algorithmModel = element(fields.algorithm_model);
   if (algorithmModel) algorithmModel.addEventListener("change", () => loadAlgorithmSettings(algorithmModel.value));
   const refreshProfiles = element("settings-refresh-profiles");
   if (refreshProfiles) refreshProfiles.addEventListener("click", () => {
-    loadOrbbecSettings();
+    loadCameraSettings(getValue(fields.camera_model, ""));
     loadAlgorithmSettings(getValue(fields.algorithm_model, ""));
   });
   element("settings-reset").addEventListener("click", () => {
     fill(getState().savedConfig || getState().config);
-    loadOrbbecSettings();
+    loadCameraSettings();
     loadVisionBoxSettings();
     loadAlgorithmSettings();
     showSaveStatus("已恢复到 Collector 默认、当前 Bridge 与当前模型配置，尚未保存");

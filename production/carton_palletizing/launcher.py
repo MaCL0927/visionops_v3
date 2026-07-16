@@ -28,7 +28,7 @@ def _runtime(config: dict) -> int:
         str(PROJECT_ROOT / "build-rknn/edge/runtime_cpp/visionops_runtime_mock"),
     ))
     model_dir = Path(os.environ.get("VISIONOPS_CARTON_PALLETIZING_MODEL_DIR", runtime["model_dir"]))
-    bridge_url = os.environ.get("VISIONOPS_CAMERA_BRIDGE_URL", config["camera_bridge"]["base_url"])
+    bridge_url = os.environ.get("VISIONOPS_CAMERA_BRIDGE_URL_OVERRIDE", config["camera_bridge"]["base_url"])
     recovery = config["runtime_recovery"]
     if not runtime_bin.is_file() or not os.access(runtime_bin, os.X_OK):
         raise FileNotFoundError(f"Runtime binary not found or not executable: {runtime_bin}")
@@ -69,6 +69,8 @@ def _app(config_path: str) -> int:
 
 def _collector(config: dict) -> int:
     collector = config["collector"]
+    os.environ["VISIONOPS_COLLECTOR_RUNTIME_SERVICE"] = "visionops-v3-carton-palletizing-runtime.service"
+    os.environ["VISIONOPS_COLLECTOR_CAMERA_DEPENDENT_SERVICES"] = "visionops-v3-carton-palletizing-app.service"
     app_host = str(config["app"]["listen_host"])
     if app_host in {"0.0.0.0", "::"}:
         app_host = "127.0.0.1"
