@@ -1,5 +1,5 @@
-"""First-layer carton placement planning and occupancy detection."""
+"""Multi-layer OBB/RGB-D carton placement planning and occupancy detection."""
 
-from .algorithm import FirstLayerPlacementAlgorithm
+from .algorithm import FirstLayerPlacementAlgorithm, MultiLayerPlacementAlgorithm
 
-__all__ = ["FirstLayerPlacementAlgorithm"]
+__all__ = ["FirstLayerPlacementAlgorithm", "MultiLayerPlacementAlgorithm"]

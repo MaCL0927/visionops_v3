@@ -132,7 +132,8 @@ function drawPlacementArrow(ctx, slot, sx, sy, strokeStyle) {
 }
 
 function drawPlacementOverlay(ctx, placement, sx, sy, canvasWidth, canvasHeight) {
-  if (!placement || Number(placement.layer) !== 1) return;
+  if (!placement) return;
+  const layer = Math.max(1, Number(placement.layer) || 1);
   const slots = Array.isArray(placement.slots) ? placement.slots : [];
   const nextSlotId = String(placement.next_slot_id || "");
   const fontSize = Math.max(14, Math.round(canvasWidth / 72));
@@ -159,7 +160,7 @@ function drawPlacementOverlay(ctx, placement, sx, sy, canvasWidth, canvasHeight)
     const anchorY = Math.min(...ring.map(([, y]) => y)) * sy;
     ctx.font = `bold ${fontSize}px system-ui`;
     const orientation = slot.orientation_label || (Math.abs((Number((slot.template_orientation_deg ?? slot.orientation_deg) || 0) % 180)) < 45 ? "横向" : "竖向");
-    const label = `${slot.slot_id || "P?"} ${orientation}${isTarget ? " · 下一位置" : ""}`;
+    const label = `L${layer}-${slot.slot_id || "P?"} ${orientation}${isTarget ? " · 下一位置" : ""}`;
     const labelWidth = ctx.measureText(label).width + 16;
     const labelHeight = fontSize + 10;
     ctx.fillStyle = isTarget ? "rgba(22,163,74,.94)" : "rgba(202,138,4,.94)";
@@ -172,14 +173,25 @@ function drawPlacementOverlay(ctx, placement, sx, sy, canvasWidth, canvasHeight)
   ctx.save();
   ctx.font = `bold ${Math.max(16, Math.round(canvasWidth / 62))}px system-ui`;
   let summary = "等待检测托盘";
-  if (placement.state !== "WAIT_TRAY") {
-    const occupied = Number(placement.occupied_count || 0);
-    const total = Number(placement.slot_count || slots.length || 0);
-    summary = placement.complete ? `第一层已放满 ${occupied}/${total}` : `第一层摆放 ${occupied}/${total}`;
+  const occupied = Number(placement.occupied_count || 0);
+  const total = Number(placement.slot_count || slots.length || 0);
+  const state = String(placement.state || "");
+  if (state === "STACK_COMPLETE" || placement.stack_complete === true) {
+    summary = `堆垛完成 · ${layer}层`;
+  } else if (state.includes("SETTLING")) {
+    const capture = placement.transition?.baseline_capture || {};
+    summary = `第${layer}层已放满 · 等待画面稳定 ${Number(capture.settled_frames || 0)}/${Number(capture.required_settle_frames || 0)}`;
+  } else if (state.includes("CAPTURING_BASELINE")) {
+    const capture = placement.transition?.baseline_capture || {};
+    summary = `第${layer}层已放满 · 采集深度基准 ${Number(capture.captured_frames || 0)}/${Number(capture.required_frames || 0)}`;
+  } else if (state.includes("WAIT_DEPTH")) {
+    summary = `第${layer}层等待深度图`;
+  } else if (state !== "WAIT_TRAY") {
+    summary = placement.layer_complete ? `第${layer}层已放满 ${occupied}/${total}` : `第${layer}层摆放 ${occupied}/${total}`;
   }
   const width = ctx.measureText(summary).width + 24;
   const height = Math.max(34, Math.round(canvasHeight / 22));
-  ctx.fillStyle = placement.complete ? "rgba(22,163,74,.94)" : "rgba(17,24,39,.86)";
+  ctx.fillStyle = placement.stack_complete || placement.layer_complete ? "rgba(22,163,74,.94)" : "rgba(17,24,39,.86)";
   ctx.fillRect(12, 12, width, height);
   ctx.fillStyle = "#fff";
   ctx.fillText(summary, 24, 12 + Math.round(height * 0.68));

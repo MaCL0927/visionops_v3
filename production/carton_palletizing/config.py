@@ -27,7 +27,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "camera_bridge": {
         "base_url": "http://127.0.0.1:18182",
         "snapshot_path": "/stream/snapshot.jpg",
+        "depth_path": "/stream/depth.png",
         "health_path": "/health",
+        "max_depth_age_ms": 1500,
     },
     "runtime_recovery": {
         "stale_frame_timeout_ms": 3000,
@@ -59,7 +61,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "production_inference_source": "app",
     },
     "task": {
-        "task_id": "first_layer_placement",
+        "task_id": "multi_layer_placement",
         "algorithm": {
             "classes": {
                 # Current OBB model classes are fixed: 0=box, 1=tray.
@@ -94,6 +96,30 @@ DEFAULT_CONFIG: Dict[str, Any] = {
                 "occupied_confirm_frames": 2,
                 "empty_confirm_frames": 5,
                 "sticky_occupied": True,
+            },
+            "layering": {
+                # Positive values stop the stack at that layer; 0 means unlimited.
+                "max_layers": 4,
+                "auto_advance": True,
+                "baseline_capture_frames": 3,
+                "baseline_settle_frames": 5,
+                "baseline_stability_mm": 15.0,
+                # Prefer the completed layer's actual OBBs as the next layer masks.
+                "use_previous_detected_boxes": True,
+            },
+            "depth": {
+                "min_depth_mm": 100,
+                "max_depth_mm": 5000,
+                "slot_roi_shrink_ratio": 0.12,
+                "min_valid_ratio": 0.45,
+                "baseline_min_valid_ratio": 0.55,
+                # A new carton is closer to the overhead camera, so baseline-current is positive.
+                "min_height_delta_mm": 80.0,
+                "max_height_delta_mm": 600.0,
+                "min_coverage_ratio": 0.55,
+                "height_percentile": 50.0,
+                "occupied_confirm_frames": 3,
+                "occupied_stability_mm": 20.0,
             },
             "template": {
                 # Start from bottom-left P3, then move clockwise in image space.
@@ -222,10 +248,55 @@ def _validate_algorithm(config: Dict[str, Any]) -> None:
         if temporal[key] <= 0:
             raise ValueError(f"task.algorithm.temporal.{key} 必须大于 0")
 
+    layering = algorithm.get("layering", {})
+    layering["max_layers"] = int(layering.get("max_layers", 4))
+    if layering["max_layers"] < 0:
+        raise ValueError("layering.max_layers 必须大于等于 0，0 表示不限层数")
+    layering["auto_advance"] = bool(layering.get("auto_advance", True))
+    layering["baseline_capture_frames"] = int(layering.get("baseline_capture_frames", 3))
+    if layering["baseline_capture_frames"] <= 0:
+        raise ValueError("layering.baseline_capture_frames 必须大于 0")
+    layering["baseline_settle_frames"] = int(layering.get("baseline_settle_frames", 5))
+    if layering["baseline_settle_frames"] < 0:
+        raise ValueError("layering.baseline_settle_frames 必须大于等于 0")
+    layering["baseline_stability_mm"] = float(layering.get("baseline_stability_mm", 15.0))
+    if layering["baseline_stability_mm"] < 0:
+        raise ValueError("layering.baseline_stability_mm 必须大于等于 0")
+    layering["use_previous_detected_boxes"] = bool(layering.get("use_previous_detected_boxes", True))
+    algorithm["layering"] = layering
+
+    depth = algorithm.get("depth", {})
+    for key in ("min_depth_mm", "max_depth_mm", "occupied_confirm_frames"):
+        depth[key] = int(depth.get(key, {"min_depth_mm": 100, "max_depth_mm": 5000, "occupied_confirm_frames": 2}[key]))
+    if depth["min_depth_mm"] < 0 or depth["max_depth_mm"] <= depth["min_depth_mm"]:
+        raise ValueError("depth 深度有效范围配置非法")
+    if depth["occupied_confirm_frames"] <= 0:
+        raise ValueError("depth.occupied_confirm_frames 必须大于 0")
+    for key, default in (
+        ("slot_roi_shrink_ratio", 0.12),
+        ("min_valid_ratio", 0.45),
+        ("baseline_min_valid_ratio", 0.55),
+        ("min_coverage_ratio", 0.55),
+    ):
+        depth[key] = float(depth.get(key, default))
+        if not 0.0 <= depth[key] <= 1.0:
+            raise ValueError(f"depth.{key} 必须位于 0..1")
+    depth["height_percentile"] = float(depth.get("height_percentile", 50.0))
+    if not 0.0 <= depth["height_percentile"] <= 100.0:
+        raise ValueError("depth.height_percentile 必须位于 0..100")
+    depth["min_height_delta_mm"] = float(depth.get("min_height_delta_mm", 80.0))
+    depth["max_height_delta_mm"] = float(depth.get("max_height_delta_mm", 600.0))
+    depth["occupied_stability_mm"] = float(depth.get("occupied_stability_mm", 20.0))
+    if depth["occupied_stability_mm"] < 0:
+        raise ValueError("depth.occupied_stability_mm 必须大于等于 0")
+    if depth["min_height_delta_mm"] < 0 or depth["max_height_delta_mm"] <= depth["min_height_delta_mm"]:
+        raise ValueError("depth 高度差范围配置非法")
+    algorithm["depth"] = depth
+
     template = algorithm["template"]
     slots = template.get("slots")
     if not isinstance(slots, list) or len(slots) != 4:
-        raise ValueError("第一阶段固定要求 template.slots 恰好包含 4 个摆放区域")
+        raise ValueError("每层固定要求 template.slots 恰好包含 4 个摆放区域")
     seen = set()  # type: Set[str]
     for slot in slots:
         if not isinstance(slot, Mapping):
@@ -267,6 +338,12 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
         raise ValueError(f"配置文件不存在: {source}")
 
     config["camera_bridge"]["base_url"] = _url(config["camera_bridge"]["base_url"], "camera_bridge.base_url")
+    for key, default in (("snapshot_path", "/stream/snapshot.jpg"), ("depth_path", "/stream/depth.png"), ("health_path", "/health")):
+        value = str(config["camera_bridge"].get(key) or default).strip()
+        config["camera_bridge"][key] = value if value.startswith("/") else "/" + value
+    config["camera_bridge"]["max_depth_age_ms"] = int(config["camera_bridge"].get("max_depth_age_ms", 1500))
+    if config["camera_bridge"]["max_depth_age_ms"] <= 0:
+        raise ValueError("camera_bridge.max_depth_age_ms 必须大于 0")
     config["runtime"]["url"] = _url(config["runtime"]["url"], "runtime.url")
     config["runtime"]["model_dir"] = _path(config["runtime"]["model_dir"])
     config["runtime"]["roi_config_path"] = _path(config["runtime"]["roi_config_path"])
@@ -289,7 +366,7 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
         if config["collector"][key] < 100:
             raise ValueError(f"collector.{key} 不得小于 100")
     if config["collector"].get("production_inference_source") != "app":
-        raise ValueError("纸箱摆放第一阶段必须使用 collector.production_inference_source=app")
+        raise ValueError("纸箱多层摆放必须使用 collector.production_inference_source=app")
 
     _validate_algorithm(config)
     return config

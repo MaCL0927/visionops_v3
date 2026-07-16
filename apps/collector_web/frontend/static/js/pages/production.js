@@ -50,13 +50,25 @@ function modelDisplay(result) {
 
 function placementSummary(result) {
   const placement = result?.placement;
-  if (!placement || Number(placement.layer) !== 1) return null;
+  if (!placement) return null;
+  const layer = Math.max(1, Number(placement.layer) || 1);
   const occupied = Number(placement.occupied_count || 0);
   const total = Number(placement.slot_count || placement.slots?.length || 0);
-  if (placement.state === "WAIT_TRAY") return "等待托盘";
-  if (placement.complete) return `第一层已放满 ${occupied}/${total}`;
+  const state = String(placement.state || "");
+  if (state === "WAIT_TRAY") return "等待托盘";
+  if (state === "STACK_COMPLETE" || placement.stack_complete === true) return `堆垛完成 · ${layer}层`;
+  if (state.includes("SETTLING")) {
+    const capture = placement.transition?.baseline_capture || {};
+    return `第${layer}层已放满 · 等待稳定 ${Number(capture.settled_frames || 0)}/${Number(capture.required_settle_frames || 0)}`;
+  }
+  if (state.includes("CAPTURING_BASELINE")) {
+    const capture = placement.transition?.baseline_capture || {};
+    return `第${layer}层已放满 · 采集基准 ${Number(capture.captured_frames || 0)}/${Number(capture.required_frames || 0)}`;
+  }
+  if (state.includes("WAIT_DEPTH")) return `第${layer}层等待深度图`;
+  if (placement.layer_complete) return `第${layer}层已放满 ${occupied}/${total}`;
   const next = placement.next_slot_id ? ` · 下一位置 ${placement.next_slot_id}` : "";
-  return `第一层 ${occupied}/${total}${next}`;
+  return `第${layer}层 ${occupied}/${total}${next}`;
 }
 
 function updateLiveSummary(result, elapsedMs = null) {

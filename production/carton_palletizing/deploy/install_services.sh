@@ -19,7 +19,7 @@ fi
 install -d -m 0755 "${CONFIG_DIR}"
 if [[ ! -f "${CONFIG_FILE}" ]]; then
   install -m 0644 "${SOURCE_DIR}/config/line.yaml" "${CONFIG_FILE}"
-  echo "Created ${CONFIG_FILE}; calibrate class names and four slot polygons before production use."
+  echo "Created ${CONFIG_FILE}; calibrate class IDs, slot polygons and depth-height thresholds before production use."
 else
   install -m 0644 "${SOURCE_DIR}/config/line.yaml" "${CONFIG_FILE}.example"
   echo "Kept existing ${CONFIG_FILE}; refreshed ${CONFIG_FILE}.example."

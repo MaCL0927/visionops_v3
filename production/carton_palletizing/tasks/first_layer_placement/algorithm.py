@@ -1,8 +1,9 @@
-"""OBB-based first-layer carton placement planning.
+"""OBB and RGB-D based multi-layer carton palletizing planning.
 
-Phase 1 is RGB-only. The application locks the tray OBB, projects four
-configured slots into the tray quadrilateral, matches carton OBBs to those
-slots, and emits overlay-ready placement state.
+Layer 1 uses OBB carton detections. Layer 2 and above compare the current
+D2C-aligned depth image with the completed previous layer. After each layer is
+filled, several stable depth frames are captured as the next baseline. The same
+state machine supports four layers or any configured layer count.
 
 The module intentionally supports Python 3.8, which is the system Python on
 LB3576 images used by this project.
@@ -12,8 +13,12 @@ from __future__ import annotations
 
 import math
 import threading
+import warnings
 from copy import deepcopy
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+
+import cv2  # type: ignore
+import numpy as np  # type: ignore
 
 
 BBox = Tuple[float, float, float, float]
@@ -324,8 +329,63 @@ def _centered_square_quad(tray_quad: Sequence[Point], fill_ratio: float = 1.0) -
     }
 
 
-class FirstLayerPlacementAlgorithm:
-    """Stateful four-slot occupancy tracker for an OBB palletizing model."""
+
+
+def _scale_polygon(points: Sequence[Point], sx: float, sy: float) -> Polygon:
+    return [(float(point[0]) * sx, float(point[1]) * sy) for point in points]
+
+
+def _shrink_polygon(points: Sequence[Point], shrink_ratio: float) -> Polygon:
+    ratio = min(0.45, max(0.0, float(shrink_ratio)))
+    center = _polygon_center(points)
+    scale = 1.0 - ratio
+    return [
+        (center[0] + (point[0] - center[0]) * scale, center[1] + (point[1] - center[1]) * scale)
+        for point in points
+    ]
+
+
+def _polygon_mask(
+    polygon: Sequence[Point],
+    image_width: int,
+    image_height: int,
+    target_width: int,
+    target_height: int,
+    shrink_ratio: float = 0.0,
+) -> "np.ndarray":
+    """Rasterize an RGB-space polygon into a depth-image boolean mask."""
+
+    mask = np.zeros((target_height, target_width), dtype=np.uint8)
+    if len(polygon) < 3 or image_width <= 0 or image_height <= 0:
+        return mask.astype(bool)
+    shrunk = _shrink_polygon(polygon, shrink_ratio)
+    sx = float(target_width) / float(image_width)
+    sy = float(target_height) / float(image_height)
+    scaled = _scale_polygon(shrunk, sx, sy)
+    points = np.asarray(
+        [
+            [
+                int(round(min(max(point[0], 0.0), float(max(0, target_width - 1))))),
+                int(round(min(max(point[1], 0.0), float(max(0, target_height - 1))))),
+            ]
+            for point in scaled
+        ],
+        dtype=np.int32,
+    )
+    if points.shape[0] >= 3:
+        cv2.fillPoly(mask, [points], 1)
+    return mask.astype(bool)
+
+
+def _safe_percentile(values: "np.ndarray", percentile: float, default: float = 0.0) -> float:
+    if values.size <= 0:
+        return default
+    result = float(np.percentile(values, percentile))
+    return result if math.isfinite(result) else default
+
+
+class MultiLayerPlacementAlgorithm:
+    """Stateful OBB/RGB-D tracker for an arbitrary number of pallet layers."""
 
     def __init__(self, settings: Mapping[str, Any]) -> None:
         self.settings = deepcopy(dict(settings))
@@ -335,6 +395,8 @@ class FirstLayerPlacementAlgorithm:
         matching = settings.get("matching") if isinstance(settings.get("matching"), Mapping) else {}
         temporal = settings.get("temporal") if isinstance(settings.get("temporal"), Mapping) else {}
         template = settings.get("template") if isinstance(settings.get("template"), Mapping) else {}
+        layering = settings.get("layering") if isinstance(settings.get("layering"), Mapping) else {}
+        depth = settings.get("depth") if isinstance(settings.get("depth"), Mapping) else {}
 
         self.tray_ids = {int(item) for item in classes.get("tray_class_ids", [])}
         self.tray_names = {str(item).strip().lower() for item in classes.get("tray_class_names", [])}
@@ -362,26 +424,77 @@ class FirstLayerPlacementAlgorithm:
         self.empty_confirm_frames = max(1, int(temporal.get("empty_confirm_frames", 5)))
         self.sticky_occupied = bool(temporal.get("sticky_occupied", True))
 
+        self.max_layers = max(0, int(layering.get("max_layers", 4)))
+        self.auto_advance = bool(layering.get("auto_advance", True))
+        self.baseline_capture_frames = max(1, int(layering.get("baseline_capture_frames", 3)))
+        self.baseline_settle_frames = max(0, int(layering.get("baseline_settle_frames", 5)))
+        self.baseline_stability_mm = max(0.0, float(layering.get("baseline_stability_mm", 15.0)))
+        self.use_previous_detected_boxes = bool(layering.get("use_previous_detected_boxes", True))
+
+        self.min_depth_mm = max(0, int(depth.get("min_depth_mm", 100)))
+        self.max_depth_mm = max(self.min_depth_mm + 1, int(depth.get("max_depth_mm", 5000)))
+        self.slot_roi_shrink_ratio = min(0.45, max(0.0, float(depth.get("slot_roi_shrink_ratio", 0.12))))
+        self.min_valid_ratio = min(1.0, max(0.0, float(depth.get("min_valid_ratio", 0.45))))
+        self.baseline_min_valid_ratio = min(
+            1.0, max(0.0, float(depth.get("baseline_min_valid_ratio", 0.55)))
+        )
+        self.min_height_delta_mm = max(0.0, float(depth.get("min_height_delta_mm", 80.0)))
+        self.max_height_delta_mm = max(
+            self.min_height_delta_mm + 1.0, float(depth.get("max_height_delta_mm", 600.0))
+        )
+        self.min_coverage_ratio = min(1.0, max(0.0, float(depth.get("min_coverage_ratio", 0.55))))
+        self.height_percentile = min(100.0, max(0.0, float(depth.get("height_percentile", 50.0))))
+        self.depth_occupied_confirm_frames = max(
+            1, int(depth.get("occupied_confirm_frames", self.occupied_confirm_frames))
+        )
+        self.depth_occupied_stability_mm = max(
+            0.0, float(depth.get("occupied_stability_mm", 20.0))
+        )
+
         raw_slots = template.get("slots") if isinstance(template.get("slots"), list) else []
         self.slot_templates = [deepcopy(dict(slot)) for slot in raw_slots if isinstance(slot, Mapping)]
         self.slot_order = [str(item) for item in template.get("slot_order", [])]
         self._lock = threading.RLock()
         self.reset()
 
+    def _new_slot_state(self) -> Dict[str, Dict[str, Any]]:
+        return {
+            str(slot["slot_id"]): {
+                "occupied": False,
+                "occupied_hits": 0,
+                "empty_hits": 0,
+                "matched_detection_id": None,
+                "last_detection_polygon": None,
+                "last_depth": None,
+            }
+            for slot in self.slot_templates
+        }
+
     def reset(self) -> None:
         with getattr(self, "_lock", threading.RLock()):
             self.tray_bbox = None  # type: Optional[BBox]
             self.tray_polygon = None  # type: Optional[Polygon]
             self.frame_count = 0
-            self.slot_state = {
-                str(slot["slot_id"]): {
-                    "occupied": False,
-                    "occupied_hits": 0,
-                    "empty_hits": 0,
-                    "matched_detection_id": None,
-                }
-                for slot in self.slot_templates
-            }
+            self.current_layer = 1
+            self.completed_layers = []  # type: List[int]
+            self.slot_state = self._new_slot_state()
+            self.current_slot_norm_polygons = None  # type: Optional[Dict[str, Polygon]]
+            self.current_slot_source = "tray_template"
+            self.depth_baseline = None  # type: Optional[np.ndarray]
+            self.depth_baseline_layer = 0
+            self.baseline_candidates = []  # type: List[np.ndarray]
+            self.baseline_capture_valid_ratio = 0.0
+            self.baseline_capture_stability_mm = None  # type: Optional[float]
+            self.baseline_settle_count = 0
+            self.last_image_size = None  # type: Optional[Tuple[int, int]]
+
+    def needs_depth(self) -> bool:
+        """Return whether the next evaluation should retrieve a depth frame."""
+        with self._lock:
+            return self.current_layer >= 2 or self._current_layer_complete()
+
+    def _current_layer_complete(self) -> bool:
+        return bool(self.slot_state) and all(bool(state["occupied"]) for state in self.slot_state.values())
 
     def _semantic(self, detection: Mapping[str, Any]) -> Optional[str]:
         class_id_value = detection.get("class_id")
@@ -456,27 +569,27 @@ class FirstLayerPlacementAlgorithm:
         self.tray_bbox = _polygon_bbox(self.tray_polygon)
         return "detected"
 
-    def _build_slots(
+    def _build_template_slots(
         self, image_width: int, image_height: int
     ) -> Tuple[List[Dict[str, Any]], Polygon, Dict[str, float]]:
         assert self.tray_polygon is not None
         if self.footprint_mode == "centered_square_by_short_edge":
-            footprint, footprint_meta = _centered_square_quad(
-                self.tray_polygon, self.footprint_fill_ratio
-            )
+            footprint, footprint_meta = _centered_square_quad(self.tray_polygon, self.footprint_fill_ratio)
         else:
             footprint = list(self.tray_polygon)
             tray_width = (
-                _edge_length(footprint[0], footprint[1])
-                + _edge_length(footprint[3], footprint[2])
+                _edge_length(footprint[0], footprint[1]) + _edge_length(footprint[3], footprint[2])
             ) / 2.0
             tray_height = (
-                _edge_length(footprint[0], footprint[3])
-                + _edge_length(footprint[1], footprint[2])
+                _edge_length(footprint[0], footprint[3]) + _edge_length(footprint[1], footprint[2])
             ) / 2.0
             footprint_meta = {
-                "u_min": 0.0, "u_max": 1.0, "v_min": 0.0, "v_max": 1.0,
-                "tray_width_px": tray_width, "tray_height_px": tray_height,
+                "u_min": 0.0,
+                "u_max": 1.0,
+                "v_min": 0.0,
+                "v_max": 1.0,
+                "tray_width_px": tray_width,
+                "tray_height_px": tray_height,
                 "square_side_px": min(tray_width, tray_height),
             }
 
@@ -501,6 +614,45 @@ class FirstLayerPlacementAlgorithm:
                     "polygon": polygon,
                     "bbox": box,
                     "center": _polygon_center(polygon),
+                    "source": "tray_template",
+                }
+            )
+        return slots, footprint, footprint_meta
+
+    def _build_slots(
+        self, image_width: int, image_height: int
+    ) -> Tuple[List[Dict[str, Any]], Polygon, Dict[str, float]]:
+        template_slots, footprint, footprint_meta = self._build_template_slots(image_width, image_height)
+        if self.current_layer <= 1 or not self.current_slot_norm_polygons:
+            return template_slots, footprint, footprint_meta
+
+        template_by_id = {str(item["slot_id"]): item for item in template_slots}
+        slots = []  # type: List[Dict[str, Any]]
+        for slot_id in [str(slot["slot_id"]) for slot in self.slot_templates]:
+            normalized = self.current_slot_norm_polygons.get(slot_id)
+            fallback = template_by_id[slot_id]
+            if not normalized or len(normalized) < 3:
+                slots.append(fallback)
+                continue
+            polygon = [
+                (
+                    min(max(float(point[0]) * image_width, 0.0), float(max(0, image_width - 1))),
+                    min(max(float(point[1]) * image_height, 0.0), float(max(0, image_height - 1))),
+                )
+                for point in normalized
+            ]
+            angle = _long_axis_angle(polygon)
+            slots.append(
+                {
+                    "slot_id": slot_id,
+                    "name": fallback["name"],
+                    "template_orientation_deg": fallback["template_orientation_deg"],
+                    "orientation_deg": angle,
+                    "orientation_label": fallback["orientation_label"],
+                    "polygon": polygon,
+                    "bbox": _polygon_bbox(polygon),
+                    "center": _polygon_center(polygon),
+                    "source": self.current_slot_source,
                 }
             )
         return slots, footprint, footprint_meta
@@ -519,8 +671,8 @@ class FirstLayerPlacementAlgorithm:
                 box = item["bbox"]  # type: BBox
                 center = item["center"]  # type: Point
                 box_polygon = item["polygon"]
-                inside = _point_in_polygon(center, slot_polygon)
                 iou = polygon_iou(slot_polygon, box_polygon)
+                inside = _point_in_polygon(center, slot_polygon)
                 distance_ratio = math.hypot(center[0] - slot_center[0], center[1] - slot_center[1]) / diagonal
                 orientation_diff = _axis_angle_diff(
                     float(slot["orientation_deg"]), float(item["long_axis_angle_deg"])
@@ -532,12 +684,10 @@ class FirstLayerPlacementAlgorithm:
                 if orientation_diff > self.max_orientation_diff_deg:
                     continue
                 center_score = max(
-                    0.0,
-                    1.0 - distance_ratio / max(self.max_center_distance_ratio, 1e-6),
+                    0.0, 1.0 - distance_ratio / max(self.max_center_distance_ratio, 1e-6)
                 )
                 orientation_score = max(
-                    0.0,
-                    1.0 - orientation_diff / max(self.max_orientation_diff_deg, 1e-6),
+                    0.0, 1.0 - orientation_diff / max(self.max_orientation_diff_deg, 1e-6)
                 )
                 score = (
                     (self.center_inside_bonus if inside else 0.0)
@@ -570,13 +720,14 @@ class FirstLayerPlacementAlgorithm:
             used_boxes.add(detection_id)
         return matches
 
-    def _update_slot_states(self, matches: Mapping[str, Mapping[str, Any]]) -> None:
+    def _update_slot_states_rgb(self, matches: Mapping[str, Mapping[str, Any]]) -> None:
         for slot_id, state in self.slot_state.items():
             matched = matches.get(slot_id)
             if matched is not None:
                 state["occupied_hits"] += 1
                 state["empty_hits"] = 0
                 state["matched_detection_id"] = matched["detection_id"]
+                state["last_detection_polygon"] = deepcopy(matched.get("detection_obb_points"))
                 if state["occupied_hits"] >= self.occupied_confirm_frames:
                     state["occupied"] = True
             else:
@@ -586,80 +737,471 @@ class FirstLayerPlacementAlgorithm:
                     state["occupied"] = False
                     state["matched_detection_id"] = None
 
-    def evaluate(self, runtime_result: Mapping[str, Any]) -> Dict[str, Any]:
+    def _depth_slot_result(
+        self,
+        slot: Mapping[str, Any],
+        depth_image: "np.ndarray",
+        image_width: int,
+        image_height: int,
+    ) -> Dict[str, Any]:
+        if self.depth_baseline is None:
+            return {"valid": False, "reason": "BASELINE_NOT_READY", "occupied": False}
+        if depth_image.ndim != 2 or self.depth_baseline.shape != depth_image.shape:
+            return {
+                "valid": False,
+                "reason": "DEPTH_SHAPE_MISMATCH",
+                "occupied": False,
+                "baseline_shape": list(self.depth_baseline.shape),
+                "current_shape": list(depth_image.shape),
+            }
+        depth_height, depth_width = int(depth_image.shape[0]), int(depth_image.shape[1])
+        mask = _polygon_mask(
+            slot["polygon"],
+            image_width,
+            image_height,
+            depth_width,
+            depth_height,
+            self.slot_roi_shrink_ratio,
+        )
+        roi_pixels = int(np.count_nonzero(mask))
+        if roi_pixels <= 0:
+            return {"valid": False, "reason": "EMPTY_ROI", "occupied": False, "roi_pixels": 0}
+        baseline = self.depth_baseline
+        valid = (
+            mask
+            & (baseline >= self.min_depth_mm)
+            & (baseline <= self.max_depth_mm)
+            & (depth_image >= self.min_depth_mm)
+            & (depth_image <= self.max_depth_mm)
+        )
+        valid_count = int(np.count_nonzero(valid))
+        valid_ratio = valid_count / float(roi_pixels)
+        if valid_count <= 0:
+            return {
+                "valid": False,
+                "reason": "NO_VALID_DEPTH",
+                "occupied": False,
+                "roi_pixels": roi_pixels,
+                "valid_pixels": 0,
+                "valid_ratio": 0.0,
+            }
+        delta = baseline[valid].astype(np.float32) - depth_image[valid].astype(np.float32)
+        height_delta = _safe_percentile(delta, self.height_percentile)
+        coverage = float(np.count_nonzero(delta >= self.min_height_delta_mm)) / float(valid_count)
+        occupied = (
+            valid_ratio >= self.min_valid_ratio
+            and self.min_height_delta_mm <= height_delta <= self.max_height_delta_mm
+            and coverage >= self.min_coverage_ratio
+        )
+        return {
+            "valid": valid_ratio >= self.min_valid_ratio,
+            "reason": "OK" if valid_ratio >= self.min_valid_ratio else "LOW_VALID_RATIO",
+            "occupied": occupied,
+            "roi_pixels": roi_pixels,
+            "valid_pixels": valid_count,
+            "valid_ratio": round(valid_ratio, 6),
+            "height_delta_mm": round(height_delta, 3),
+            "coverage_ratio": round(coverage, 6),
+            "min_height_delta_mm": round(self.min_height_delta_mm, 3),
+            "max_height_delta_mm": round(self.max_height_delta_mm, 3),
+        }
+
+    def _update_slot_states_depth(
+        self,
+        slots: Sequence[Mapping[str, Any]],
+        depth_image: Optional["np.ndarray"],
+        image_width: int,
+        image_height: int,
+        rgb_matches: Mapping[str, Mapping[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        details = {}  # type: Dict[str, Dict[str, Any]]
+        if depth_image is None or self.depth_baseline is None:
+            return details
+        for slot in slots:
+            slot_id = str(slot["slot_id"])
+            state = self.slot_state[slot_id]
+            detail = self._depth_slot_result(slot, depth_image, image_width, image_height)
+            previous_depth = state.get("last_depth") if isinstance(state.get("last_depth"), Mapping) else None
+            stable = False
+            if bool(detail.get("occupied")) and previous_depth and bool(previous_depth.get("occupied")):
+                current_delta = _number(detail.get("height_delta_mm"), float("nan"))
+                previous_delta = _number(previous_depth.get("height_delta_mm"), float("nan"))
+                if math.isfinite(current_delta) and math.isfinite(previous_delta):
+                    stable = abs(current_delta - previous_delta) <= self.depth_occupied_stability_mm
+            detail["stable_with_previous"] = stable
+            detail["occupied_stability_mm"] = round(self.depth_occupied_stability_mm, 3)
+            details[slot_id] = detail
+            rgb_match = rgb_matches.get(slot_id)
+            if rgb_match is not None:
+                state["matched_detection_id"] = rgb_match.get("detection_id")
+                state["last_detection_polygon"] = deepcopy(rgb_match.get("detection_obb_points"))
+            if bool(detail.get("occupied")):
+                state["occupied_hits"] = state["occupied_hits"] + 1 if stable else 1
+                state["empty_hits"] = 0
+                if state["occupied_hits"] >= self.depth_occupied_confirm_frames:
+                    state["occupied"] = True
+            else:
+                state["occupied_hits"] = 0
+                state["empty_hits"] += 1
+                if not self.sticky_occupied and state["empty_hits"] >= self.empty_confirm_frames:
+                    state["occupied"] = False
+                    state["matched_detection_id"] = None
+            state["last_depth"] = deepcopy(detail)
+        return details
+
+    def _footprint_mask(
+        self,
+        slots: Sequence[Mapping[str, Any]],
+        image_width: int,
+        image_height: int,
+        depth_width: int,
+        depth_height: int,
+    ) -> "np.ndarray":
+        union = np.zeros((depth_height, depth_width), dtype=bool)
+        for slot in slots:
+            union |= _polygon_mask(
+                slot["polygon"], image_width, image_height, depth_width, depth_height, self.slot_roi_shrink_ratio
+            )
+        return union
+
+    def _capture_depth_baseline(
+        self,
+        depth_image: "np.ndarray",
+        slots: Sequence[Mapping[str, Any]],
+        image_width: int,
+        image_height: int,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        if depth_image.ndim != 2:
+            self.baseline_candidates = []
+            return False, {"valid": False, "reason": "DEPTH_DIMENSION_INVALID"}
+        depth_height, depth_width = int(depth_image.shape[0]), int(depth_image.shape[1])
+        mask = self._footprint_mask(slots, image_width, image_height, depth_width, depth_height)
+        roi_pixels = int(np.count_nonzero(mask))
+        valid = mask & (depth_image >= self.min_depth_mm) & (depth_image <= self.max_depth_mm)
+        valid_count = int(np.count_nonzero(valid))
+        valid_ratio = valid_count / float(max(1, roi_pixels))
+        self.baseline_capture_valid_ratio = valid_ratio
+        if valid_ratio < self.baseline_min_valid_ratio:
+            self.baseline_candidates = []
+            self.baseline_capture_stability_mm = None
+            return False, {
+                "valid": False,
+                "reason": "LOW_VALID_RATIO",
+                "valid_ratio": round(valid_ratio, 6),
+                "required_valid_ratio": round(self.baseline_min_valid_ratio, 6),
+                "captured_frames": 0,
+                "required_frames": self.baseline_capture_frames,
+            }
+
+        candidate = depth_image.astype(np.uint16, copy=True)
+        stability = 0.0
+        if self.baseline_candidates:
+            previous = self.baseline_candidates[-1]
+            common = (
+                mask
+                & (previous >= self.min_depth_mm)
+                & (previous <= self.max_depth_mm)
+                & (candidate >= self.min_depth_mm)
+                & (candidate <= self.max_depth_mm)
+            )
+            if np.any(common):
+                difference = np.abs(previous[common].astype(np.float32) - candidate[common].astype(np.float32))
+                stability = _safe_percentile(difference, 50.0)
+            if stability > self.baseline_stability_mm:
+                self.baseline_candidates = []
+        self.baseline_capture_stability_mm = stability
+        self.baseline_candidates.append(candidate)
+        if len(self.baseline_candidates) < self.baseline_capture_frames:
+            return False, {
+                "valid": True,
+                "reason": "CAPTURING",
+                "valid_ratio": round(valid_ratio, 6),
+                "stability_mm": round(stability, 3),
+                "captured_frames": len(self.baseline_candidates),
+                "required_frames": self.baseline_capture_frames,
+            }
+
+        stack = np.stack(self.baseline_candidates[-self.baseline_capture_frames :], axis=0).astype(np.float32)
+        invalid = (stack < self.min_depth_mm) | (stack > self.max_depth_mm)
+        stack[invalid] = np.nan
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            with np.errstate(all="ignore"):
+                baseline = np.nanmedian(stack, axis=0)
+        baseline = np.where(np.isfinite(baseline), baseline, 0.0).astype(np.uint16)
+        self.depth_baseline = baseline
+        self.depth_baseline_layer = self.current_layer
+        self.baseline_candidates = []
+        return True, {
+            "valid": True,
+            "reason": "READY",
+            "valid_ratio": round(valid_ratio, 6),
+            "stability_mm": round(stability, 3),
+            "captured_frames": self.baseline_capture_frames,
+            "required_frames": self.baseline_capture_frames,
+        }
+
+    def _derive_next_layer_geometry(
+        self,
+        slots: Sequence[Mapping[str, Any]],
+        image_width: int,
+        image_height: int,
+    ) -> Dict[str, Polygon]:
+        output = {}  # type: Dict[str, Polygon]
+        for slot in slots:
+            slot_id = str(slot["slot_id"])
+            state = self.slot_state.get(slot_id, {})
+            points_value = state.get("last_detection_polygon") if self.use_previous_detected_boxes else None
+            polygon = []  # type: Polygon
+            if isinstance(points_value, list) and len(points_value) >= 3:
+                for value in points_value:
+                    parsed = _point(value)
+                    if parsed is not None:
+                        polygon.append(parsed)
+            if len(polygon) < 3:
+                polygon = list(slot["polygon"])
+            output[slot_id] = [
+                (
+                    min(1.0, max(0.0, float(point[0]) / float(max(1, image_width)))),
+                    min(1.0, max(0.0, float(point[1]) / float(max(1, image_height)))),
+                )
+                for point in polygon
+            ]
+        return output
+
+    def _advance_layer(
+        self,
+        slots: Sequence[Mapping[str, Any]],
+        image_width: int,
+        image_height: int,
+    ) -> None:
+        finished = self.current_layer
+        if finished not in self.completed_layers:
+            self.completed_layers.append(finished)
+        self.current_slot_norm_polygons = self._derive_next_layer_geometry(slots, image_width, image_height)
+        self.current_slot_source = "previous_layer_detected_boxes" if self.use_previous_detected_boxes else "previous_layer_slots"
+        self.current_layer += 1
+        self.slot_state = self._new_slot_state()
+        self.baseline_candidates = []
+        self.baseline_settle_count = 0
+
+    def _output_slots(
+        self,
+        slots: Sequence[Mapping[str, Any]],
+        rgb_matches: Mapping[str, Mapping[str, Any]],
+        depth_details: Mapping[str, Mapping[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        output = []  # type: List[Dict[str, Any]]
+        for slot in slots:
+            slot_id = str(slot["slot_id"])
+            state = self.slot_state[slot_id]
+            rgb_match = rgb_matches.get(slot_id)
+            depth_detail = depth_details.get(slot_id)
+            verifying = bool(rgb_match) if self.current_layer == 1 else bool(depth_detail and depth_detail.get("occupied"))
+            output.append(
+                {
+                    "slot_id": slot_id,
+                    "slot_key": "L{}:{}".format(self.current_layer, slot_id),
+                    "name": slot["name"],
+                    "source": slot.get("source"),
+                    "template_orientation_deg": slot["template_orientation_deg"],
+                    "orientation_deg": round(float(slot["orientation_deg"]), 3),
+                    "orientation_label": slot["orientation_label"],
+                    "polygon": [[round(x, 3), round(y, 3)] for x, y in slot["polygon"]],
+                    "bbox_xyxy": [round(value, 3) for value in slot["bbox"]],
+                    "center_xy": [round(value, 3) for value in slot["center"]],
+                    "occupied": bool(state["occupied"]),
+                    "state": "OCCUPIED" if state["occupied"] else ("VERIFYING" if verifying else "EMPTY"),
+                    "visible_mask": not bool(state["occupied"]),
+                    "matched_detection_id": state.get("matched_detection_id") or (rgb_match or {}).get("detection_id"),
+                    "instant_match": dict(rgb_match) if rgb_match else None,
+                    "depth": dict(depth_detail) if depth_detail else None,
+                    "occupied_hits": int(state["occupied_hits"]),
+                    "empty_hits": int(state["empty_hits"]),
+                }
+            )
+        return output
+
+    def _base_result(
+        self,
+        trays: Sequence[Mapping[str, Any]],
+        boxes: Sequence[Mapping[str, Any]],
+        rejected_non_obb: int,
+        tray_source: Optional[str],
+    ) -> Dict[str, Any]:
+        return {
+            "layer": self.current_layer,
+            "max_layers": self.max_layers,
+            "completed_layers": list(self.completed_layers),
+            "state": "WAIT_TRAY",
+            "complete": False,
+            "layer_complete": False,
+            "stack_complete": False,
+            "slot_count": len(self.slot_templates),
+            "occupied_count": 0,
+            "empty_count": len(self.slot_templates),
+            "next_slot_id": None,
+            "next_slot_key": None,
+            "next_layer": None,
+            "tray": {"detected": False, "locked": False, "source": tray_source},
+            "slots": [],
+            "accepted_box_count": len(boxes),
+            "rejected_non_obb_count": rejected_non_obb,
+            "frame_count": self.frame_count,
+            "depth": {
+                "required": self.current_layer >= 2,
+                "available": False,
+                "baseline_ready": self.depth_baseline is not None,
+                "baseline_layer": self.depth_baseline_layer,
+            },
+        }
+
+    def evaluate(
+        self,
+        runtime_result: Mapping[str, Any],
+        depth_image: Optional["np.ndarray"] = None,
+        depth_status: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
         with self._lock:
             self.frame_count += 1
             image = runtime_result.get("image") if isinstance(runtime_result.get("image"), Mapping) else {}
             image_width = max(1, int(_number(image.get("width"), 1)))
             image_height = max(1, int(_number(image.get("height"), 1)))
+            self.last_image_size = (image_width, image_height)
+            if depth_image is not None:
+                if not isinstance(depth_image, np.ndarray) or depth_image.ndim != 2:
+                    raise ValueError("depth_image 必须是二维 numpy 数组")
+                if depth_image.dtype != np.uint16:
+                    depth_image = depth_image.astype(np.uint16, copy=False)
+
             trays, boxes, rejected_non_obb = self._accepted_detections(runtime_result)
             tray_source = self._update_tray(trays)
-
             if self.tray_bbox is None or self.tray_polygon is None or tray_source is None:
-                return {
-                    "layer": 1,
-                    "state": "WAIT_TRAY",
-                    "complete": False,
-                    "slot_count": len(self.slot_templates),
-                    "occupied_count": 0,
-                    "empty_count": len(self.slot_templates),
-                    "next_slot_id": None,
-                    "tray": {"detected": False, "locked": False},
-                    "slots": [],
-                    "accepted_box_count": len(boxes),
-                    "rejected_non_obb_count": rejected_non_obb,
-                    "frame_count": self.frame_count,
-                }
+                return self._base_result(trays, boxes, rejected_non_obb, tray_source)
 
             slots, footprint, footprint_meta = self._build_slots(image_width, image_height)
-            matches = self._match_boxes(slots, boxes)
-            self._update_slot_states(matches)
-
-            output_slots = []  # type: List[Dict[str, Any]]
-            for slot in slots:
-                slot_id = str(slot["slot_id"])
-                state = self.slot_state[slot_id]
-                match = matches.get(slot_id)
-                output_slots.append(
-                    {
-                        "slot_id": slot_id,
-                        "name": slot["name"],
-                        "template_orientation_deg": slot["template_orientation_deg"],
-                        "orientation_deg": round(float(slot["orientation_deg"]), 3),
-                        "orientation_label": slot["orientation_label"],
-                        "polygon": [[round(x, 3), round(y, 3)] for x, y in slot["polygon"]],
-                        "bbox_xyxy": [round(value, 3) for value in slot["bbox"]],
-                        "center_xy": [round(value, 3) for value in slot["center"]],
-                        "occupied": bool(state["occupied"]),
-                        "state": "OCCUPIED" if state["occupied"] else ("VERIFYING" if match else "EMPTY"),
-                        "visible_mask": not bool(state["occupied"]),
-                        "matched_detection_id": (
-                            state["matched_detection_id"]
-                            if state["occupied"]
-                            else (match or {}).get("detection_id")
-                        ),
-                        "instant_match": dict(match) if match else None,
-                        "occupied_hits": int(state["occupied_hits"]),
-                        "empty_hits": int(state["empty_hits"]),
-                    }
+            rgb_matches = self._match_boxes(slots, boxes)
+            depth_details = {}  # type: Dict[str, Dict[str, Any]]
+            if self.current_layer == 1:
+                self._update_slot_states_rgb(rgb_matches)
+            elif depth_image is not None and self.depth_baseline is not None:
+                depth_details = self._update_slot_states_depth(
+                    slots, depth_image, image_width, image_height, rgb_matches
                 )
 
+            output_slots = self._output_slots(slots, rgb_matches, depth_details)
             occupied = [slot["slot_id"] for slot in output_slots if slot["occupied"]]
             empty = [slot_id for slot_id in self.slot_order if slot_id not in occupied]
-            complete = len(occupied) == len(output_slots) and bool(output_slots)
-            next_slot_id = None if complete else (empty[0] if empty else None)
-            state_name = "LAYER_1_COMPLETE" if complete else "LAYER_1_FILLING"
+            layer_complete = len(occupied) == len(output_slots) and bool(output_slots)
+            final_layer = self.max_layers > 0 and self.current_layer >= self.max_layers
+            stack_complete = layer_complete and final_layer
+            next_slot_id = None if layer_complete else (empty[0] if empty else None)
+            next_layer = None
+            transition = {
+                "state": "NONE",
+                "baseline_capture": {
+                    "settled_frames": self.baseline_settle_count,
+                    "required_settle_frames": self.baseline_settle_frames,
+                    "captured_frames": len(self.baseline_candidates),
+                    "required_frames": self.baseline_capture_frames,
+                },
+            }
+            if not layer_complete:
+                self.baseline_settle_count = 0
+                self.baseline_candidates = []
+
+            state_name = "LAYER_{}_FILLING".format(self.current_layer)
+            depth_usable = (
+                depth_image is not None
+                and self.depth_baseline is not None
+                and bool(depth_details)
+                and any(bool(detail.get("valid")) for detail in depth_details.values())
+            )
+            if self.current_layer >= 2 and not depth_usable:
+                state_name = "LAYER_{}_WAIT_DEPTH".format(self.current_layer)
+            if layer_complete:
+                if stack_complete:
+                    if self.current_layer not in self.completed_layers:
+                        self.completed_layers.append(self.current_layer)
+                    state_name = "STACK_COMPLETE"
+                    transition["state"] = "FINAL_LAYER_COMPLETE"
+                elif not self.auto_advance:
+                    state_name = "LAYER_{}_COMPLETE".format(self.current_layer)
+                    transition["state"] = "MANUAL_ADVANCE_REQUIRED"
+                elif depth_image is None:
+                    state_name = "LAYER_{}_COMPLETE".format(self.current_layer)
+                    transition["state"] = "WAIT_DEPTH_BASELINE"
+                elif self.baseline_settle_count < self.baseline_settle_frames:
+                    self.baseline_settle_count += 1
+                    self.baseline_candidates = []
+                    state_name = "LAYER_{}_SETTLING".format(self.current_layer)
+                    transition["state"] = "WAIT_SETTLE"
+                    transition["baseline_capture"] = {
+                        "settled_frames": self.baseline_settle_count,
+                        "required_settle_frames": self.baseline_settle_frames,
+                        "captured_frames": 0,
+                        "required_frames": self.baseline_capture_frames,
+                    }
+                else:
+                    ready, capture = self._capture_depth_baseline(
+                        depth_image, slots, image_width, image_height
+                    )
+                    capture["settled_frames"] = self.baseline_settle_count
+                    capture["required_settle_frames"] = self.baseline_settle_frames
+                    transition["baseline_capture"] = capture
+                    if ready:
+                        completed_layer = self.current_layer
+                        self._advance_layer(slots, image_width, image_height)
+                        next_layer = self.current_layer
+                        new_slots, footprint, footprint_meta = self._build_slots(image_width, image_height)
+                        output_slots = self._output_slots(new_slots, {}, {})
+                        occupied = []
+                        empty = list(self.slot_order)
+                        layer_complete = False
+                        stack_complete = False
+                        next_slot_id = empty[0] if empty else None
+                        state_name = "LAYER_{}_FILLING".format(self.current_layer)
+                        transition["state"] = "ADVANCED"
+                        transition["completed_layer"] = completed_layer
+                        transition["next_layer"] = self.current_layer
+                        slots = new_slots
+                    else:
+                        state_name = "LAYER_{}_CAPTURING_BASELINE".format(self.current_layer)
+                        transition["state"] = "CAPTURING_BASELINE"
+
             tray_angle = _normalize_axis_angle(_edge_angle_deg(self.tray_polygon[0], self.tray_polygon[1]))
+            depth_document = {
+                "required": self.current_layer >= 2 or layer_complete,
+                "available": depth_image is not None,
+                "usable": depth_usable if self.current_layer >= 2 else depth_image is not None,
+                "baseline_ready": self.depth_baseline is not None,
+                "baseline_layer": self.depth_baseline_layer,
+                "current_shape": list(depth_image.shape) if depth_image is not None else None,
+                "min_height_delta_mm": round(self.min_height_delta_mm, 3),
+                "max_height_delta_mm": round(self.max_height_delta_mm, 3),
+                "min_coverage_ratio": round(self.min_coverage_ratio, 6),
+            }
+            if isinstance(depth_status, Mapping):
+                depth_document["source"] = deepcopy(dict(depth_status))
+
             return {
-                "layer": 1,
+                "layer": self.current_layer,
+                "max_layers": self.max_layers,
+                "completed_layers": list(self.completed_layers),
                 "state": state_name,
-                "complete": complete,
+                "complete": layer_complete,
+                "layer_complete": layer_complete,
+                "stack_complete": stack_complete,
                 "slot_count": len(output_slots),
                 "occupied_count": len(occupied),
                 "empty_count": len(output_slots) - len(occupied),
                 "occupied_slot_ids": occupied,
                 "empty_slot_ids": empty,
                 "next_slot_id": next_slot_id,
+                "next_slot_key": (
+                    "L{}:{}".format(self.current_layer, next_slot_id) if next_slot_id else None
+                ),
+                "next_layer": next_layer,
                 "tray": {
                     "detected": bool(trays),
                     "locked": self.tray_polygon is not None,
@@ -689,6 +1231,12 @@ class FirstLayerPlacementAlgorithm:
                 "slots": output_slots,
                 "accepted_box_count": len(boxes),
                 "rejected_non_obb_count": rejected_non_obb,
-                "instant_matched_slot_ids": sorted(matches),
+                "instant_matched_slot_ids": sorted(rgb_matches),
                 "frame_count": self.frame_count,
+                "depth": depth_document,
+                "transition": transition,
             }
+
+
+# Backward-compatible name used by the existing launcher and earlier tests.
+FirstLayerPlacementAlgorithm = MultiLayerPlacementAlgorithm

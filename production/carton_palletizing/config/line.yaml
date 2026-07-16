@@ -7,7 +7,10 @@ component: carton_palletizing_app
 camera_bridge:
   base_url: http://127.0.0.1:18182
   snapshot_path: /stream/snapshot.jpg
+  depth_path: /stream/depth.png
   health_path: /health
+  # 第2层及以上必须使用新鲜的 D2C 对齐深度图。
+  max_depth_age_ms: 1500
 
 runtime_recovery:
   stale_frame_timeout_ms: 3000
@@ -40,7 +43,7 @@ collector:
   production_inference_source: app
 
 task:
-  task_id: first_layer_placement
+  task_id: multi_layer_placement
   algorithm:
     classes:
       # 当前 OBB 模型类别固定：0=纸箱，1=托盘。class_name 仅作为兼容兜底。
@@ -77,8 +80,38 @@ task:
     temporal:
       occupied_confirm_frames: 2
       empty_confirm_frames: 5
-      # 第一阶段按真实放箱流程锁定占位，防止短时漏检后掩膜重新出现。
+      # 已确认占位保持锁定，直到整垛 reset，防止短时漏检导致掩膜重新出现。
       sticky_occupied: true
+
+    layering:
+      # 默认堆4层；可改为任意正整数。设置为0时不限制层数。
+      max_layers: 4
+      auto_advance: true
+      # 每层完成后采集多帧稳定深度，作为下一层基准。
+      baseline_capture_frames: 3
+      # 每层完成后先等待若干检测周期，让机器人和运动纸箱离开 ROI。
+      baseline_settle_frames: 5
+      baseline_stability_mm: 15.0
+      # 优先使用上一层实际检测到的纸箱 OBB 作为下一层摆放掩膜；
+      # 某个位置缺少可靠 OBB 时自动退回标准 slot。
+      use_previous_detected_boxes: true
+
+    depth:
+      min_depth_mm: 100
+      max_depth_mm: 5000
+      # 向内缩小 slot，减少纸箱边缘、缝隙和飞点影响。
+      slot_roi_shrink_ratio: 0.12
+      min_valid_ratio: 0.45
+      baseline_min_valid_ratio: 0.55
+      # overhead 相机下，新纸箱更靠近相机：baseline - current > 0。
+      # 80mm/600mm 为初始值，现场应按真实纸箱高度标定。
+      min_height_delta_mm: 80.0
+      max_height_delta_mm: 600.0
+      min_coverage_ratio: 0.55
+      height_percentile: 50.0
+      # 多帧高度差不仅要连续满足阈值，帧间高度抖动也必须足够小。
+      occupied_confirm_frames: 3
+      occupied_stability_mm: 20.0
 
     template:
       # 从左下角 P3 开始，按画面中的顺时针方向：左下 -> 左上 -> 右上 -> 右下。

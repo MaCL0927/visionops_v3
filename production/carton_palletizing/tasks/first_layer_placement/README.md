@@ -1,61 +1,55 @@
-# First Layer Placement（OBB）
+# Multi-Layer Placement（OBB + RGB-D）
 
-输入必须是 Runtime 标准 OBB `inference_result`：
+目录名为兼容早期第一层版本而保留，实际算法类已经升级为 `MultiLayerPlacementAlgorithm`，并保留 `FirstLayerPlacementAlgorithm` 别名。
+
+## 分层依据
+
+- 第 1 层：纸箱 OBB 与四个 slot 进行几何匹配；
+- 第 2 层及以后：使用上一层完成后的深度图作为基准，按 slot 判断新增高度；
+- 每层完成：采集稳定深度基准并自动进入下一层；
+- 下一层掩膜：优先继承上一层实际检测纸箱的 OBB，多层均可循环使用。
+
+深度占位判定：
+
+```text
+height_delta = baseline_depth - current_depth
+```
+
+只有同时满足以下条件才确认：
+
+```text
+有效深度比例 >= min_valid_ratio
+高度差统计值位于 [min_height_delta_mm, max_height_delta_mm]
+达到最小高度差的像素覆盖率 >= min_coverage_ratio
+连续满足 occupied_confirm_frames 帧
+```
+
+## 输出示例
 
 ```json
 {
-  "task_type": "obb",
-  "detections": [
+  "layer": 3,
+  "max_layers": 4,
+  "state": "LAYER_3_FILLING",
+  "completed_layers": [1, 2],
+  "occupied_count": 1,
+  "slot_count": 4,
+  "next_slot_id": "P1",
+  "next_slot_key": "L3:P1",
+  "layer_complete": false,
+  "stack_complete": false,
+  "slots": [
     {
-      "class_id": 0,
-      "class_name": "box",
-      "bbox_xyxy": [100, 100, 300, 220],
-      "obb": {
-        "cx": 200,
-        "cy": 160,
-        "w": 200,
-        "h": 120,
-        "angle_deg": 3.0,
-        "points": [[100, 95], [305, 105], [300, 225], [95, 215]]
+      "slot_id": "P3",
+      "slot_key": "L3:P3",
+      "occupied": true,
+      "visible_mask": false,
+      "depth": {
+        "height_delta_mm": 146.0,
+        "coverage_ratio": 0.88,
+        "valid_ratio": 0.96
       }
     }
   ]
 }
 ```
-
-类别：
-
-```text
-0 = box
-1 = tray
-```
-
-输出 `placement`：
-
-```json
-{
-  "layer": 1,
-  "state": "LAYER_1_FILLING",
-  "occupied_count": 2,
-  "slot_count": 4,
-  "next_slot_id": "P3",
-  "tray": {
-    "obb_points": [],
-    "angle_deg": 2.8
-  },
-  "slots": []
-}
-```
-
-`footprint` 给出由托盘短边生成的居中正方形垛型区域；每个 slot 含绝对像素 `polygon`、`bbox_xyxy`、实际图像朝向 `orientation_deg`、模板方向 `orientation_label`、`occupied` 和 `visible_mask`。前端只绘制 `visible_mask=true` 的区域。
-
-默认摆放顺序为 `P3 -> P1 -> P2 -> P4`，从左下角开始按顺时针方向进行。
-
-匹配依据：
-
-- 纸箱 OBB 与 slot 多边形 IoU；
-- 纸箱中心是否进入 slot；
-- 中心距离；
-- 纸箱长轴方向与 slot 方向差。
-
-占位状态默认连续两帧确认并保持粘滞；更换托盘时通过 `/api/app/reset` 清除。

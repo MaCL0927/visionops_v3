@@ -1,5 +1,5 @@
 [Unit]
-Description=VisionOps v3 Carton Palletizing First-Layer App
+Description=VisionOps v3 Carton Palletizing Multi-Layer RGB-D App
 After=network-online.target visionops-v3-carton-palletizing-runtime.service
 Wants=network-online.target
 
