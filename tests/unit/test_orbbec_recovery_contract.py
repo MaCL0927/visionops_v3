@@ -44,6 +44,16 @@ def test_bridge_watchdog_units_and_script_are_installed_by_profile() -> None:
     assert timer.exists()
     assert "visionops-orbbec336l-bridge-watchdog.timer" in installer
     assert "OnUnitActiveSec=10s" in timer.read_text(encoding="utf-8")
+    watchdog_source = script.read_text(encoding="utf-8")
+    for token in (
+        "VISIONOPS_CAMERA_WATCHDOG_MAX_SERVICE_RESTARTS",
+        "VISIONOPS_CAMERA_WATCHDOG_REBOOT_ENABLED",
+        "orbbec336l_failed_service_restarts",
+        "systemctl reboot",
+        "REBOOT_ONCE_PER_INCIDENT",
+    ):
+        assert token in watchdog_source
+    assert "VISIONOPS_CAMERA_WATCHDOG_MAX_SERVICE_RESTARTS=10" in installer
 
 
 def test_camera_alarm_modbus_interface_is_reserved_but_disabled() -> None:

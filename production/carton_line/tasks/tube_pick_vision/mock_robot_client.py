@@ -105,6 +105,7 @@ class Client:
                     return
 
         threading.Thread(target=ping_loop, daemon=True).start()
+        last_fault: tuple[int, str] | None = None
         while not self.stop_event.is_set():
             opcode, payload = _read_server_frame(self.sock)
             if opcode == 0x1:
@@ -112,14 +113,18 @@ class Client:
                     document = json.loads(payload.decode("utf-8"))
                     print(json.dumps(document, ensure_ascii=False, indent=2))
                     if isinstance(document, dict):
-                        alarm = document.get("alarm") if isinstance(document.get("alarm"), dict) else {}
-                        if alarm.get("active"):
-                            print(
-                                "[CAMERA-ALARM-DEMO] "
-                                f"severity={alarm.get('severity')} "
-                                f"code={alarm.get('code')} "
-                                f"message={alarm.get('message')}"
-                            )
+                        try:
+                            fault_code = int(document.get("fault_code") or 0)
+                        except (TypeError, ValueError):
+                            fault_code = 0
+                        fault_type = str(document.get("fault_type") or "NONE")
+                        current_fault = (fault_code, fault_type)
+                        if current_fault != last_fault:
+                            if fault_code:
+                                print(f"[FAULT] code={fault_code} type={fault_type}")
+                            elif last_fault is not None and last_fault[0] != 0:
+                                print("[FAULT-CLEARED] code=0 type=NONE")
+                            last_fault = current_fault
                         if document.get("type") == "detection":
                             lying_items = [
                                 item

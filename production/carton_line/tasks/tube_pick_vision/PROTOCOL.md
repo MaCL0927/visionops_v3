@@ -1,17 +1,32 @@
-# 外部推理盒子 WebSocket 契约（tube_pick_vision）
+# tube_pick_vision WebSocket 对接协议
 
-## 1. 网络
+版本：v1.3（简化故障码）
+
+## 1. 网络与角色
 
 - 视觉盒：WebSocket Server；
 - 机器人后端：WebSocket Client；
-- 地址：`ws://<box-ip>:9001/vision`；
+- WebSocket：`ws://<盒子IP>:9001/vision`；
+- 原始视频：`http://<盒子IP>:18182/stream.mjpeg`；
 - JSON 使用 WebSocket 文本帧；
 - 心跳使用 WebSocket 原生 Ping/Pong；
-- 原始视频：`http://<box-ip>:18182/stream.mjpeg`，与检测结果软同步。
+- MJPEG 与检测结果采用软同步，只用于显示和标定观察。
 
-## 2. 检测结果
+盒子 IP 及 `video_url` 以现场 `/etc/visionops_v3/carton_line.yaml` 为准。
 
-连续模式按配置频率推送：
+## 2. 类别定义
+
+| class_id | 含义 | 处理方式 |
+|---:|---|---|
+| 0 | 正常直立纸筒产品 | 返回检测结果和相机三维坐标 |
+| 1 | 大隔板 | 返回检测结果和中心点相机三维坐标 |
+| 2 | 倒伏纸筒 `lying` | 按普通目标返回；机器人侧负责告警 |
+
+视觉盒使用普通 detection 模型，不返回旋转角度。
+
+## 3. 正常检测消息
+
+连续模式按配置频率推送；`trigger` 模式会额外原样返回 `request_id`。
 
 ```json
 {
@@ -28,13 +43,6 @@
     },
     {
       "id": 1,
-      "class_id": 1,
-      "confidence": 0.90,
-      "position_camera": [15.0, 20.0, 1310.0],
-      "center_px": [350.0, 260.0]
-    },
-    {
-      "id": 2,
       "class_id": 2,
       "confidence": 0.94,
       "position_camera": [-82.4, 41.7, 920.0],
@@ -44,37 +52,128 @@
   "image": {"width": 640, "height": 480},
   "coordinate_frame": "color_camera",
   "coordinate_unit": "mm",
-  "video_url": "http://192.168.213.137:18182/stream.mjpeg",
+  "video_url": "http://<盒子IP>:18182/stream.mjpeg",
   "video_sync": "soft",
-  "latency_ms": 58.3
+  "latency_ms": 58.3,
+  "fault_code": 0,
+  "fault_type": "NONE",
+  "source": {
+    "runtime_frame_id": "frame-hp60c-00000102",
+    "runtime_result_id": "result-rknn-00000102"
+  }
 }
 ```
 
-字段：
+字段说明：
 
-- `frame_id`：盒子服务进程内递增序号，用于排序；MJPEG 软同步不提供严格逐帧对应；
-- `timestamp`：本次采集/推理开始时的 Unix 秒；
-- `class_id=0`：正常直立纸筒产品；
-- `class_id=1`：大隔板；
-- `class_id=2`：倒伏纸筒 `lying`，属于异常对象；视觉盒只按普通检测目标返回，告警判断由机器人系统完成；
-- `position_camera`：彩色相机光心坐标系，X 向右、Y 向下、Z 向前，单位毫米；
+- `frame_id`：视觉服务进程内递增序号；
+- `timestamp`：本次推理所用图像的采集时间或推理开始时间，Unix 秒；
+- `position_camera`：彩色相机坐标系 `[X,Y,Z]`，X 向右、Y 向下、Z 向前，单位 mm；
 - `center_px`：640×480 RGB 图像中的检测框中心；
-- 深度无效：`position_camera=[0,0,0]`；
-- 不返回 `angle_deg`，当前模型为普通 detection，机器人端按无角度处理。
+- 深度无效时：`position_camera=[0,0,0]`，但二维检测仍有效；
+- `fault_code=0`、`fault_type=NONE`：视觉服务正常。
 
-内部推理异常时连接保持，盒子返回：
+## 4. 故障消息
+
+机器人 WebSocket 只暴露两个稳定故障字段，不发送 Bridge 内部重连状态、SDK 错误文本、告警确认状态或 Modbus 预留结构。
+
+### 4.1 相机不可用
+
+RGB 或 Depth 无有效新帧、相机拔出、Bridge 正在重连或 Bridge 无法访问，均统一映射为：
 
 ```json
 {
   "type": "detection",
+  "request_id": "pick-1008",
   "frame_id": 1025,
   "timestamp": 1783905060.100,
   "items": [],
-  "error": {"code": "UpstreamError", "message": "..."}
+  "latency_ms": 42.1,
+  "fault_code": 3101,
+  "fault_type": "CAMERA_DISCONNECTED"
 }
 ```
 
-## 3. 控制
+异常期间不会继续发送拔线前的旧检测结果。
+
+### 4.2 推理服务异常
+
+相机正常，但 Runtime 推理、结果解析、深度处理或三维反投影发生未归类异常时：
+
+```json
+{
+  "type": "detection",
+  "request_id": "pick-1009",
+  "frame_id": 1026,
+  "timestamp": 1783905060.500,
+  "items": [],
+  "latency_ms": 51.2,
+  "fault_code": 3201,
+  "fault_type": "VISION_INFERENCE_ERROR"
+}
+```
+
+## 5. 故障码表
+
+| fault_code | fault_type | 含义 | 机器人建议 |
+|---:|---|---|---|
+| 0 | `NONE` | 正常 | 正常消费 `items` |
+| 3101 | `CAMERA_DISCONNECTED` | RGB/Depth 相机不可用或正在恢复 | 暂停抓取并报警，等待恢复 |
+| 3201 | `VISION_INFERENCE_ERROR` | 相机正常但视觉推理链路失败 | 暂停本次动作并报警/重试 |
+
+机器人只需判断：
+
+```python
+fault_code = int(message.get("fault_code", 0))
+if fault_code != 0:
+    stop_pick_and_raise_alarm(fault_code, message.get("fault_type"))
+```
+
+未来接入 PLC Modbus-TCP 时，可直接把 `fault_code` 写入约定故障寄存器。当前版本尚未实现寄存器通信。
+
+## 6. 状态消息
+
+建立连接后立即发送，之后按配置周期发送：
+
+正常：
+
+```json
+{
+  "type": "status",
+  "online": true,
+  "fps": 3.2,
+  "model": "detection-tube-pick",
+  "camera_connected": true,
+  "fault_code": 0,
+  "fault_type": "NONE",
+  "latency_ms": 58.3,
+  "continuous_enabled": true,
+  "clients": 1,
+  "video_url": "http://<盒子IP>:18182/stream.mjpeg"
+}
+```
+
+相机异常：
+
+```json
+{
+  "type": "status",
+  "online": true,
+  "fps": 3.2,
+  "model": "detection-tube-pick",
+  "camera_connected": false,
+  "fault_code": 3101,
+  "fault_type": "CAMERA_DISCONNECTED",
+  "latency_ms": 42.1,
+  "continuous_enabled": true,
+  "clients": 1,
+  "video_url": "http://<盒子IP>:18182/stream.mjpeg"
+}
+```
+
+`online=true` 表示 WebSocket 服务在线，不代表相机一定正常。机器人应以 `fault_code` 为故障判断主字段。
+
+## 7. 控制命令
 
 ```json
 {"type":"control","command":"start","request_id":101}
@@ -84,12 +183,12 @@
 
 - `start`：开启连续推理；
 - `stop`：暂停连续推理，连接保持；
-- `trigger`：请求立即执行一次推理；
+- `trigger`：立即请求一次检测；
 - `trigger.request_id` 必填，允许整数或非空字符串；
-- trigger 对应的 detection 原样返回 `request_id`；
+- 对应 detection 原样返回 `request_id`；
 - 连续模式 detection 不带 `request_id`。
 
-接收命令后先返回排队确认：
+接收 trigger 后先返回：
 
 ```json
 {
@@ -102,136 +201,23 @@
 }
 ```
 
-随后返回：
+## 8. ROI、视频和三维坐标
 
-```json
-{
-  "type":"detection",
-  "request_id":103,
-  "frame_id":1026,
-  "timestamp":1783905060.500,
-  "items":[]
-}
+- ROI 只在 VisionOps Web 设置，机器人不下发 ROI；
+- 模型仍对完整 640×480 图像推理，Runtime 在输出阶段按目标中心过滤 ROI；
+- RGB 与 D2C Depth 固定为 640×480；
+- 三维反投影由 Orbbec SDK 完成；
+- 机器人负责手眼标定和相机坐标到机器人坐标的转换；
+- MJPEG 断线后机器人视频客户端应自动重新连接；
+- MJPEG 为软同步，不应使用视频帧替代 detection 中的三维坐标。
+
+## 9. 视觉盒本地诊断
+
+复杂的相机状态、帧年龄、重连次数和 SDK 错误信息仍保留在视觉盒本地 HTTP 接口，供维护人员排查：
+
+```bash
+curl -s http://127.0.0.1:19130/api/app/status | python3 -m json.tool
+curl -s http://127.0.0.1:18182/health | python3 -m json.tool
 ```
 
-## 4. 状态
-
-连接建立后立即发送，并按配置周期推送：
-
-```json
-{
-  "type":"status",
-  "online":true,
-  "fps":10.0,
-  "model":"tube_pick_vision",
-  "camera_connected":true,
-  "latency_ms":58.3,
-  "continuous_enabled":true,
-  "clients":1,
-  "video_url":"http://192.168.213.137:18182/stream.mjpeg",
-  "error":null
-}
-```
-
-## 5. ROI 与阈值
-
-机器人侧不下发 ROI 或阈值。ROI 由 VisionOps 边缘 Web 设置：
-
-```text
-整图输入模型 → Runtime 后处理 → 目标中心位于 ROI 内才保留 → WebSocket 输出
-```
-
-因此 Web 模型验证、WebSocket、其他 Runtime 调用获得相同的 ROI 过滤结果。
-
-## 6. 三维坐标
-
-视觉服务从 D2C 对齐 16UC1 深度图采样中心邻域深度，然后调用 336L Bridge：
-
-```text
-POST /api/coordinate/deproject
-{"points":[[u,v,depth_mm], ...]}
-```
-
-Bridge 内部使用 Orbbec SDK `CoordinateTransformHelper::calibration2dTo3d()`，输出彩色相机坐标系毫米值。视觉系统不执行手眼标定和机器人坐标转换。
-
-
-## 7. `lying` 异常类别扩展
-
-模型新增普通 detection 类别 `class_id=2`，类别名为 `lying`。其传输结构与产品、隔板完全一致：
-
-```json
-{
-  "id": 2,
-  "class_id": 2,
-  "confidence": 0.94,
-  "position_camera": [-82.4, 41.7, 920.0],
-  "center_px": [278.0, 258.0]
-}
-```
-
-机器人侧处理约定：
-
-1. 任意一条 `items[].class_id == 2` 即表示当前检测帧发现倒伏纸筒；
-2. 告警等级、蜂鸣、暂停抓取或人工介入均由机器人系统决定，视觉盒不增加单独的告警字段；
-3. `position_camera` 与 `center_px` 可用于异常目标定位及界面高亮；
-4. 深度无效时仍返回 `position_camera=[0,0,0]`，但 `class_id=2` 检测本身仍然有效；
-5. ROI 规则与其他类别相同：目标中心位于 VisionOps Web 设置的 ROI 内时才会出现在 `items` 中。
-
-## 8. 相机断线、自动恢复与报警
-
-336L Bridge 同时监测 RGB 和 D2C Depth 新鲜度。任一路过期后，视觉盒不会继续发送
-最后一帧对应的旧检测结果，而是返回空 `items`：
-
-```json
-{
-  "type": "detection",
-  "request_id": "pick-1008",
-  "frame_id": 2052,
-  "items": [],
-  "camera_connected": false,
-  "camera_state": "reconnecting",
-  "error": {
-    "code": "CAMERA_DISCONNECTED",
-    "message": "camera reconnecting: RGB/depth frame stale"
-  },
-  "alarm": {
-    "active": true,
-    "confirmed": false,
-    "source": "camera",
-    "code": "CAMERA_RECONNECTING",
-    "numeric_code": 3102,
-    "severity": "warning",
-    "modbus_tcp_reserved": true,
-    "modbus_tcp_implemented": false
-  }
-}
-```
-
-周期 `status` 新增：
-
-- `camera_connected`：Bridge RGB+Depth 都新鲜才为 `true`；
-- `camera_state`：`starting/running/stale/reconnecting/offline`；
-- `runtime_camera_connected`：Runtime 自身状态，仅用于诊断；
-- `last_color_age_ms`、`last_depth_age_ms`；
-- `camera_reconnect_attempt_count`、`camera_reconnect_success_count`；
-- `error_code`；
-- `alarm.active/confirmed/code/numeric_code/severity/message`。
-
-机器人建议：
-
-1. `camera_connected=false` 或 `alarm.active=true` 时立即暂停抓取并提示异常；
-2. `alarm.confirmed=true` 表示异常已持续超过确认阈值，可升级声光报警；
-3. 只有重新收到 `camera_connected=true` 后才恢复视觉结果消费；
-4. MJPEG 在相机断线时会主动断开，机器人视频客户端应循环重连；
-5. Modbus-TCP 报警字段目前只预留，视觉盒尚未进行 PLC 寄存器写入。
-
-预留数值故障码：
-
-| 数值 | 字符串 | 含义 |
-|---:|---|---|
-| 0 | — | 正常 |
-| 3100 | `CAMERA_STARTING` | 启动/等待首帧 |
-| 3101 | `CAMERA_FRAME_STALE` | RGB 或 Depth 长时间无新帧 |
-| 3102 | `CAMERA_RECONNECTING` | 正在重建 Pipeline |
-| 3103 | `CAMERA_OFFLINE` | 当前无法枚举/打开相机 |
-| 3104 | `CAMERA_BRIDGE_UNREACHABLE` | Bridge HTTP 服务不可访问 |
+这些诊断字段不属于机器人 WebSocket 对接契约。

@@ -160,6 +160,8 @@ def test_service_builds_camera_coordinate_detection(tmp_path) -> None:
     assert response["items"][2]["class_id"] == 0
     assert response["items"][1]["position_camera"] == [1.0, 2.0, 987.0]
     assert response["items"][2]["position_camera"] == [2.0, 3.0, 987.0]
+    assert response["fault_code"] == 0
+    assert response["fault_type"] == "NONE"
 
 
 def test_installed_line_config_merge_preserves_site_values_and_adds_websocket() -> None:
@@ -227,10 +229,11 @@ def test_camera_disconnect_suppresses_old_detection_results(tmp_path) -> None:
     response = service.evaluate_once("camera-offline-1")
     assert called["runtime"] == 0
     assert response["items"] == []
-    assert response["error"]["code"] == "CAMERA_DISCONNECTED"
-    assert response["camera_state"] == "reconnecting"
-    assert response["alarm"]["numeric_code"] == 3102
-    assert response["alarm"]["modbus_tcp_reserved"] is True
+    assert response["fault_code"] == 3101
+    assert response["fault_type"] == "CAMERA_DISCONNECTED"
+    assert "error" not in response
+    assert "camera_state" not in response
+    assert "alarm" not in response
 
 
 def test_status_uses_bridge_freshness_as_camera_source_of_truth(tmp_path) -> None:
@@ -255,8 +258,37 @@ def test_status_uses_bridge_freshness_as_camera_source_of_truth(tmp_path) -> Non
 
     status = service._status_message()
     assert status["camera_connected"] is False
-    assert status["runtime_camera_connected"] is True
-    assert status["camera_state"] == "offline"
-    assert status["error_code"] == "CAMERA_OFFLINE"
-    assert status["alarm"]["active"] is True
-    assert status["alarm"]["modbus_tcp_implemented"] is False
+    assert status["fault_code"] == 3101
+    assert status["fault_type"] == "CAMERA_DISCONNECTED"
+    assert "runtime_camera_connected" not in status
+    assert "camera_state" not in status
+    assert "alarm" not in status
+
+    diagnostics = service._diagnostic_status_message()
+    assert diagnostics["runtime_camera_connected"] is True
+    assert diagnostics["camera_state"] == "offline"
+    assert diagnostics["error_code"] == "CAMERA_OFFLINE"
+    assert diagnostics["alarm"]["active"] is True
+    assert diagnostics["alarm"]["modbus_tcp_implemented"] is False
+
+
+def test_inference_failure_uses_simple_external_fault_contract(tmp_path) -> None:
+    config = deepcopy(DEFAULT_CONFIG)
+    config["pick"]["debug"] = {"save_every_trigger": False, "save_root": str(tmp_path)}
+    service = TubePickVisionService(config)
+    service.bridge.health = lambda: {  # type: ignore[method-assign]
+        "ok": True,
+        "camera_started": True,
+        "camera_connected": True,
+        "camera_state": "running",
+        "last_color_age_ms": 10,
+        "last_depth_age_ms": 10,
+    }
+    service.runtime.infer_once = lambda: (_ for _ in ()).throw(RuntimeError("runtime failed"))  # type: ignore[method-assign]
+
+    response = service.evaluate_once("runtime-failure-1")
+    assert response["request_id"] == "runtime-failure-1"
+    assert response["items"] == []
+    assert response["fault_code"] == 3201
+    assert response["fault_type"] == "VISION_INFERENCE_ERROR"
+    assert "error" not in response

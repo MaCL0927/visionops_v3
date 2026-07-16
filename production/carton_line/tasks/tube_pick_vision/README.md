@@ -154,8 +154,18 @@ python3 -m \
 详细协议见 [PROTOCOL.md](PROTOCOL.md)。新增异常类别的机器人侧对接说明见
 [LYING_CLASS_INTEGRATION.md](LYING_CLASS_INTEGRATION.md)。
 
-## USB 相机断线恢复
+## USB 相机断线恢复与机器人故障码
 
-Bridge 会在 RGB/Depth 超过 3 秒未更新时清除旧缓存、断开 MJPEG、完整重建 Orbbec Pipeline 并指数退避重连。`tube_pick_vision` 在恢复期间只发送空 `items` 和相机告警，不会继续发送旧检测结果。独立 systemd watchdog 仅在 SDK 恢复线程卡死或 HTTP 不可访问时重启 Bridge。
+Bridge 会监测 RGB/Depth 帧新鲜度，断线后清除旧缓存、断开 MJPEG，并自动重建 Orbbec Pipeline。systemd watchdog 仅在 Bridge 恢复线程卡死或 HTTP 不可访问时兜底重启。
 
-未来 PLC Modbus-TCP 告警已预留稳定故障码与配置段，但当前未实现寄存器通信。详细字段见 [PROTOCOL.md](PROTOCOL.md)。
+机器人 WebSocket 不再暴露复杂的内部恢复状态，只保留：
+
+```text
+0    / NONE                    正常
+3101 / CAMERA_DISCONNECTED     相机不可用或正在恢复
+3201 / VISION_INFERENCE_ERROR  推理链路异常
+```
+
+视觉盒本地 `/api/app/status` 仍保留帧年龄、重连次数和 SDK 错误，供维护排查。未来 PLC Modbus-TCP 可直接复用上述数值故障码，当前未实现寄存器通信。
+
+完整协议见 [PROTOCOL.md](PROTOCOL.md)，机器人故障码快速对接见 [ROBOT_FAULT_INTEGRATION.md](ROBOT_FAULT_INTEGRATION.md)。

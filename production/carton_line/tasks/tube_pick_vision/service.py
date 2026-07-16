@@ -28,6 +28,16 @@ from production.carton_line.tasks.tube_pick_vision.websocket_server import WebSo
 DEFAULT_CONFIG = PROJECT_ROOT / "production/carton_line/config/line.yaml"
 MAX_HTTP_BODY = 1024 * 1024
 
+# Stable robot/PLC-facing fault contract. Internal Bridge/Runtime diagnostics stay
+# available through the local HTTP status API, but are intentionally not exposed
+# in WebSocket messages.
+FAULT_NONE = 0
+FAULT_CAMERA_DISCONNECTED = 3101
+FAULT_VISION_INFERENCE_ERROR = 3201
+FAULT_TYPE_NONE = "NONE"
+FAULT_TYPE_CAMERA_DISCONNECTED = "CAMERA_DISCONNECTED"
+FAULT_TYPE_VISION_INFERENCE_ERROR = "VISION_INFERENCE_ERROR"
+
 
 def _timestamp_ms() -> int:
     return int(time.time() * 1000)
@@ -401,31 +411,35 @@ class TubePickVisionService:
             )
         return status
 
+    @staticmethod
+    def _external_fault(camera_connected: bool, inference_error: bool = False) -> tuple[int, str]:
+        """Map detailed internal state to the stable robot-facing fault contract."""
+        if not camera_connected:
+            return FAULT_CAMERA_DISCONNECTED, FAULT_TYPE_CAMERA_DISCONNECTED
+        if inference_error:
+            return FAULT_VISION_INFERENCE_ERROR, FAULT_TYPE_VISION_INFERENCE_ERROR
+        return FAULT_NONE, FAULT_TYPE_NONE
+
     def _new_error_detection(self, frame_id: int, request_id: object | None, error: Exception, started_at: float) -> dict[str, Any]:
-        code = str(getattr(error, "code", type(error).__name__))
         details = getattr(error, "details", None)
+        camera_connected = True
+        if isinstance(error, CameraUnavailableError):
+            camera_connected = False
+        elif isinstance(details, Mapping) and "connected" in details:
+            camera_connected = bool(details.get("connected"))
+        fault_code, fault_type = self._external_fault(
+            camera_connected=camera_connected,
+            inference_error=not isinstance(error, CameraUnavailableError),
+        )
         detection: dict[str, Any] = {
             "type": "detection",
             "frame_id": frame_id,
             "timestamp": started_at,
             "items": [],
             "latency_ms": round((time.time() - started_at) * 1000.0, 3),
-            "error": {"code": code, "message": str(error)},
+            "fault_code": fault_code,
+            "fault_type": fault_type,
         }
-        if isinstance(details, Mapping):
-            detection["camera_state"] = details.get("state")
-            detection["camera_connected"] = bool(details.get("connected"))
-            detection["alarm"] = {
-                "active": bool(details.get("alarm_active")),
-                "confirmed": bool(details.get("alarm_confirmed")),
-                "source": "camera",
-                "code": details.get("fault_code"),
-                "numeric_code": details.get("fault_numeric_code"),
-                "severity": details.get("severity"),
-                "message": details.get("message"),
-                "modbus_tcp_reserved": True,
-                "modbus_tcp_implemented": False,
-            }
         if request_id is not None:
             detection["request_id"] = request_id
         return detection
@@ -478,6 +492,8 @@ class TubePickVisionService:
                     "video_url": self.settings["video"]["public_url"],
                     "video_sync": "soft",
                     "latency_ms": round(latency_ms, 3),
+                    "fault_code": FAULT_NONE,
+                    "fault_type": FAULT_TYPE_NONE,
                     "source": {
                         "runtime_frame_id": runtime_result.get("frame_id"),
                         "runtime_result_id": runtime_result.get("result_id"),
@@ -535,7 +551,8 @@ class TubePickVisionService:
             if not continuous:
                 next_continuous = time.monotonic()
 
-    def _status_message(self) -> dict[str, Any]:
+    def _diagnostic_status_message(self) -> dict[str, Any]:
+        """Detailed local diagnostic status for HTTP/Web maintenance screens."""
         snapshot = self.state.snapshot(self.websocket)
         model_name = ""
         runtime_camera_connected = False
@@ -557,15 +574,13 @@ class TubePickVisionService:
             "numeric_code": int(camera["fault_numeric_code"]),
             "severity": camera["severity"],
             "message": camera["message"] or None,
-            # Stable placeholder for a later PLC Modbus-TCP adapter. No Modbus
-            # socket/register writes are performed by this service today.
             "modbus_tcp_reserved": True,
             "modbus_tcp_implemented": False,
         }
         error = snapshot["last_error"]
         if not camera["connected"]:
             error = {
-                "code": camera["fault_code"] or "CAMERA_DISCONNECTED",
+                "code": camera["fault_code"] or FAULT_TYPE_CAMERA_DISCONNECTED,
                 "message": camera["message"] or "camera unavailable",
                 "timestamp_ms": _timestamp_ms(),
             }
@@ -577,8 +592,6 @@ class TubePickVisionService:
             "online": True,
             "fps": snapshot["detection_fps"],
             "model": model_name,
-            # Bridge RGB+depth freshness is the source of truth. Runtime status is
-            # exposed separately because it may lag briefly during recovery.
             "camera_connected": bool(camera["connected"]),
             "camera_state": camera["state"],
             "runtime_camera_connected": runtime_camera_connected,
@@ -595,9 +608,39 @@ class TubePickVisionService:
             "error": error,
         }
 
+    def _status_message(self) -> dict[str, Any]:
+        """Minimal robot-facing WebSocket status message."""
+        snapshot = self.state.snapshot(self.websocket)
+        model_name = ""
+        try:
+            runtime = self.runtime.status()
+            loaded_model = runtime.get("loaded_model") if isinstance(runtime.get("loaded_model"), Mapping) else {}
+            model_name = str(loaded_model.get("model_name") or loaded_model.get("model_id") or "")
+        except Exception:
+            # Runtime diagnostics remain available through /api/app/status. The
+            # external status contract intentionally stays small and stable.
+            pass
+
+        camera = self._bridge_health_status()
+        fault_code, fault_type = self._external_fault(bool(camera["connected"]))
+        return {
+            "type": "status",
+            "online": True,
+            "fps": snapshot["detection_fps"],
+            "model": model_name,
+            "camera_connected": bool(camera["connected"]),
+            "fault_code": fault_code,
+            "fault_type": fault_type,
+            "latency_ms": snapshot["last_latency_ms"],
+            "continuous_enabled": snapshot["continuous_enabled"],
+            "clients": snapshot["websocket"]["clients"],
+            "video_url": snapshot["video"]["url"],
+        }
+
     def status_snapshot(self) -> dict[str, Any]:
         snapshot = self.state.snapshot(self.websocket)
         snapshot["external_status"] = self._status_message()
+        snapshot["camera_diagnostics"] = self._diagnostic_status_message()
         return snapshot
 
     def _status_loop(self) -> None:
@@ -724,7 +767,7 @@ class StatusHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         if path == "/health":
-            status = self.service._status_message()
+            status = self.service._diagnostic_status_message()
             self._send(
                 200,
                 {

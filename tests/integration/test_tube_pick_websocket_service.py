@@ -130,6 +130,8 @@ def test_websocket_trigger_request_id_round_trip(tmp_path) -> None:
         assert detection["items"][0]["position_camera"] == [-20.0, -120.0, 876.0]
         assert detection["items"][1]["class_id"] == 0
         assert detection["items"][1]["position_camera"] == [0.0, 0.0, 876.0]
+        assert detection["fault_code"] == 0
+        assert detection["fault_type"] == "NONE"
     finally:
         client.close()
         service.stop()

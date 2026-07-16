@@ -148,6 +148,55 @@ sudo bash edge/camera_bridge/orbbec336l_bridge/install_orbbec336l_bridge_service
 sudo systemctl restart visionops-orbbec336l-bridge.service
 ```
 
+### 相机故障升级与整机重启
+
+相机异常首先由 Bridge 内部重建 Pipeline；外部 watchdog 在相机持续不可用时重启
+`visionops-orbbec336l-bridge.service`。同一个相机故障事件中，如果 Bridge 服务连续重启
+10 次后 RGB/Depth 仍未恢复，watchdog 会执行一次：
+
+```bash
+systemctl reboot --no-block
+```
+
+watchdog 以 root 身份运行，因此等价于人工执行 `sudo reboot`。计数保存在：
+
+```text
+/var/lib/visionops_v3/watchdog/
+```
+
+只要相机成功恢复一次，失败计数和 reboot 标记都会清零。若重启后相机仍物理断开，
+同一故障事件不会再次 reboot，避免无人值守设备陷入循环重启。
+
+配置位于：
+
+```text
+/etc/visionops_v3/carton_line.env
+```
+
+关键参数：
+
+```bash
+VISIONOPS_CAMERA_WATCHDOG_RESTART_WHILE_UNHEALTHY=true
+VISIONOPS_CAMERA_WATCHDOG_UNHEALTHY_RESTART_AFTER_S=30
+VISIONOPS_CAMERA_WATCHDOG_MAX_SERVICE_RESTARTS=10
+VISIONOPS_CAMERA_WATCHDOG_REBOOT_ENABLED=true
+VISIONOPS_CAMERA_WATCHDOG_REBOOT_DELAY_S=5
+VISIONOPS_CAMERA_WATCHDOG_REBOOT_ONCE_PER_INCIDENT=true
+VISIONOPS_CAMERA_WATCHDOG_PERSIST_DIR=/var/lib/visionops_v3/watchdog
+```
+
+计划维护或拔相机测试前，可临时停用 timer：
+
+```bash
+sudo systemctl stop visionops-orbbec336l-bridge-watchdog.timer
+```
+
+测试结束后重新启用：
+
+```bash
+sudo systemctl enable --now visionops-orbbec336l-bridge-watchdog.timer
+```
+
 ## 6. tube-pick 服务
 
 安装后启用：
