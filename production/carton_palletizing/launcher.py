@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Launch Runtime, business app or Collector for carton palletizing."""
-
+"""Launch carton-palletizing stack or segmentation box-grasp profiles."""
 from __future__ import annotations
 
 import argparse
@@ -18,22 +17,23 @@ def _config_path(value: Optional[str]) -> str:
     return str(Path(value or os.environ.get("VISIONOPS_CARTON_PALLETIZING_CONFIG", DEFAULT_CONFIG_PATH)).expanduser())
 
 
-def _runtime(config: dict) -> int:
-    runtime = config["runtime"]
+def _runtime(config: dict, profile: str) -> int:
+    runtime = config["runtime"] if profile == "stack" else config["box_grasp"]["runtime"]
     parsed = urlparse(runtime["url"])
     if parsed.scheme != "http" or not parsed.hostname or not parsed.port:
-        raise ValueError("runtime.url 必须包含明确的 http 端口")
+        raise ValueError("Runtime URL 必须包含明确的 http 端口")
     runtime_bin = Path(os.environ.get(
         "VISIONOPS_RUNTIME_BIN",
         str(PROJECT_ROOT / "build-rknn/edge/runtime_cpp/visionops_runtime_mock"),
     ))
-    model_dir = Path(os.environ.get("VISIONOPS_CARTON_PALLETIZING_MODEL_DIR", runtime["model_dir"]))
+    env_name = "VISIONOPS_CARTON_PALLETIZING_MODEL_DIR" if profile == "stack" else "VISIONOPS_CARTON_BOX_GRASP_MODEL_DIR"
+    model_dir = Path(os.environ.get(env_name, runtime["model_dir"]))
     bridge_url = os.environ.get("VISIONOPS_CAMERA_BRIDGE_URL_OVERRIDE", config["camera_bridge"]["base_url"])
     recovery = config["runtime_recovery"]
     if not runtime_bin.is_file() or not os.access(runtime_bin, os.X_OK):
-        raise FileNotFoundError(f"Runtime binary not found or not executable: {runtime_bin}")
+        raise FileNotFoundError("Runtime binary not found or not executable: {}".format(runtime_bin))
     if not (model_dir / "model.rknn").is_file() or not (model_dir / "model.yaml").is_file():
-        raise FileNotFoundError(f"Model package must contain model.rknn and model.yaml: {model_dir}")
+        raise FileNotFoundError("Model package must contain model.rknn and model.yaml: {}".format(model_dir))
     command = [
         str(runtime_bin),
         "--backend", "rknn",
@@ -57,30 +57,42 @@ def _runtime(config: dict) -> int:
     return 0
 
 
-def _app(config_path: str) -> int:
-    command = [
-        sys.executable,
-        "-m", "production.carton_palletizing.tasks.first_layer_placement.service",
-        "--config", config_path,
-    ]
+def _app(config_path: str, profile: str) -> int:
+    module = (
+        "production.carton_palletizing.tasks.first_layer_placement.service"
+        if profile == "stack"
+        else "production.carton_palletizing.tasks.box_grasp_vision.service"
+    )
+    command = [sys.executable, "-m", module, "--config", config_path]
     os.execv(command[0], command)
     return 0
 
 
-def _collector(config: dict) -> int:
-    collector = config["collector"]
-    os.environ["VISIONOPS_COLLECTOR_RUNTIME_SERVICE"] = "visionops-v3-carton-palletizing-runtime.service"
-    os.environ["VISIONOPS_COLLECTOR_CAMERA_DEPENDENT_SERVICES"] = "visionops-v3-carton-palletizing-app.service"
-    app_host = str(config["app"]["listen_host"])
+def _collector(config: dict, profile: str) -> int:
+    if profile == "stack":
+        collector = config["collector"]
+        runtime = config["runtime"]
+        app = config["app"]
+        runtime_service = "visionops-v3-carton-palletizing-runtime.service"
+        app_service = "visionops-v3-carton-palletizing-app.service"
+    else:
+        collector = config["box_grasp"]["collector"]
+        runtime = config["box_grasp"]["runtime"]
+        app = config["box_grasp"]["app"]
+        runtime_service = "visionops-v3-carton-box-grasp-runtime.service"
+        app_service = "visionops-v3-carton-box-grasp-app.service"
+    os.environ["VISIONOPS_COLLECTOR_RUNTIME_SERVICE"] = runtime_service
+    os.environ["VISIONOPS_COLLECTOR_CAMERA_DEPENDENT_SERVICES"] = app_service
+    app_host = str(app["listen_host"])
     if app_host in {"0.0.0.0", "::"}:
         app_host = "127.0.0.1"
-    app_url = f"http://{app_host}:{config['app']['listen_port']}"
+    app_url = "http://{}:{}".format(app_host, app["listen_port"])
     command = [
         sys.executable,
         "-m", "apps.collector_web.backend.main",
         "--host", str(collector["listen_host"]),
         "--port", str(collector["listen_port"]),
-        "--runtime-url", str(config["runtime"]["url"]),
+        "--runtime-url", str(runtime["url"]),
         "--gateway-url", app_url,
         "--business-app-url", app_url,
         "--production-inference-source", str(collector["production_inference_source"]),
@@ -97,7 +109,14 @@ def _collector(config: dict) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="VisionOps carton-palletizing launcher")
     parser.add_argument("--config", help="默认 production/carton_palletizing/config/line.yaml")
-    parser.add_argument("command", choices=("runtime", "app", "collector", "show-config"))
+    parser.add_argument(
+        "command",
+        choices=(
+            "runtime", "app", "collector",
+            "box-grasp-runtime", "box-grasp-app", "box-grasp-collector",
+            "show-config",
+        ),
+    )
     return parser
 
 
@@ -106,11 +125,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     path = _config_path(args.config)
     config = load_config(path)
     if args.command == "runtime":
-        return _runtime(config)
+        return _runtime(config, "stack")
     if args.command == "app":
-        return _app(path)
+        return _app(path, "stack")
     if args.command == "collector":
-        return _collector(config)
+        return _collector(config, "stack")
+    if args.command == "box-grasp-runtime":
+        return _runtime(config, "box_grasp")
+    if args.command == "box-grasp-app":
+        return _app(path, "box_grasp")
+    if args.command == "box-grasp-collector":
+        return _collector(config, "box_grasp")
     print(json.dumps(config, ensure_ascii=False, indent=2))
     return 0
 

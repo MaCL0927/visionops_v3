@@ -31,6 +31,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "snapshot_path": "/stream/snapshot.jpg",
         "depth_path": "/stream/depth.png",
         "health_path": "/health",
+        "mjpeg_path": "/stream.mjpeg",
+        "deproject_path": "/api/coordinate/deproject",
         "max_depth_age_ms": 1500,
     },
     "runtime_recovery": {
@@ -159,6 +161,89 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "debug": {
         "allow_injected_runtime_result": False,
+    },
+}
+
+
+# Independent segmentation-based box grasp profile.  Keeping it in the same
+# configuration file allows the palletizing stack and eye-camera grasp task to
+# share active-camera selection while retaining separate Runtime/App/Web ports.
+DEFAULT_CONFIG["box_grasp"] = {
+    "device_id": "lb3576-carton-box-grasp",
+    "component": "carton_box_grasp_app",
+    "runtime": {
+        "url": "http://127.0.0.1:28085",
+        "model_dir": _project_path("models", "carton_box_grasp", "current"),
+        "roi_config_path": _project_path("data", "runtime", "roi_carton_box_grasp.json"),
+        "device_id": "lb3576-carton-box-grasp-runtime",
+        "component": "rknn_runtime_carton_box_grasp",
+        "accepted_task_types": ["segmentation", "segment"],
+    },
+    "app": {
+        "listen_host": "127.0.0.1",
+        "listen_port": 19211,
+        "request_timeout_ms": 5000,
+    },
+    "collector": {
+        "listen_host": "0.0.0.0",
+        "listen_port": 18095,
+        "device_id": "lb3576-carton-box-grasp",
+        "component": "collector_carton_box_grasp",
+        "models_root": _project_path("models", "carton_box_grasp"),
+        "snapshot_refresh_interval_ms": 200,
+        "status_refresh_interval_ms": 2000,
+        "production_inference_source": "app",
+    },
+    "websocket": {
+        "listen_host": "0.0.0.0",
+        "listen_port": 9001,
+        "path": "/vision",
+        "token": "",
+        "auto_start": True,
+        "detection_hz": 5.0,
+        "status_interval_s": 2.0,
+        "read_timeout_s": 30.0,
+        "max_clients": 4,
+        "max_payload_bytes": 1048576,
+        "trigger_queue_size": 32,
+    },
+    "video": {
+        "type": "mjpeg",
+        "public_url": "http://192.168.20.20:18182/stream.mjpeg",
+        "sync": "soft",
+    },
+    "algorithm": {
+        "image": {"width": 640, "height": 480, "require_fixed_size": True},
+        "classes": {
+            "box_class_ids": [0],
+            "box_class_names": ["box", "carton", "carton_box"],
+            "box_min_confidence": 0.50,
+        },
+        "selection": {"max_targets": 1, "output_order": "confidence"},
+        "geometry": {
+            "require_proto_mask": True,
+            "min_mask_area_px": 1500.0,
+            "epsilon_min": 0.006,
+            "epsilon_max": 0.12,
+            "epsilon_steps": 28,
+            "min_quad_area_ratio": 0.65,
+            "max_quad_area_ratio": 1.35,
+            "contour_max_points": 160,
+        },
+        "depth": {
+            "enabled": True,
+            "roi_radius_px": 4,
+            "percentile": 50.0,
+            "min_valid_pixels": 3,
+            "min_depth_mm": 100,
+            "max_depth_mm": 5000,
+            "max_age_ms": 1500,
+            "edge_inward_ratio": 0.08,
+        },
+    },
+    "debug": {
+        "save_every_trigger": True,
+        "save_root": "/tmp/visionops_v3/carton_palletizing/box_grasp_vision/latest",
     },
 }
 
@@ -323,6 +408,109 @@ def _validate_algorithm(config: Dict[str, Any]) -> None:
     template["slot_order"] = order
 
 
+def _validate_box_grasp(config: Dict[str, Any]) -> None:
+    profile = config.get("box_grasp")
+    if not isinstance(profile, dict):
+        raise ValueError("box_grasp 配置必须是对象")
+
+    runtime = profile["runtime"]
+    runtime["url"] = _url(runtime["url"], "box_grasp.runtime.url")
+    runtime["model_dir"] = _path(runtime["model_dir"])
+    runtime["roi_config_path"] = _path(runtime["roi_config_path"])
+    runtime["accepted_task_types"] = [
+        str(item).strip().lower() for item in runtime.get("accepted_task_types", []) if str(item).strip()
+    ]
+    if not runtime["accepted_task_types"]:
+        raise ValueError("box_grasp.runtime.accepted_task_types 不能为空")
+
+    app = profile["app"]
+    app["listen_port"] = _port(app["listen_port"], "box_grasp.app.listen_port")
+    app["request_timeout_ms"] = int(app.get("request_timeout_ms", 5000))
+    if app["request_timeout_ms"] <= 0:
+        raise ValueError("box_grasp.app.request_timeout_ms 必须大于0")
+
+    collector = profile["collector"]
+    collector["listen_port"] = _port(collector["listen_port"], "box_grasp.collector.listen_port")
+    collector["models_root"] = _path(collector["models_root"])
+    for key in ("snapshot_refresh_interval_ms", "status_refresh_interval_ms"):
+        collector[key] = int(collector.get(key, 200 if key.startswith("snapshot") else 2000))
+        if collector[key] < 100:
+            raise ValueError("box_grasp.collector.{} 不得小于100".format(key))
+    if collector.get("production_inference_source") != "app":
+        raise ValueError("box_grasp.collector.production_inference_source 必须为 app")
+
+    websocket = profile["websocket"]
+    websocket["listen_port"] = _port(websocket["listen_port"], "box_grasp.websocket.listen_port")
+    websocket["path"] = str(websocket.get("path") or "/vision")
+    if not websocket["path"].startswith("/"):
+        websocket["path"] = "/" + websocket["path"]
+    websocket["detection_hz"] = float(websocket.get("detection_hz", 5.0))
+    if websocket["detection_hz"] <= 0:
+        raise ValueError("box_grasp.websocket.detection_hz 必须大于0")
+    for key in ("max_clients", "max_payload_bytes", "trigger_queue_size"):
+        websocket[key] = int(websocket.get(key, 4 if key == "max_clients" else 32))
+        if websocket[key] <= 0:
+            raise ValueError("box_grasp.websocket.{} 必须大于0".format(key))
+
+    video = profile["video"]
+    video["public_url"] = _url(video["public_url"], "box_grasp.video.public_url")
+
+    algorithm = profile["algorithm"]
+    image = algorithm["image"]
+    for key in ("width", "height"):
+        image[key] = int(image.get(key, 640 if key == "width" else 480))
+        if image[key] <= 0:
+            raise ValueError("box_grasp.algorithm.image.{} 必须大于0".format(key))
+    image["require_fixed_size"] = bool(image.get("require_fixed_size", True))
+
+    classes = algorithm["classes"]
+    classes["box_class_ids"] = [int(item) for item in classes.get("box_class_ids", [])]
+    classes["box_class_names"] = [str(item).strip().lower() for item in classes.get("box_class_names", []) if str(item).strip()]
+    if not classes["box_class_ids"] and not classes["box_class_names"]:
+        raise ValueError("box_grasp 至少配置一个 box class_id 或 class_name")
+    classes["box_min_confidence"] = float(classes.get("box_min_confidence", 0.5))
+    if not 0.0 <= classes["box_min_confidence"] <= 1.0:
+        raise ValueError("box_grasp.algorithm.classes.box_min_confidence 必须位于0..1")
+
+    selection = algorithm["selection"]
+    selection["max_targets"] = int(selection.get("max_targets", 1))
+    if selection["max_targets"] <= 0:
+        raise ValueError("box_grasp.algorithm.selection.max_targets 必须大于0")
+    selection["output_order"] = str(selection.get("output_order", "confidence")).strip().lower()
+    if selection["output_order"] not in {"confidence", "left_to_right", "top_to_bottom"}:
+        raise ValueError("box_grasp.algorithm.selection.output_order 非法")
+
+    geometry = algorithm["geometry"]
+    geometry["require_proto_mask"] = bool(geometry.get("require_proto_mask", True))
+    geometry["min_mask_area_px"] = float(geometry.get("min_mask_area_px", 1500.0))
+    geometry["epsilon_min"] = float(geometry.get("epsilon_min", 0.006))
+    geometry["epsilon_max"] = float(geometry.get("epsilon_max", 0.12))
+    geometry["epsilon_steps"] = int(geometry.get("epsilon_steps", 28))
+    geometry["min_quad_area_ratio"] = float(geometry.get("min_quad_area_ratio", 0.65))
+    geometry["max_quad_area_ratio"] = float(geometry.get("max_quad_area_ratio", 1.35))
+    geometry["contour_max_points"] = int(geometry.get("contour_max_points", 160))
+    if geometry["min_mask_area_px"] <= 0 or not 0 < geometry["epsilon_min"] < geometry["epsilon_max"]:
+        raise ValueError("box_grasp.algorithm.geometry 配置非法")
+    if geometry["epsilon_steps"] < 2 or geometry["contour_max_points"] < 4:
+        raise ValueError("box_grasp.algorithm.geometry 步数/轮廓点数配置非法")
+    if not 0 < geometry["min_quad_area_ratio"] <= geometry["max_quad_area_ratio"]:
+        raise ValueError("box_grasp quadrilateral area ratio 配置非法")
+
+    depth = algorithm["depth"]
+    depth["enabled"] = bool(depth.get("enabled", True))
+    for key, default in (("roi_radius_px", 4), ("min_valid_pixels", 3), ("min_depth_mm", 100), ("max_depth_mm", 5000), ("max_age_ms", 1500)):
+        depth[key] = int(depth.get(key, default))
+    depth["percentile"] = float(depth.get("percentile", 50.0))
+    depth["edge_inward_ratio"] = float(depth.get("edge_inward_ratio", 0.08))
+    if depth["roi_radius_px"] < 0 or depth["min_valid_pixels"] <= 0:
+        raise ValueError("box_grasp.algorithm.depth ROI 配置非法")
+    if depth["min_depth_mm"] < 0 or depth["max_depth_mm"] <= depth["min_depth_mm"]:
+        raise ValueError("box_grasp.algorithm.depth 深度范围非法")
+    if not 0 <= depth["percentile"] <= 100 or not 0 <= depth["edge_inward_ratio"] < 0.5:
+        raise ValueError("box_grasp.algorithm.depth percentile/inward_ratio 非法")
+
+
+
 def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     config = deepcopy(DEFAULT_CONFIG)
     source = Path(path).expanduser().resolve() if path else DEFAULT_CONFIG_PATH
@@ -341,7 +529,7 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
 
     apply_active_camera_to_config(config)
     config["camera_bridge"]["base_url"] = _url(config["camera_bridge"]["base_url"], "camera_bridge.base_url")
-    for key, default in (("snapshot_path", "/stream/snapshot.jpg"), ("depth_path", "/stream/depth.png"), ("health_path", "/health")):
+    for key, default in (("snapshot_path", "/stream/snapshot.jpg"), ("depth_path", "/stream/depth.png"), ("health_path", "/health"), ("mjpeg_path", "/stream.mjpeg"), ("deproject_path", "/api/coordinate/deproject")):
         value = str(config["camera_bridge"].get(key) or default).strip()
         config["camera_bridge"][key] = value if value.startswith("/") else "/" + value
     config["camera_bridge"]["max_depth_age_ms"] = int(config["camera_bridge"].get("max_depth_age_ms", 1500))
@@ -372,4 +560,15 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
         raise ValueError("纸箱多层摆放必须使用 collector.production_inference_source=app")
 
     _validate_algorithm(config)
+    _validate_box_grasp(config)
+
+    box_runtime_port = urlparse(config["box_grasp"]["runtime"]["url"]).port or 80
+    all_ports = ports + [
+        box_runtime_port,
+        config["box_grasp"]["app"]["listen_port"],
+        config["box_grasp"]["collector"]["listen_port"],
+        config["box_grasp"]["websocket"]["listen_port"],
+    ]
+    if len(all_ports) != len(set(all_ports)):
+        raise ValueError("carton_palletizing 所有 Runtime/App/Collector/WebSocket 端口必须互不相同")
     return config

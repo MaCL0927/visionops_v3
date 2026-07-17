@@ -198,6 +198,69 @@ function drawPlacementOverlay(ctx, placement, sx, sy, canvasWidth, canvasHeight)
   ctx.restore();
 }
 
+
+function drawBoxGraspPoint(ctx, rawPoint, label, sx, sy, fillStyle, canvasWidth) {
+  const parsed = point(rawPoint);
+  if (!parsed) return;
+  const x = parsed[0] * sx;
+  const y = parsed[1] * sy;
+  const radius = Math.max(5, Math.round(canvasWidth / 160));
+  ctx.save();
+  ctx.fillStyle = fillStyle;
+  ctx.strokeStyle = "rgba(17,24,39,.85)";
+  ctx.lineWidth = Math.max(1, Math.round(canvasWidth / 800));
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.font = `bold ${Math.max(12, Math.round(canvasWidth / 78))}px system-ui`;
+  const text = `${label}(${Math.round(parsed[0])},${Math.round(parsed[1])})`;
+  const width = ctx.measureText(text).width + 10;
+  const height = Math.max(20, Math.round(canvasWidth / 48));
+  let tx = x + radius + 4;
+  if (tx + width > ctx.canvas.width) tx = Math.max(0, x - radius - width - 4);
+  let ty = y - height - 3;
+  if (ty < 0) ty = Math.min(ctx.canvas.height - height, y + radius + 3);
+  ctx.fillStyle = "rgba(17,24,39,.78)";
+  ctx.fillRect(tx, ty, width, height);
+  ctx.fillStyle = fillStyle;
+  ctx.fillText(text, tx + 5, ty + Math.round(height * 0.72));
+  ctx.restore();
+}
+
+function drawBoxGraspOverlay(ctx, grasp, sx, sy, canvasWidth) {
+  const items = Array.isArray(grasp?.items) ? grasp.items : [];
+  for (const item of items) {
+    const contour = Array.isArray(item?.contour_px) ? item.contour_px.map(point).filter(Boolean) : [];
+    if (contour.length >= 3) {
+      drawRing(ctx, contour, sx, sy);
+      ctx.save();
+      ctx.strokeStyle = "rgba(34,211,238,.95)";
+      ctx.lineWidth = Math.max(1, Math.round(canvasWidth / 600));
+      ctx.stroke();
+      ctx.restore();
+    }
+    const corners = item?.corners_px || {};
+    const quad = [corners.top_left, corners.top_right, corners.bottom_right, corners.bottom_left]
+      .map(point).filter(Boolean);
+    if (quad.length === 4) {
+      drawRing(ctx, quad, sx, sy);
+      ctx.save();
+      ctx.strokeStyle = "#22c55e";
+      ctx.lineWidth = Math.max(3, Math.round(canvasWidth / 320));
+      ctx.stroke();
+      ctx.restore();
+    }
+    drawBoxGraspPoint(ctx, corners.top_left, "TL", sx, sy, "#3b82f6", canvasWidth);
+    drawBoxGraspPoint(ctx, corners.top_right, "TR", sx, sy, "#f97316", canvasWidth);
+    drawBoxGraspPoint(ctx, corners.bottom_right, "BR", sx, sy, "#ef4444", canvasWidth);
+    drawBoxGraspPoint(ctx, corners.bottom_left, "BL", sx, sy, "#06b6d4", canvasWidth);
+    drawBoxGraspPoint(ctx, item?.center_px, "C", sx, sy, "#facc15", canvasWidth);
+    drawBoxGraspPoint(ctx, item?.grasp_points_px?.left_mid, "L", sx, sy, "#fde047", canvasWidth);
+    drawBoxGraspPoint(ctx, item?.grasp_points_px?.right_mid, "R", sx, sy, "#fde047", canvasWidth);
+  }
+}
+
 export function clearOverlay(canvas) { canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height); }
 
 export function drawInferenceOverlay(canvas, image, result) {
@@ -219,6 +282,7 @@ export function drawInferenceOverlay(canvas, image, result) {
 
   drawOutputRoi(ctx, result?.roi, sourceWidth, sourceHeight, sx, sy, canvas.width);
   drawPlacementOverlay(ctx, result?.placement, sx, sy, canvas.width, canvas.height);
+  drawBoxGraspOverlay(ctx, result?.box_grasp, sx, sy, canvas.width);
 
   const classifications = Array.isArray(result?.classifications) ? result.classifications : [];
   if (classifications.length && (!Array.isArray(result?.detections) || !result.detections.length)) {

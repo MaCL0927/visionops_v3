@@ -9,6 +9,8 @@ camera_bridge:
   snapshot_path: /stream/snapshot.jpg
   depth_path: /stream/depth.png
   health_path: /health
+  mjpeg_path: /stream.mjpeg
+  deproject_path: /api/coordinate/deproject
   # 第2层及以上必须使用新鲜的 D2C 对齐深度图。
   max_depth_age_ms: 1500
 
@@ -138,3 +140,92 @@ task:
 
 debug:
   allow_injected_runtime_result: false
+
+
+# -----------------------------------------------------------------------------
+# 纸箱外轮廓与抓取点任务（与多层托盘摆放相互独立）
+# -----------------------------------------------------------------------------
+box_grasp:
+  device_id: lb3576-carton-box-grasp
+  component: carton_box_grasp_app
+
+  runtime:
+    url: http://127.0.0.1:28085
+    model_dir: models/carton_box_grasp/current
+    roi_config_path: data/runtime/roi_carton_box_grasp.json
+    device_id: lb3576-carton-box-grasp-runtime
+    component: rknn_runtime_carton_box_grasp
+    accepted_task_types: [segmentation, segment]
+
+  app:
+    listen_host: 127.0.0.1
+    listen_port: 19211
+    request_timeout_ms: 5000
+
+  collector:
+    listen_host: 0.0.0.0
+    listen_port: 18095
+    device_id: lb3576-carton-box-grasp
+    component: collector_carton_box_grasp
+    models_root: models/carton_box_grasp
+    snapshot_refresh_interval_ms: 200
+    status_refresh_interval_ms: 2000
+    production_inference_source: app
+
+  websocket:
+    # 视觉盒作为 WebSocket Server，机器人后端作为 Client。
+    listen_host: 0.0.0.0
+    listen_port: 9001
+    path: /vision
+    token: ""
+    auto_start: true
+    detection_hz: 5.0
+    status_interval_s: 2.0
+    read_timeout_s: 30.0
+    max_clients: 4
+    max_payload_bytes: 1048576
+    trigger_queue_size: 32
+
+  video:
+    # 与 JSON 软同步的 336L 原始 RGB MJPEG。部署时把主机地址改成视觉盒实际 LAN IP。
+    type: mjpeg
+    public_url: http://192.168.20.201:18182/stream.mjpeg
+    sync: soft
+
+  algorithm:
+    image:
+      width: 640
+      height: 480
+      require_fixed_size: true
+    classes:
+      box_class_ids: [0]
+      box_class_names: [box, carton, carton_box]
+      box_min_confidence: 0.50
+    selection:
+      # 默认只向机器人返回置信度最高的一只箱子；可按现场需求增大。
+      max_targets: 1
+      output_order: confidence
+    geometry:
+      # 必须使用真实 proto mask，拒绝 Runtime 的 bbox_fallback 伪掩膜。
+      require_proto_mask: true
+      min_mask_area_px: 1500
+      epsilon_min: 0.006
+      epsilon_max: 0.12
+      epsilon_steps: 28
+      min_quad_area_ratio: 0.65
+      max_quad_area_ratio: 1.35
+      contour_max_points: 160
+    depth:
+      enabled: true
+      roi_radius_px: 4
+      percentile: 50
+      min_valid_pixels: 3
+      min_depth_mm: 100
+      max_depth_mm: 5000
+      max_age_ms: 1500
+      # 角点和边中点位于轮廓边缘，采样深度时向箱体中心内缩，避免读到背景。
+      edge_inward_ratio: 0.08
+
+  debug:
+    save_every_trigger: true
+    save_root: /tmp/visionops_v3/carton_palletizing/box_grasp_vision/latest

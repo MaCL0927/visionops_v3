@@ -142,3 +142,61 @@ sudo bash production/carton_palletizing/deploy/install_services.sh
 ```
 
 已有 `/etc/visionops_v3/carton_palletizing.yaml` 时，安装脚本不会覆盖它。需要手动合并新增加的 `camera_bridge.depth_path`、`layering` 和 `depth` 配置。
+
+---
+
+## 机器人眼睛视角纸箱抓取点任务
+
+M25.3 新增第二个独立子任务：
+
+```text
+production/carton_palletizing/tasks/box_grasp_vision/
+```
+
+该任务使用 336L 倾斜俯视 RGB-D 画面和 segmentation 模型，不使用 OBB 近似箱体边缘。它从 mask 外轮廓计算透视四边形，固定输出：
+
+- 左上、右上、右下、左下四角；
+- 箱体中心；
+- 左右两条边的中点（机器人抓取点）；
+- 以上七个点的像素坐标、深度和相机三维坐标；
+- 原始外轮廓点。
+
+模型目录：
+
+```text
+/opt/visionops_v3/models/carton_box_grasp/current/
+├── model.rknn
+└── model.yaml
+```
+
+手动启动：
+
+```bash
+./production/carton_palletizing/scripts/start_box_grasp_runtime.sh
+./production/carton_palletizing/scripts/start_box_grasp_app.sh
+./production/carton_palletizing/scripts/start_box_grasp_collector.sh
+```
+
+默认接口：
+
+| 服务 | 地址 |
+|---|---|
+| Segmentation Runtime | `127.0.0.1:28085` |
+| HTTP App | `127.0.0.1:19211` |
+| Robot WebSocket | `0.0.0.0:9001/vision` |
+| Collector Web | `0.0.0.0:18095` |
+| 336L MJPEG | `:18182/stream.mjpeg` |
+
+安装独立 systemd 服务：
+
+```bash
+sudo bash production/carton_palletizing/deploy/install_box_grasp_services.sh
+```
+
+机器人报文中 `items[]` 的每一项表示一个抓取点。每个纸箱输出两个同 ID 的抓取点，字段统一为 `id/class_id/confidence/position_camera/center_px`，与 `tube_pick_vision` 的单抓取点结构一致。
+
+机器人协议与完整字段见：
+
+```text
+production/carton_palletizing/tasks/box_grasp_vision/PROTOCOL.md
+```

@@ -182,6 +182,11 @@ def apply_active_camera_to_config(config: dict[str, Any]) -> dict[str, Any]:
         video = pick.get("video")
         if isinstance(video, dict):
             video["public_url"] = public_mjpeg_url(video.get("public_url"), spec)
+    box_grasp = config.get("box_grasp")
+    if isinstance(box_grasp, dict):
+        video = box_grasp.get("video")
+        if isinstance(video, dict):
+            video["public_url"] = public_mjpeg_url(video.get("public_url"), spec)
     config["active_camera"] = {
         "camera_model": spec["camera_model"],
         "display_name": spec["display_name"],

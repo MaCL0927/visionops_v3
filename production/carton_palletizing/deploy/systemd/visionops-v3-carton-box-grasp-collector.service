@@ -1,0 +1,16 @@
+[Unit]
+Description=VisionOps v3 Carton Box Grasp Collector Web
+After=network-online.target visionops-v3-carton-box-grasp-runtime.service visionops-v3-carton-box-grasp-app.service
+Wants=network-online.target visionops-v3-carton-box-grasp-runtime.service visionops-v3-carton-box-grasp-app.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/visionops_v3
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/visionops_v3/carton_palletizing.env
+ExecStart=/opt/visionops_v3/production/carton_palletizing/scripts/start_box_grasp_collector.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
