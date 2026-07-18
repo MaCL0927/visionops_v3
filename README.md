@@ -98,7 +98,30 @@ models/tube_pick_vision/current/
 
 `model.yaml` 是模型任务类型、类别、输入尺寸和模型标识的唯一元信息来源。
 
-## 5. 编译 C++ Runtime
+## 5. 创建边缘端 Python 环境
+
+新 RK3576/LB3576 板卡先将仓库克隆到 `/opt/visionops_v3`，然后执行：
+
+```bash
+cd /opt/visionops_v3
+sudo bash scripts/setup_edge_env.sh
+```
+
+环境固定创建在：
+
+```text
+/opt/visionops_v3/venv
+```
+
+生产启动脚本不再使用 v2 的 `/opt/visionops/venv`。需要在板端运行测试时可使用：
+
+```bash
+sudo bash scripts/setup_edge_env.sh --with-dev
+```
+
+详细迁移说明见 `docs/migration/M25.3_EDGE_VENV_MIGRATION.md`。
+
+## 6. 编译 C++ Runtime
 
 ```bash
 cd /opt/visionops_v3
@@ -124,7 +147,7 @@ build-rknn/edge/runtime_cpp/visionops_runtime_mock
 
 名称保留是为了兼容已有部署脚本；当使用 `--backend rknn` 时实际运行真实 RKNN 路径。
 
-## 6. 通用单实例启动
+## 7. 通用单实例启动
 
 ```bash
 ./scripts/start_runtime.sh /opt/visionops_v3/models/<model_dir>
@@ -134,7 +157,7 @@ build-rknn/edge/runtime_cpp/visionops_runtime_mock
 
 这些脚本用于单实例调试。纸隔板/纸筒生产线应使用 `production/carton_line/scripts/` 下的专用启动脚本。
 
-## 7. 纸隔板与纸筒生产线启动
+## 8. 纸隔板与纸筒生产线启动
 
 ```bash
 cd /opt/visionops_v3
@@ -162,7 +185,7 @@ sudo bash production/carton_line/deploy/install_services.sh --profile partition-
 # 或：sudo bash production/carton_line/deploy/install_services.sh --profile tube-pick
 ```
 
-## 8. 通用验证
+## 9. 通用验证
 
 ```bash
 curl -s http://127.0.0.1:28081/health | python3 -m json.tool
@@ -179,7 +202,7 @@ python3 -m pytest tests/unit tests/integration
 
 硬件、真实 RKNN、真实相机和 PLC 结果仍必须在 LB3576 上单独验收，不能以 x86 Mock 测试代替。
 
-## 9. 仓库卫生
+## 10. 仓库卫生
 
 以下内容不进入 Git：
 

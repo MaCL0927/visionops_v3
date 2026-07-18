@@ -10,12 +10,14 @@ set -euo pipefail
 #   VISIONOPS_DEVICE_ID
 
 EDGE_ROOT="${VISIONOPS_EDGE_ROOT:-/opt/visionops_v3}"
-VENV_DIR="${VISIONOPS_COLLECTOR_VENV:-/opt/visionops/venv}"
+VENV_DIR="${VISIONOPS_COLLECTOR_VENV:-${VISIONOPS_VENV:-${EDGE_ROOT}/venv}}"
 cd "${EDGE_ROOT}"
 
-if [[ -f "${VENV_DIR}/bin/activate" ]]; then
-  # shellcheck disable=SC1090
-  source "${VENV_DIR}/bin/activate"
+PYTHON_BIN="${VENV_DIR}/bin/python3"
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "[ERROR] VisionOps v3 venv 不存在: ${PYTHON_BIN}" >&2
+  echo "        请先运行: sudo bash ${EDGE_ROOT}/scripts/setup_edge_env.sh" >&2
+  exit 1
 fi
 
 HOST="${VISIONOPS_COLLECTOR_HOST:-0.0.0.0}"
@@ -25,7 +27,7 @@ GATEWAY_URL="${VISIONOPS_GATEWAY_URL:-http://127.0.0.1:19090}"
 BUSINESS_APP_URL="${VISIONOPS_BUSINESS_APP_URL:-http://127.0.0.1:19110}"
 DEVICE_ID="${VISIONOPS_DEVICE_ID:-lb3576-001}"
 
-python3 -m apps.collector_web.backend.main \
+exec "${PYTHON_BIN}" -m apps.collector_web.backend.main \
   --host "${HOST}" \
   --port "${PORT}" \
   --runtime-url "${RUNTIME_URL}" \

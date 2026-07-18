@@ -163,9 +163,12 @@ fi
 chmod 0664 "${ROOT}/config/active_camera.json" || true
 chown "${VISIONOPS_SERVICE_USER:-neardi}:${VISIONOPS_SERVICE_GROUP:-neardi}" "${ROOT}/config/active_camera.json" 2>/dev/null || true
 
-PYTHON_BIN="${VISIONOPS_VENV:-/opt/visionops/venv}/bin/python3"
+VENV_DIR="${VISIONOPS_VENV:-${ROOT}/venv}"
+PYTHON_BIN="${VENV_DIR}/bin/python3"
 if [[ ! -x "${PYTHON_BIN}" ]]; then
-  PYTHON_BIN=python3
+  log_error "VisionOps v3 venv 不存在: ${PYTHON_BIN}"
+  log_error "请先运行: sudo bash ${ROOT}/scripts/setup_edge_env.sh"
+  exit 1
 fi
 
 "${PYTHON_BIN}" "${SOURCE_DIR}/deploy/merge_line_config.py" \
@@ -180,7 +183,7 @@ install -m 0644 \
 if [[ ! -f "${ENV_FILE}" ]]; then
   cat > "${ENV_FILE}" <<EOF_ENV
 VISIONOPS_V3_ROOT=${ROOT}
-VISIONOPS_VENV=/opt/visionops/venv
+VISIONOPS_VENV=${ROOT}/venv
 VISIONOPS_CARTON_LINE_CONFIG=${LINE_CONFIG}
 VISIONOPS_CAMERA_SELECTION_FILE=${ROOT}/config/active_camera.json
 VISIONOPS_PARTITION_MODEL_DIR=${ROOT}/models/carton_partition_check/current
@@ -208,6 +211,12 @@ VISIONOPS_CAMERA_WATCHDOG_PERSIST_DIR=/var/lib/visionops_v3/watchdog
 EOF_ENV
 elif ! grep -q '^VISIONOPS_PICK_MODEL_DIR=' "${ENV_FILE}"; then
   printf '\nVISIONOPS_PICK_MODEL_DIR=%s/models/tube_pick_vision/current\n' "${ROOT}" >> "${ENV_FILE}"
+fi
+# Migrate an environment file created by older v3 releases that still pointed
+# at the legacy v2 virtual environment.
+if grep -q '^VISIONOPS_VENV=/opt/visionops/venv$' "${ENV_FILE}"; then
+  sed -i "s|^VISIONOPS_VENV=/opt/visionops/venv\$|VISIONOPS_VENV=${ROOT}/venv|" "${ENV_FILE}"
+  log_info "已迁移 VISIONOPS_VENV 到 ${ROOT}/venv"
 fi
 
 append_env_default() {

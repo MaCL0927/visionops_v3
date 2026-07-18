@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="${VISIONOPS_V3_ROOT:-/opt/visionops_v3}"
-VENV="${VISIONOPS_VENV:-/opt/visionops/venv}"
+VENV="${VISIONOPS_VENV:-${ROOT}/venv}"
 CONFIG="${VISIONOPS_CARTON_PALLETIZING_CONFIG:-${ROOT}/production/carton_palletizing/config/line.yaml}"
 cd "${ROOT}"
-if [[ -f "${VENV}/bin/activate" ]]; then
-  # shellcheck disable=SC1090
-  source "${VENV}/bin/activate"
+PYTHON_BIN="${VENV}/bin/python3"
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "[ERROR] VisionOps v3 venv 不存在: ${PYTHON_BIN}" >&2
+  echo "        请先运行: sudo bash ${ROOT}/scripts/setup_edge_env.sh" >&2
+  exit 1
 fi
-exec python3 -m production.carton_palletizing.launcher --config "${CONFIG}" box-grasp-collector
+exec "${PYTHON_BIN}" -m production.carton_palletizing.launcher --config "${CONFIG}" box-grasp-collector

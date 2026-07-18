@@ -27,6 +27,16 @@ fi
 if [[ ! -f "${ENV_FILE}" ]]; then
   install -m 0644 "${SOURCE_DIR}/deploy/production.env.example" "${ENV_FILE}"
 fi
+if grep -q '^VISIONOPS_VENV=/opt/visionops/venv$' "${ENV_FILE}"; then
+  sed -i "s|^VISIONOPS_VENV=/opt/visionops/venv\$|VISIONOPS_VENV=${ROOT}/venv|" "${ENV_FILE}"
+  echo "Migrated VISIONOPS_VENV to ${ROOT}/venv."
+fi
+VENV_DIR="${VISIONOPS_VENV:-${ROOT}/venv}"
+if [[ ! -x "${VENV_DIR}/bin/python3" ]]; then
+  echo "VisionOps v3 venv not found: ${VENV_DIR}/bin/python3" >&2
+  echo "Run first: sudo bash ${ROOT}/scripts/setup_edge_env.sh" >&2
+  exit 1
+fi
 
 for unit in "${SOURCE_DIR}"/deploy/systemd/*.service; do
   install -m 0644 "${unit}" "${SYSTEMD_DIR}/$(basename "${unit}")"

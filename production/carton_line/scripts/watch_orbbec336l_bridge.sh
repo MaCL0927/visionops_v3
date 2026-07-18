@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="${VISIONOPS_V3_ROOT:-/opt/visionops_v3}"
+VENV="${VISIONOPS_VENV:-${ROOT}/venv}"
+PYTHON_BIN="${VISIONOPS_PYTHON_BIN:-${VENV}/bin/python3}"
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  # Watchdogs only use the Python standard library. Falling back to the board's
+  # system Python keeps camera recovery alive before/while the v3 venv is repaired.
+  PYTHON_BIN="$(command -v python3)"
+fi
+
 # External safety net for Orbbec SDK hangs.
 #
 # Recovery order:
@@ -166,7 +175,7 @@ now_s="$(date +%s)"
 health_json="$(curl -fsS --max-time 3 "${BRIDGE_URL}/health" 2>/dev/null || true)"
 
 health_state="$({
-  HEALTH_JSON="${health_json}" STALE_MS="${STALE_MS}" python3 - <<'PY'
+  HEALTH_JSON="${health_json}" STALE_MS="${STALE_MS}" "${PYTHON_BIN}" - <<'PY'
 import json
 import os
 
@@ -214,7 +223,7 @@ if [[ "${healthy}" == "1" ]]; then
 
   if systemctl is-active --quiet "${RUNTIME_SERVICE}"; then
     runtime_json="$(curl -fsS --max-time 2 "${RUNTIME_URL}/api/runtime/status" 2>/dev/null || true)"
-    if ! RUNTIME_JSON="${runtime_json}" STALE_MS="${STALE_MS}" python3 - <<'PY' >/dev/null 2>&1
+    if ! RUNTIME_JSON="${runtime_json}" STALE_MS="${STALE_MS}" "${PYTHON_BIN}" - <<'PY' >/dev/null 2>&1
 import json
 import os
 try:
@@ -309,7 +318,7 @@ if [[ "${restart_command_ok}" == "1" ]]; then
   for _ in $(seq 1 $((RECOVERY_WAIT_S * 2))); do
     sleep 0.5
     health_json="$(curl -fsS --max-time 1 "${BRIDGE_URL}/health" 2>/dev/null || true)"
-    if HEALTH_JSON="${health_json}" STALE_MS="${STALE_MS}" python3 - <<'PY' >/dev/null 2>&1
+    if HEALTH_JSON="${health_json}" STALE_MS="${STALE_MS}" "${PYTHON_BIN}" - <<'PY' >/dev/null 2>&1
 import json
 import os
 data = json.loads(os.environ.get("HEALTH_JSON") or "{}")
@@ -347,7 +356,7 @@ if systemctl is-active --quiet "${RUNTIME_SERVICE}"; then
   sleep "${RUNTIME_RECOVERY_WAIT_S}"
 
   runtime_json="$(curl -fsS --max-time 2 "${RUNTIME_URL}/api/runtime/status" 2>/dev/null || true)"
-  if ! RUNTIME_JSON="${runtime_json}" STALE_MS="${STALE_MS}" python3 - <<'PY' >/dev/null 2>&1
+  if ! RUNTIME_JSON="${runtime_json}" STALE_MS="${STALE_MS}" "${PYTHON_BIN}" - <<'PY' >/dev/null 2>&1
 import json
 import os
 try:

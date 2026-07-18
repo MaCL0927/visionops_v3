@@ -38,10 +38,10 @@ services:
     listen_port: 8093
 
 paths:
-  install_root: /opt/visionops
+  install_root: /opt/visionops_v3
   state_dir: /var/lib/visionops
   log_dir: /var/log/visionops
-  model_dir: /opt/visionops/models
+  model_dir: /opt/visionops_v3/models
 
 time_sync:
   enabled: true

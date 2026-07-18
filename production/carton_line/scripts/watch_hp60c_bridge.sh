@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="${VISIONOPS_V3_ROOT:-/opt/visionops_v3}"
+VENV="${VISIONOPS_VENV:-${ROOT}/venv}"
+PYTHON_BIN="${VISIONOPS_PYTHON_BIN:-${VENV}/bin/python3}"
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  # Watchdogs only use the Python standard library. Falling back to the board's
+  # system Python keeps camera recovery alive before/while the v3 venv is repaired.
+  PYTHON_BIN="$(command -v python3)"
+fi
+
 BRIDGE_SERVICE="${VISIONOPS_HP60C_BRIDGE_SERVICE:-visionops-hp60c-sdk-bridge.service}"
 BRIDGE_URL="${VISIONOPS_HP60C_BRIDGE_URL:-http://127.0.0.1:18181}"
 SELECTION_FILE="${VISIONOPS_CAMERA_SELECTION_FILE:-/opt/visionops_v3/config/active_camera.json}"
@@ -38,7 +47,7 @@ mkdir -p "$PERSIST_DIR"
 exec 9>"$LOCK_FILE"; flock -n 9 || exit 0
 now="$(date +%s)"
 health="$(curl -fsS --max-time 3 "$BRIDGE_URL/health" 2>/dev/null || true)"
-result="$(HEALTH="$health" STALE_MS="$STALE_MS" python3 - <<'PY' 2>/dev/null || echo '0 0 unknown -1 -1'
+result="$(HEALTH="$health" STALE_MS="$STALE_MS" "${PYTHON_BIN}" - <<'PY' 2>/dev/null || echo '0 0 unknown -1 -1'
 import json, os
 try: d=json.loads(os.environ.get('HEALTH') or '{}')
 except Exception: d={}
@@ -67,7 +76,7 @@ recovered=0
 for _ in $(seq 1 $((RECOVERY_WAIT_S * 2))); do
   sleep 0.5
   health="$(curl -fsS --max-time 1 "$BRIDGE_URL/health" 2>/dev/null || true)"
-  if HEALTH="$health" STALE_MS="$STALE_MS" python3 - <<'PY' >/dev/null 2>&1
+  if HEALTH="$health" STALE_MS="$STALE_MS" "${PYTHON_BIN}" - <<'PY' >/dev/null 2>&1
 import json, os
 d=json.loads(os.environ.get('HEALTH') or '{}')
 ca=int(d.get('last_color_age_ms',-1)); da=int(d.get('last_depth_age_ms',-1))
@@ -78,7 +87,7 @@ done
 if [[ "$recovered" == "1" ]]; then
   log "HP60C recovered"
   rm -f "$INCIDENT_FILE" "$REBOOT_FILE"; write_atomic "$FAIL_FILE" 0
-  active="$(python3 - "$SELECTION_FILE" <<'PY' 2>/dev/null || true
+  active="$("${PYTHON_BIN}" - "$SELECTION_FILE" <<'PY' 2>/dev/null || true
 import json,sys
 try: print(json.load(open(sys.argv[1],encoding='utf-8')).get('active_camera',''))
 except Exception: pass

@@ -1,0 +1,22 @@
+# VisionOps v3 edge Python runtime dependencies.
+#
+# Binary-heavy packages (numpy and cv2) are deliberately installed by
+# scripts/setup_edge_env.sh from Ubuntu apt and exposed through
+# --system-site-packages. Do not add opencv-python/headless here: mixing the pip
+# wheel with the board's apt OpenCV can cause ABI conflicts on RK3576/aarch64.
+#
+# The HTTP/WebSocket/Modbus servers in current v3 edge code are implemented with
+# the Python standard library, while inference uses the C++ RKNN Runtime. Thus
+# fastapi, uvicorn, python-multipart, pymodbus and rknn-toolkit-lite2 are not
+# runtime dependencies of the current v3 edge deployment.
+#
+# Keep these versions compatible with Ubuntu 20.04 / Python 3.8.
+PyYAML==6.0.2
+psutil==6.1.1
+requests==2.32.3
+charset-normalizer==3.4.0
+idna==3.10
+urllib3==2.2.3
+certifi==2024.8.30
+packaging==24.2
+typing_extensions==4.12.2

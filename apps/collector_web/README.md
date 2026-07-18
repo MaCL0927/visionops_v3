@@ -42,7 +42,7 @@ Collector Web 明确不负责：
 3576 现场常见启动方式：
 
 ```bash
-source /opt/visionops/venv/bin/activate
+source /opt/visionops_v3/venv/bin/activate
 
 python3 -m apps.collector_web.backend.main \
   --host 0.0.0.0 \

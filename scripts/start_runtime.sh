@@ -4,6 +4,14 @@ set -euo pipefail
 EDGE_ROOT="${VISIONOPS_EDGE_ROOT:-/opt/visionops_v3}"
 cd "${EDGE_ROOT}"
 
+VENV="${VISIONOPS_VENV:-${EDGE_ROOT}/venv}"
+PYTHON_BIN="${VENV}/bin/python3"
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "[ERROR] VisionOps v3 venv 不存在: ${PYTHON_BIN}" >&2
+  echo "        请先运行: sudo bash ${EDGE_ROOT}/scripts/setup_edge_env.sh" >&2
+  exit 1
+fi
+
 MODEL_DIR="${1:-${MODEL_DIR:-/opt/visionops_v3/models/test_rknn_model}}"
 RUNTIME_BIN="${VISIONOPS_RUNTIME_BIN:-./build-rknn/edge/runtime_cpp/visionops_runtime_mock}"
 DEVICE_ID="${VISIONOPS_DEVICE_ID:-lb3576-001}"
@@ -13,7 +21,7 @@ CAMERA_SELECTION_FILE="${VISIONOPS_CAMERA_SELECTION_FILE:-/opt/visionops_v3/conf
 
 ACTIVE_BRIDGE_URL="$(
   VISIONOPS_CAMERA_SELECTION_FILE="${CAMERA_SELECTION_FILE}" \
-  python3 - <<'PY'
+  "${PYTHON_BIN}" - <<'PY'
 from edge.camera_bridge.camera_selection import active_camera_spec
 
 spec = active_camera_spec()

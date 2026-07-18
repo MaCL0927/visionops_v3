@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="${VISIONOPS_V3_ROOT:-/opt/visionops_v3}"
+VENV="${VISIONOPS_VENV:-${ROOT}/venv}"
+PYTHON_BIN="${VISIONOPS_PYTHON_BIN:-${VENV}/bin/python3}"
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  # Watchdogs only use the Python standard library. Falling back to the board's
+  # system Python keeps camera recovery alive before/while the v3 venv is repaired.
+  PYTHON_BIN="$(command -v python3)"
+fi
+
 # Tube-pick Runtime 帧新鲜度 watchdog。
 # 正常状态只读取两个本地 HTTP 状态接口，不重启任何服务。
 # 仅当 Pick Runtime 正在 preview 且帧过期/线程异常时执行分级恢复：
@@ -44,7 +53,7 @@ flock -n 9 || exit 0
 runtime_json="$(curl -fsS --max-time 2 "${RUNTIME_URL}/api/runtime/status" 2>/dev/null || true)"
 
 runtime_state="$({
-  RUNTIME_JSON="${runtime_json}" STALE_MS="${STALE_MS}" python3 - <<'PY'
+  RUNTIME_JSON="${runtime_json}" STALE_MS="${STALE_MS}" "${PYTHON_BIN}" - <<'PY'
 import json
 import os
 
@@ -88,7 +97,7 @@ printf '%s\n' "${now_s}" >"${STAMP_FILE}"
 
 bridge_json="$(curl -fsS --max-time 2 "${BRIDGE_URL}/health" 2>/dev/null || true)"
 bridge_state="$({
-  BRIDGE_JSON="${bridge_json}" STALE_MS="${STALE_MS}" python3 - <<'PY'
+  BRIDGE_JSON="${bridge_json}" STALE_MS="${STALE_MS}" "${PYTHON_BIN}" - <<'PY'
 import json
 import os
 
@@ -126,7 +135,7 @@ curl -fsS --max-time 3 -X POST "${RUNTIME_URL}/api/runtime/start_preview" >/dev/
 sleep "${RECOVERY_WAIT_S}"
 
 runtime_json="$(curl -fsS --max-time 2 "${RUNTIME_URL}/api/runtime/status" 2>/dev/null || true)"
-if RUNTIME_JSON="${runtime_json}" STALE_MS="${STALE_MS}" python3 - <<'PY' >/dev/null 2>&1
+if RUNTIME_JSON="${runtime_json}" STALE_MS="${STALE_MS}" "${PYTHON_BIN}" - <<'PY' >/dev/null 2>&1
 import json
 import os
 

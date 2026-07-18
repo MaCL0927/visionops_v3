@@ -1,0 +1,3 @@
+# Optional edge-side development/test tools.
+-r edge-runtime.txt
+pytest==8.3.5
