@@ -5,7 +5,7 @@
 - 外轮廓；
 - 四个透视角点；
 - 中心点；
-- 左右两条边的中点（抓取点）；
+- 左右两条边中点向箱体中心内缩后的抓取点；
 - 上述 7 个点的相机三维坐标。
 
 ## 模型目录
@@ -136,3 +136,29 @@ curl -s http://127.0.0.1:18182/stream/status | jq '{
 
 画面中有目标时，`sample_deproject_count` 应持续增长，而生产检测过程不应频繁访问
 或编码整幅 `depth.png`。
+
+
+## 抓取点内缩与深度稳定性
+
+左右抓取点不再直接使用 mask 四边形左右边的原始中点。算法先计算左右边中点，
+再沿两点连线向纸箱中心内缩，避免 segmentation 轮廓轻微外扩或抖动时抓取点落到
+箱体外侧：
+
+```yaml
+box_grasp:
+  algorithm:
+    geometry:
+      # 0=保持边中点，0.18=从边中点向中心移动 18%
+      grasp_inward_ratio: 0.18
+    depth:
+      # 深度采样位置在实际抓取点基础上再额外向中心移动 5%
+      grasp_extra_inward_ratio: 0.05
+```
+
+推荐先使用 `grasp_inward_ratio=0.18`，现场可在 `0.12～0.25` 范围调整。数值越大，
+两个抓取点越靠近纸箱中心。`grasp_extra_inward_ratio` 只改变深度采样位置，Bridge
+仍将该深度反投影到实际抓取点坐标，因此机器人收到的 `center_px` 与
+`position_camera` 对应的是同一个内缩后的抓取点。
+
+Collector 可视化中的左右抓取点以及 WebSocket `items[].center_px` 会同步使用新位置。
+调试结果中的 `grasp_geometry.edge_midpoints_px` 保留原始左右边中点，便于比较内缩量。

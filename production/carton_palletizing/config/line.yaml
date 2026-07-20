@@ -223,6 +223,9 @@ box_grasp:
       min_quad_area_ratio: 0.65
       max_quad_area_ratio: 1.35
       contour_max_points: 64
+      # 左右抓取点原本位于纸箱左右边中点。向纸箱中心内缩 18%，避免
+      # segmentation 边缘抖动时抓取点落到箱体外。建议现场在 0.12～0.25 间调整。
+      grasp_inward_ratio: 0.02
     depth:
       enabled: true
       # 直接在 336L Bridge 内存中的 D2C 深度图上采样并反投影，避免整图 PNG 编解码。
@@ -233,8 +236,11 @@ box_grasp:
       min_depth_mm: 100
       max_depth_mm: 5000
       max_age_ms: 1500
-      # 角点和边中点位于轮廓边缘，采样深度时向箱体中心内缩，避免读到背景。
+      # 四个角点采样时向箱体中心内缩，避免读到背景。
       edge_inward_ratio: 0.08
+      # 左右抓取点已经整体内移，再把深度采样位置额外向中心内缩 5%。
+      # 反投影仍使用实际抓取点坐标，因此机器人收到的像素/相机坐标保持一致。
+      grasp_extra_inward_ratio: 0
 
   debug:
     save_every_trigger: false

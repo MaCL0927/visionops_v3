@@ -1,6 +1,6 @@
 # VisionOps 抓取点 WebSocket 协议（box_grasp_vision）
 
-版本：v1.2  
+版本：v1.3  
 适用任务：`box_grasp_vision`  
 传输方式：WebSocket JSON + MJPEG 视频流
 
@@ -30,7 +30,7 @@
 | `position_camera` | `[x,y,z]` | mm | 当前抓取点在彩色相机坐标系中的三维坐标 |
 | `center_px` | `[u,v]` | pixel | 当前抓取点的像素坐标；此处不是纸箱整体中心 |
 
-`box_grasp_vision` 每个纸箱有两个抓取点，因此同一个 `id` 在 `items[]` 中出现两次。两项分别对应纸箱两条抓取边的中点，但不使用 `left/right` 字段区分。机器人根据相同 `id` 分组，再根据像素坐标或自身坐标规则区分两点。
+`box_grasp_vision` 每个纸箱有两个抓取点，因此同一个 `id` 在 `items[]` 中出现两次。算法先计算纸箱左右边中点，再将两点分别向纸箱中心内缩；两项不使用 `left/right` 字段区分。机器人根据相同 `id` 分组，再根据像素坐标或自身坐标规则区分两点。
 
 视觉盒输出顺序保持确定性：同一纸箱的两个抓取点按 `center_px[0]` 从小到大排列。但机器人不应仅依赖数组顺序，应优先按 `id` 分组。
 

@@ -260,6 +260,12 @@ class BoxGraspAlgorithm:
         self.min_quad_area_ratio = float(geometry.get("min_quad_area_ratio", 0.65))
         self.max_quad_area_ratio = float(geometry.get("max_quad_area_ratio", 1.35))
         self.contour_max_points = max(4, int(geometry.get("contour_max_points", 160)))
+        # Robot-facing grasp points are not kept exactly on the segmentation
+        # boundary.  Move the left/right side midpoints toward the carton centre
+        # so small mask jitter or perspective fitting errors cannot place a grasp
+        # point outside the top surface.  The ratio is measured from the side
+        # midpoint to the centre: 0 keeps the edge midpoint, 1 reaches the centre.
+        self.grasp_inward_ratio = min(0.45, max(0.0, float(geometry.get("grasp_inward_ratio", 0.18))))
         self.max_targets = max(1, int(selection.get("max_targets", 1)))
         self.output_order = str(selection.get("output_order", "confidence")).strip().lower()
 
@@ -274,6 +280,14 @@ class BoxGraspAlgorithm:
         self.min_depth_mm = max(0, int(depth.get("min_depth_mm", 100)))
         self.max_depth_mm = max(self.min_depth_mm + 1, int(depth.get("max_depth_mm", 5000)))
         self.depth_inward_ratio = min(0.45, max(0.0, float(depth.get("edge_inward_ratio", 0.08))))
+        # Sample depth slightly farther inside than the robot-facing grasp point,
+        # while still projecting the sampled depth at the actual grasp coordinate.
+        # On a planar carton top this avoids zero depth at a noisy mask boundary
+        # without changing the point sent to the robot.
+        self.grasp_depth_extra_inward_ratio = min(
+            0.45,
+            max(0.0, float(depth.get("grasp_extra_inward_ratio", 0.05))),
+        )
 
     @staticmethod
     def _image_size(runtime_result: Mapping[str, Any]) -> Tuple[int, int]:
@@ -347,9 +361,16 @@ class BoxGraspAlgorithm:
                 ignored.append({"id": source_id, "reason": "quadrilateral_area_ratio", "ratio": area_ratio})
                 continue
             top_left, top_right, bottom_right, bottom_left = quad
-            left_mid = _midpoint(top_left, bottom_left)
-            right_mid = _midpoint(top_right, bottom_right)
-            center = _midpoint(left_mid, right_mid)
+            left_edge_mid = _midpoint(top_left, bottom_left)
+            right_edge_mid = _midpoint(top_right, bottom_right)
+            center = _midpoint(left_edge_mid, right_edge_mid)
+
+            # Move the actual robot-facing points inward along the line joining
+            # the two side midpoints.  This guarantees the left point moves toward
+            # the right and the right point moves toward the left, even for a
+            # perspective trapezoid whose side midpoints have different y values.
+            left_mid = _move_toward(left_edge_mid, center, self.grasp_inward_ratio)
+            right_mid = _move_toward(right_edge_mid, center, self.grasp_inward_ratio)
             contour_center = _polygon_center(contour)
             points = {
                 "top_left": top_left,
@@ -361,8 +382,13 @@ class BoxGraspAlgorithm:
                 "right_mid": right_mid,
             }
             sample_points = {
-                name: (value if name == "center" else _move_toward(value, center, self.depth_inward_ratio))
-                for name, value in points.items()
+                "top_left": _move_toward(top_left, center, self.depth_inward_ratio),
+                "top_right": _move_toward(top_right, center, self.depth_inward_ratio),
+                "bottom_right": _move_toward(bottom_right, center, self.depth_inward_ratio),
+                "bottom_left": _move_toward(bottom_left, center, self.depth_inward_ratio),
+                "center": center,
+                "left_mid": _move_toward(left_mid, center, self.grasp_depth_extra_inward_ratio),
+                "right_mid": _move_toward(right_mid, center, self.grasp_depth_extra_inward_ratio),
             }
             accepted.append({
                 "source_id": source_id,
@@ -374,6 +400,12 @@ class BoxGraspAlgorithm:
                 "quad": quad,
                 "points": points,
                 "depth_sample_points": sample_points,
+                "edge_midpoints": {
+                    "left_mid": left_edge_mid,
+                    "right_mid": right_edge_mid,
+                },
+                "grasp_inward_ratio": self.grasp_inward_ratio,
+                "grasp_depth_extra_inward_ratio": self.grasp_depth_extra_inward_ratio,
                 "contour_center": contour_center,
                 "quality": quality,
             })
@@ -454,6 +486,7 @@ class BoxGraspAlgorithm:
 
         corners_px = [_round_point(points.get(name) or (0.0, 0.0)) for name in self.POINT_ORDER[:4]]
         corners_camera = [camera_by_name[name] for name in self.POINT_ORDER[:4]]
+        edge_midpoints = item.get("edge_midpoints") if isinstance(item.get("edge_midpoints"), Mapping) else {}
         return {
             "id": int(item_id),
             "source_id": str(item.get("source_id") or ""),
@@ -471,6 +504,14 @@ class BoxGraspAlgorithm:
             "grasp_points_px": {
                 "left_mid": _round_point(points.get("left_mid") or (0.0, 0.0)),
                 "right_mid": _round_point(points.get("right_mid") or (0.0, 0.0)),
+            },
+            "grasp_geometry": {
+                "edge_midpoints_px": {
+                    "left_mid": _round_point(edge_midpoints.get("left_mid") or (0.0, 0.0)),
+                    "right_mid": _round_point(edge_midpoints.get("right_mid") or (0.0, 0.0)),
+                },
+                "inward_ratio": round(float(item.get("grasp_inward_ratio") or 0.0), 6),
+                "depth_extra_inward_ratio": round(float(item.get("grasp_depth_extra_inward_ratio") or 0.0), 6),
             },
             "corners_camera": {
                 "top_left": corners_camera[0],

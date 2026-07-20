@@ -39,7 +39,7 @@ def algorithm():
     return BoxGraspAlgorithm(load_config()["box_grasp"]["algorithm"])
 
 
-def test_perspective_mask_produces_ordered_corners_center_and_grasp_midpoints():
+def test_perspective_mask_produces_ordered_corners_center_and_inward_grasp_points():
     polygon = [
         [235, 221], [300, 216], [426, 214], [440, 260], [457, 329],
         [360, 332], [222, 336], [225, 290], [228, 250],
@@ -56,6 +56,31 @@ def test_perspective_mask_produces_ordered_corners_center_and_grasp_midpoints():
     assert left_mid[0] < center[0] < right_mid[0]
     assert abs(center[0] - (left_mid[0] + right_mid[0]) / 2.0) < 1e-6
     assert item["quality"]["quad_to_contour_area_ratio"] > 0.65
+
+
+
+def test_grasp_points_move_inward_and_depth_samples_move_farther_inside():
+    polygon = [[235, 221], [426, 214], [457, 329], [222, 336]]
+    processor = algorithm()
+    item = processor.classify(runtime_result(polygon)).items[0]
+
+    left_edge = item["edge_midpoints"]["left_mid"]
+    right_edge = item["edge_midpoints"]["right_mid"]
+    left_grasp = item["points"]["left_mid"]
+    right_grasp = item["points"]["right_mid"]
+    center = item["points"]["center"]
+    left_sample = item["depth_sample_points"]["left_mid"]
+    right_sample = item["depth_sample_points"]["right_mid"]
+
+    # Left moves right/inward and right moves left/inward.
+    assert left_edge[0] < left_grasp[0] < center[0]
+    assert center[0] < right_grasp[0] < right_edge[0]
+    # The depth sampling coordinates are slightly farther inside than the
+    # robot-facing points, but projection still uses the robot-facing points.
+    assert left_grasp[0] < left_sample[0] < center[0]
+    assert center[0] < right_sample[0] < right_grasp[0]
+    assert item["grasp_inward_ratio"] == 0.18
+    assert item["grasp_depth_extra_inward_ratio"] == 0.05
 
 
 def test_bbox_fallback_is_rejected():
@@ -98,6 +123,8 @@ def test_config_keeps_stack_and_box_grasp_ports_separate():
     assert len(ports) == 7
     assert config["box_grasp"]["runtime"]["accepted_task_types"] == ["segmentation", "segment"]
     assert config["box_grasp"]["websocket"]["listen_port"] == 9001
+    assert config["box_grasp"]["algorithm"]["geometry"]["grasp_inward_ratio"] == 0.18
+    assert config["box_grasp"]["algorithm"]["depth"]["grasp_extra_inward_ratio"] == 0.05
 
 
 def test_service_builds_collector_visualization_and_robot_message(monkeypatch):
@@ -174,6 +201,15 @@ def test_service_builds_collector_visualization_and_robot_message(monkeypatch):
     assert all(len(point) == 4 for point in captured["points"])
     # The first pair samples inward from the corner but deprojects the original corner.
     assert captured["points"][0][0:2] != captured["points"][0][2:4]
+    # Grasp points are already moved away from the mask boundary, and their
+    # sampling points move a little farther toward the carton centre.
+    left_grasp = visual_item["grasp_points_px"]["left_mid"]
+    right_grasp = visual_item["grasp_points_px"]["right_mid"]
+    edge = visual_item["grasp_geometry"]["edge_midpoints_px"]
+    assert edge["left_mid"][0] < left_grasp[0]
+    assert right_grasp[0] < edge["right_mid"][0]
+    assert captured["points"][5][0] > captured["points"][5][2]
+    assert captured["points"][6][0] < captured["points"][6][2]
 
 
 def test_box_grasp_pipeline_defaults_to_latest_result_queue():
