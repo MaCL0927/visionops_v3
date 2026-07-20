@@ -17,6 +17,8 @@ struct ModelConfigData {
   std::vector<std::string> class_names;
   double score_threshold{-1.0};
   double nms_threshold{-1.0};
+  int max_detections{100};
+  int mask_max_points{160};
 };
 
 bool load_model_config_yaml(

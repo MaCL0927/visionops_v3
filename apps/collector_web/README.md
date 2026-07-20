@@ -279,3 +279,29 @@ POST /api/runtime/roi
 ```
 
 因此 Collector Web、生产 Gateway、Modbus 和 Tube Pick TCP 读取到的都是同一份 ROI 过滤后的 Runtime 结果。
+
+## 第一阶段生产 FPS 调度
+
+浏览器定时器最低间隔由固定 100 ms 改为 16 ms，因此 15/20/30 FPS 选项不再被
+静默压回 10 FPS。模型验证、生产画面、快照和状态循环均采用“工作耗时 + 剩余等待
+= 目标周期”的调度方式。
+
+当 `production_inference_source: app` 时，生产页面优先读取：
+
+```text
+GET /api/app/latest_decision
+```
+
+浏览器作为观察者复用后台生产结果，不再和机器人后台线程同时调用
+`evaluate_once`、竞争同一个 Runtime/NPU。没有后台生产者的旧业务应用会自动回退到
+`POST /api/app/evaluate_once`；“手动检测”仍会强制执行一次推理。
+
+支持后台连续推理的业务应用可实现：
+
+```text
+GET  /api/app/inference_settings
+POST /api/app/inference_settings  {"detection_fps":10}
+```
+
+算法设置中的“推理 FPS”会同时更新 Web 刷新周期与后台生产频率；不支持该接口的
+应用只保留 Web 刷新设置。

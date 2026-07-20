@@ -125,7 +125,7 @@ function intervalMsToFps(ms, fallback = 5) {
 function fpsToIntervalMs(fps, fallbackMs = 500) {
   const value = Number(fps);
   if (!Number.isFinite(value) || value <= 0) return fallbackMs;
-  return Math.max(100, Math.round(1000 / value));
+  return Math.max(16, Math.round(1000 / value));
 }
 
 function parseProfile(profile, fallback = { resolution: "1280x720", fps: 30 }) {
@@ -540,6 +540,40 @@ async function loadAlgorithmSettings(modelId = "") {
   }
 }
 
+
+async function loadAppInferenceSettings() {
+  try {
+    const payload = await requestJson(endpoints.appInferenceSettings);
+    const fps = Number(payload?.detection_fps);
+    if (Number.isFinite(fps) && fps > 0) {
+      setValue(fields.inference_fps, fps);
+    }
+  } catch (_error) {
+    // Some production apps are request-driven and do not expose a background FPS.
+  }
+}
+
+async function saveAppInferenceSettings(config) {
+  const detectionFps = 1000 / Math.max(16, Number(config.inference_interval_ms || 500));
+  try {
+    const result = await postJson(endpoints.appInferenceSettings, {
+      detection_fps: detectionFps,
+    });
+    const applied = Number(result?.detection_fps);
+    return {
+      skipped: false,
+      message: Number.isFinite(applied)
+        ? `后台生产推理已设为 ${applied.toFixed(applied >= 10 ? 1 : 2)} FPS`
+        : "后台生产推理 FPS 已应用",
+    };
+  } catch (error) {
+    if (error instanceof ApiError && [0, 404, 405, 502, 503].includes(error.status)) {
+      return { skipped: true, message: "后台业务应用未提供推理 FPS 接口，已保留 Web 刷新设置" };
+    }
+    throw error;
+  }
+}
+
 function fill(config) {
   const displayFps = config.display_fps ?? intervalMsToFps(config.preview_refresh_interval_ms, 5);
   const inferenceFps = intervalMsToFps(config.inference_interval_ms, 2);
@@ -560,7 +594,7 @@ function fill(config) {
 function readConfigFromForm() {
   const current = getState().config;
   const displayFps = getNumber(fields.display_fps, 5);
-  const previewIntervalMs = Math.max(100, Math.round(1000 / Math.max(1, displayFps)));
+  const previewIntervalMs = Math.max(16, Math.round(1000 / Math.max(1, displayFps)));
   const inferenceFps = getNumber(fields.inference_fps, intervalMsToFps(current.inference_interval_ms, 2));
   const inferenceIntervalMs = fpsToIntervalMs(inferenceFps, current.inference_interval_ms || 500);
   const rgbProfile = getValue(fields.rgb_profile, current.rgb_profile || "orbbec:1280x720@30");
@@ -667,6 +701,7 @@ function open() {
   loadCameraSettings();
   loadVisionBoxSettings();
   loadAlgorithmSettings();
+  loadAppInferenceSettings();
 }
 
 function close() {
@@ -682,7 +717,10 @@ function activateSettingsTab(panelId) {
     tab.setAttribute("aria-selected", active ? "true" : "false");
   });
   document.querySelectorAll(".settings-panel").forEach((panel) => panel.classList.toggle("active", panel.id === panelId));
-  if (panelId === "algorithm-settings-panel") loadAlgorithmSettings(getValue(fields.algorithm_model, ""));
+  if (panelId === "algorithm-settings-panel") {
+    loadAlgorithmSettings(getValue(fields.algorithm_model, ""));
+    loadAppInferenceSettings();
+  }
   if (panelId === "board-settings-panel") loadVisionBoxSettings();
   if (panelId === "camera-settings-panel") loadCameraSettings();
 }
@@ -729,6 +767,8 @@ async function saveSettings() {
   try {
     const alg = await saveAlgorithmSettings();
     messages.push(alg.message);
+    const inference = await saveAppInferenceSettings(config);
+    messages.push(inference.message);
   } catch (error) {
     const detail = error instanceof ApiError && error.body?.error?.message ? error.body.error.message : error.message;
     showSaveStatus(`算法设置保存失败：${detail}`, "error");
@@ -767,6 +807,7 @@ export function initSettings() {
     loadCameraSettings();
     loadVisionBoxSettings();
     loadAlgorithmSettings();
+    loadAppInferenceSettings();
     showSaveStatus("已恢复到 Collector 默认、当前 Bridge 与当前模型配置，尚未保存");
   });
   element("settings-save").addEventListener("click", saveSettings);

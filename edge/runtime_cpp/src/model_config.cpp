@@ -210,6 +210,18 @@ bool load_model_config_yaml(
         config.score_threshold = std::stod(value);
       } else if (key == "nms_threshold" || key == "iou_threshold") {
         config.nms_threshold = std::stod(value);
+      } else if (key == "max_detections" || key == "max_results") {
+        config.max_detections = std::stoi(value);
+        if (config.max_detections <= 0) {
+          error_message = "模型配置 max_detections 必须为正数，行 " + std::to_string(line_number);
+          return false;
+        }
+      } else if (key == "mask_max_points" || key == "polygon_max_points") {
+        config.mask_max_points = std::stoi(value);
+        if (config.mask_max_points < 4) {
+          error_message = "模型配置 mask_max_points 不得小于4，行 " + std::to_string(line_number);
+          return false;
+        }
       }
     } catch (const std::exception&) {
       error_message = "模型配置字段解析失败，行 " + std::to_string(line_number);

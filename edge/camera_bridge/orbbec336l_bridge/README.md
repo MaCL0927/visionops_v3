@@ -95,3 +95,33 @@ curl -s http://127.0.0.1:18182/health | python3 -m json.tool
 systemctl status visionops-orbbec336l-bridge-watchdog.timer
 journalctl -t visionops-orbbec-watchdog -n 100 --no-pager
 ```
+
+## 第一阶段帧率优化
+
+本版将 SDK 采集与 JPEG 生产拆为两个线程。相机线程持续消费 RGB/Depth，JPEG
+线程只对新 RGB 帧按 `VISIONOPS_ORBBEC336L_MJPEG_FPS` 编码一次，并把同一份
+JPEG 缓存提供给 `snapshot.jpg` 和所有 MJPEG 客户端。多个浏览器或 Runtime
+连接不会再重复执行 `cv::imencode()`。
+
+MJPEG 调度采用绝对截止时间，JPEG 编码耗时计入目标周期，不再执行“编码耗时 +
+完整 sleep 周期”。`/stream/status` 新增以下诊断字段：
+
+```text
+capture_fps_configured
+capture_fps_measured
+mjpeg_fps_configured
+mjpeg_fps_measured
+jpeg_encode_ms_latest
+jpeg_encode_ms_average
+jpeg_thread_alive
+last_jpeg_age_ms
+```
+
+建议在设备上连续观察：
+
+```bash
+watch -n 1 'curl -s http://127.0.0.1:18182/stream/status | python3 -m json.tool'
+```
+
+其中 `capture_fps_measured` 表示 SDK 实际采集吞吐，`mjpeg_fps_measured` 表示共享
+JPEG 缓存的实际生产吞吐。二者和浏览器解码 FPS 是三个不同指标。

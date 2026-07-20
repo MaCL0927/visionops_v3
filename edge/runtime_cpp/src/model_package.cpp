@@ -67,6 +67,8 @@ LoadedModelInfo load_model_package(const AppConfig& app_config) {
       }
       if (yaml.score_threshold >= 0.0) info.score_threshold = yaml.score_threshold;
       if (yaml.nms_threshold >= 0.0) info.nms_threshold = yaml.nms_threshold;
+      if (yaml.max_detections > 0) info.max_detections = yaml.max_detections;
+      if (yaml.mask_max_points >= 4) info.mask_max_points = yaml.mask_max_points;
       info.class_names = yaml.class_names;
       info.labels_count = static_cast<int>(info.class_names.size());
     } else {

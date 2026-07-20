@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import signal
 import threading
@@ -267,6 +268,7 @@ class ServiceState:
                 "busy": self.busy,
                 "continuous_enabled": self.continuous_enabled,
                 "detection_fps": self.fps(),
+                "configured_detection_fps": float(ws.get("detection_hz", 5.0)),
                 "last_latency_ms": round(self.last_latency_ms, 3),
                 "websocket": {
                     "listen_host": ws["listen_host"],
@@ -293,17 +295,25 @@ class BoxGraspVisionService:
         depth_settings = self.settings["algorithm"]["depth"]
         self.algorithm = BoxGraspAlgorithm(self.settings["algorithm"])
         self.bridge = CameraBridgeClient(config["camera_bridge"], timeout_s, int(depth_settings.get("max_age_ms", 1500)))
+        self.inference_settings_path = Path(
+            str(self.settings["app"].get(
+                "inference_settings_path",
+                "/opt/visionops_v3/config/box_grasp_inference_settings.json",
+            ))
+        )
+        self._load_detection_hz_override()
         self.state = ServiceState(config)
         self.execution_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.wakeup = threading.Event()
+        self.detection_hz_lock = threading.Lock()
         self.manual_request_id = 0
         self.trigger_queue = queue.Queue(maxsize=int(self.settings["websocket"].get("trigger_queue_size", 32)))
         self.worker_thread = None  # type: Optional[threading.Thread]
         self.status_thread = None  # type: Optional[threading.Thread]
         self.debug_lock = threading.Lock()
         debug = self.settings.get("debug") if isinstance(self.settings.get("debug"), Mapping) else {}
-        self.debug_enabled = bool(debug.get("save_every_trigger", True))
+        self.debug_enabled = bool(debug.get("save_every_trigger", False))
         self.debug_root = Path(str(debug.get("save_root", "/tmp/visionops_v3/carton_palletizing/box_grasp_vision/latest")))
         ws = self.settings["websocket"]
         self.websocket = WebSocketJsonServer(
@@ -318,6 +328,69 @@ class BoxGraspVisionService:
             max_payload_bytes=int(ws.get("max_payload_bytes", 1048576)),
             read_timeout_s=float(ws.get("read_timeout_s", 30.0)),
         )
+
+    def _load_detection_hz_override(self) -> None:
+        try:
+            payload = json.loads(self.inference_settings_path.read_text(encoding="utf-8"))
+            hz = float(payload.get("detection_fps"))
+            if 0.1 <= hz <= 30.0:
+                self.settings["websocket"]["detection_hz"] = hz
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return
+
+    def _persist_detection_hz(self, hz: float) -> None:
+        path = self.inference_settings_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "detection_fps": hz,
+                    "updated_at_ms": _timestamp_ms(),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        os.replace(str(temporary), str(path))
+
+    def detection_hz(self) -> float:
+        with self.detection_hz_lock:
+            return max(0.1, float(self.settings["websocket"].get("detection_hz", 5.0)))
+
+    def set_detection_hz(self, value: object) -> Dict[str, Any]:
+        try:
+            hz = float(value)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("detection_fps 必须是数字") from error
+        if not 0.1 <= hz <= 30.0:
+            raise ValueError("detection_fps 必须位于 0.1..30")
+        with self.detection_hz_lock:
+            self.settings["websocket"]["detection_hz"] = hz
+            self._persist_detection_hz(hz)
+        self.wakeup.set()
+        return {
+            "schema_version": "1.0",
+            "message_type": "app_inference_settings",
+            "status": "ok",
+            "app_id": "box_grasp_vision",
+            "detection_fps": hz,
+            "continuous_enabled": self.state.continuous_enabled,
+            "timestamp_ms": _timestamp_ms(),
+        }
+
+    def inference_settings(self) -> Dict[str, Any]:
+        return {
+            "schema_version": "1.0",
+            "message_type": "app_inference_settings",
+            "status": "ok",
+            "app_id": "box_grasp_vision",
+            "detection_fps": self.detection_hz(),
+            "continuous_enabled": self.state.continuous_enabled,
+            "timestamp_ms": _timestamp_ms(),
+        }
 
     def start(self) -> None:
         self.websocket.start()
@@ -582,8 +655,6 @@ class BoxGraspVisionService:
                 return decision
 
     def _worker_loop(self) -> None:
-        hz = max(0.1, float(self.settings["websocket"].get("detection_hz", 5.0)))
-        period_s = 1.0 / hz
         next_continuous = time.monotonic()
         while not self.stop_event.is_set():
             try:
@@ -598,19 +669,29 @@ class BoxGraspVisionService:
                 except OSError:
                     pass
                 continue
-            continuous = self.state.continuous_enabled and self.websocket.client_count() > 0
+
+            # This worker is the single production inference producer.  Browser
+            # pages and robot clients consume latest_decision instead of submitting
+            # competing evaluate_once requests.
+            continuous = self.state.continuous_enabled
             now = time.monotonic()
             if continuous and now >= next_continuous:
                 decision = self.evaluate_once(None)
                 robot = decision.get("robot_message") if isinstance(decision.get("robot_message"), Mapping) else {}
-                self.websocket.broadcast_json(robot)
+                if self.websocket.client_count() > 0:
+                    self.websocket.broadcast_json(robot)
+                period_s = 1.0 / self.detection_hz()
                 next_continuous = max(next_continuous + period_s, time.monotonic())
                 continue
+
             timeout = max(0.01, min(0.2, next_continuous - now)) if continuous else 0.2
-            self.wakeup.wait(timeout)
+            signaled = self.wakeup.wait(timeout)
             self.wakeup.clear()
             if not continuous:
                 next_continuous = time.monotonic()
+            elif signaled:
+                # Apply a newly configured FPS without waiting for the old deadline.
+                next_continuous = min(next_continuous, time.monotonic())
 
     def _status_message(self) -> Dict[str, Any]:
         snapshot = self.state.snapshot(self.websocket)
@@ -758,6 +839,8 @@ class StatusHandler(BaseHTTPRequestHandler):
             self._send(200, {"schema_version": "1.0", "message_type": "register_snapshot", "status": "not_applicable", "protocol": "websocket", "registers": []})
         elif path == "/api/app/latest_decision":
             self._send(200, snapshot.get("latest_decision") or {"status": "empty", "message_type": "app_decision"})
+        elif path == "/api/app/inference_settings":
+            self._send(200, self.service.inference_settings())
         elif path == "/api/app/latest_gateway_message":
             self._send(200, snapshot.get("latest_gateway_message") or {"status": "empty", "type": "detection", "items": []})
         else:
@@ -765,16 +848,21 @@ class StatusHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if path not in {"/api/app/evaluate_once", "/api/task/evaluate_once"}:
+        if path not in {"/api/app/evaluate_once", "/api/task/evaluate_once", "/api/app/inference_settings"}:
             self._send(404, {"status": "error", "error": {"code": "NOT_FOUND", "message": path}})
             return
         try:
             document = self._read_json()
+            if path == "/api/app/inference_settings":
+                self._send(200, self.service.set_detection_hz(document.get("detection_fps")))
+                return
             request_id = document.get("request_id")
             if request_id is None:
                 self.service.manual_request_id += 1
                 request_id = "manual-{}".format(self.service.manual_request_id)
             self._send(200, self.service.evaluate_once(request_id))
+        except ValueError as error:
+            self._send(400, {"status": "error", "error": {"code": "INVALID_INFERENCE_SETTINGS", "message": str(error)}})
         except Exception as error:
             self._send(500, {"status": "error", "error": {"code": type(error).__name__, "message": str(error)}})
 

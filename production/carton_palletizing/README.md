@@ -200,3 +200,31 @@ sudo bash production/carton_palletizing/deploy/install_box_grasp_services.sh
 ```text
 production/carton_palletizing/tasks/box_grasp_vision/PROTOCOL.md
 ```
+
+### Box grasp 第一阶段 FPS 优化
+
+`box_grasp_vision` 的后台 worker 是生产模式唯一推理生产者。机器人 WebSocket 和
+Collector 生产页面都读取 `latest_decision`，避免两条链路重复提交 NPU 推理。
+
+后台频率接口：
+
+```bash
+curl -s http://127.0.0.1:19211/api/app/inference_settings | python3 -m json.tool
+
+curl -s -X POST http://127.0.0.1:19211/api/app/inference_settings \
+  -H 'Content-Type: application/json' \
+  -d '{"detection_fps":10}' | python3 -m json.tool
+```
+
+设置持久化到 `/opt/visionops_v3/config/box_grasp_inference_settings.json`。默认关闭
+`debug.save_every_trigger`，避免每次推理创建保存线程并写入 RGB、Depth、JSON 和
+Overlay。需要现场取证时再临时开启。
+
+该任务启动 Runtime 时会使用：
+
+```text
+--max-detections 1
+--mask-max-points 64
+```
+
+它只影响输出候选和 mask polygon 后处理，不改变模型输入或 NPU 网络结构。

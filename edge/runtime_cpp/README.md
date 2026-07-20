@@ -402,3 +402,29 @@ POST /api/runtime/roi
 ```
 
 ROI 坐标归一化到原始图像宽高。模型仍对整幅图像完成预处理和推理；detection、OBB、segmentation 在 NMS 后按目标中心点过滤。该过滤发生在标准 `inference_result` 生成前，因此所有 Runtime 调用方自动获得一致结果。分类任务没有空间目标，当前不应用 ROI 过滤。
+
+## 第一阶段实时吞吐优化
+
+Runtime 新增模型包/命令行后处理上限：
+
+```text
+--max-detections N
+--mask-max-points N
+```
+
+模型包也可在 `model.yaml` 中声明：
+
+```yaml
+max_detections: 1
+mask_max_points: 64
+```
+
+`loaded_model` 会返回实际生效值。纸箱抓取任务默认只保留 1 个候选并将 mask
+polygon 限制为 64 点，避免 Runtime 生成大量最终不会被业务层使用的实例 mask。
+
+`/api/runtime/status` 中的 `fps.inference_fps` 和 `latency_ms` 已改为真实完成记录，
+不再使用固定占位值。FPS 使用最近 2 秒完成窗口；停止推理后会回落到 0。
+
+HTTP Bridge 帧源的后台取图循环按 `camera_fps` 使用绝对截止时间节流。快照下载和
+JPEG 解码耗时计入周期，不会在处理完成后再额外休眠完整周期，也不会对 Bridge
+缓存快照进行无上限空转读取。

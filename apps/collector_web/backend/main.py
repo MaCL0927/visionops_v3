@@ -48,6 +48,7 @@ DOWNSTREAM_PATHS = {
     "/api/gateway/registers": ("gateway", "/api/gateway/registers", False),
     "/api/app/status": ("business_app", "/api/app/status", True),
     "/api/app/registers": ("business_app", "/api/app/registers", False),
+    "/api/app/inference_settings": ("business_app", "/api/app/inference_settings", False),
     "/api/app/latest_decision": ("business_app", "/api/app/latest_decision", False),
     "/api/app/latest_gateway_message": ("business_app", "/api/app/latest_gateway_message", False),
 }
@@ -136,11 +137,11 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
-        if path == "/api/app/evaluate_once":
+        if path in {"/api/app/evaluate_once", "/api/app/inference_settings"}:
             body = self._read_request_body()
             if body is None:
                 return
-            self._proxy_downstream_post("business_app", "/api/app/evaluate_once", body)
+            self._proxy_downstream_post("business_app", path, body)
             return
         if path == "/api/models/switch":
             self._switch_model()

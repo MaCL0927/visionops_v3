@@ -548,6 +548,9 @@ void StreamWorkerMock::camera_loop() {
   auto fps_window_started = std::chrono::steady_clock::now();
   int consecutive_failures = 0;
   int reconnect_backoff_ms = config_.reconnect_initial_ms;
+  const auto http_frame_period = std::chrono::microseconds(
+      std::max<std::int64_t>(1, 1000000LL / std::max(1, config_.camera_fps)));
+  auto next_http_capture_at = std::chrono::steady_clock::now();
 
   while (!stop_thread_.load()) {
     bool source_opened = false;
@@ -602,8 +605,28 @@ void StreamWorkerMock::camera_loop() {
         measured_fps_ = frames / elapsed;
       }
       clear_error();
+
+      if (is_hp60c_source(config_.type)) {
+        // HTTP snapshot sources return immediately from a cached Bridge frame.
+        // Pace this loop to the configured camera rate so Runtime does not open
+        // and decode hundreds of duplicate JPEGs per second.  The remaining
+        // sleep is calculated against an absolute deadline, so capture/decode
+        // time is included in the target period.
+        next_http_capture_at += http_frame_period;
+        const auto after_work = std::chrono::steady_clock::now();
+        if (next_http_capture_at > after_work) {
+          const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+              next_http_capture_at - after_work).count();
+          if (remaining_ms > 0) {
+            sleep_interruptible(stop_thread_, static_cast<int>(remaining_ms));
+          }
+        } else {
+          next_http_capture_at = after_work;
+        }
+      }
       continue;
     }
+
 
     ++consecutive_failures;
     {

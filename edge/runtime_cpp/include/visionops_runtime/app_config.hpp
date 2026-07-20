@@ -21,6 +21,8 @@ struct AppConfig {
   bool dump_rknn_io{false};
   double score_threshold_override{-1.0};
   double nms_threshold_override{-1.0};
+  int max_detections_override{0};
+  int mask_max_points_override{0};
   std::string frame_source{"mock"};
   std::string camera_device{"/dev/video0"};
   int camera_width{640};

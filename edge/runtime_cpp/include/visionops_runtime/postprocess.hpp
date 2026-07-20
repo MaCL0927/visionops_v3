@@ -15,6 +15,7 @@ struct PostprocessConfig {
   float nms_threshold{0.45F};
   int max_detections{100};
   RoiFilterConfig roi;
+  int mask_max_points{160};
 };
 
 struct PostprocessResult {

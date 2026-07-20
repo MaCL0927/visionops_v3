@@ -247,7 +247,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             },
         },
         "debug": {
-            "save_every_trigger": True,
+            "save_every_trigger": False,
             "save_root": "/tmp/visionops_v3/carton_line/tube_pick_vision/latest",
         },
     },
@@ -277,7 +277,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
     },
     "debug": {
-        "save_every_trigger": True,
+        "save_every_trigger": False,
         "save_root": "/tmp/visionops_v3/carton_line/latest",
     },
 }

@@ -784,9 +784,16 @@ private:
             "Pragma: no-cache\r\n"
             "Connection: close\r\n\r\n";
         if (!send_string(fd, header)) { ::close(fd); return; }
-        const int delay_ms = std::max(1, 1000 / mjpeg_fps_);
+        const auto frame_period = std::chrono::microseconds(
+            std::max<int64_t>(1, 1000000LL / std::max(1, mjpeg_fps_)));
+        auto next_send_at = std::chrono::steady_clock::now();
         uint64_t last_id = 0;
         while (!stopped_.load() && g_running.load() && camera_connected()) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now < next_send_at) {
+                std::this_thread::sleep_until(next_send_at);
+            }
+
             FrameSnapshot frame;
             {
                 std::unique_lock<std::mutex> lock(frame_mutex_);
@@ -801,7 +808,13 @@ private:
             std::ostringstream part;
             part << "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " << frame.jpeg.size() << "\r\n\r\n";
             if (!send_string(fd, part.str()) || send_all(fd, frame.jpeg.data(), frame.jpeg.size()) <= 0 || !send_string(fd, "\r\n")) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+
+            next_send_at += frame_period;
+            const auto after_send = std::chrono::steady_clock::now();
+            if (next_send_at < after_send) {
+                // Sending time already consumed the period; do not add a full sleep.
+                next_send_at = after_send;
+            }
         }
         ::close(fd);
     }

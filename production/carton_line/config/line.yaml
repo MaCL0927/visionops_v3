@@ -217,7 +217,7 @@ pick:
       max_depth_mm: 5000
       max_age_ms: 1500
   debug:
-    save_every_trigger: true
+    save_every_trigger: false
     save_root: /tmp/visionops_v3/carton_line/tube_pick_vision/latest
 
 coordinates:
@@ -254,5 +254,5 @@ coordinates:
     b1: 994.4879298
 
 debug:
-  save_every_trigger: true
+  save_every_trigger: false
   save_root: /tmp/visionops_v3/carton_line/latest

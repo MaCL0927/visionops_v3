@@ -23,6 +23,7 @@ let liveBusy = false;
 let liveEnabled = false;
 let activeView = "live";
 let lastLoopFinishedAt = null;
+let lastRenderedResultKey = null;
 let overlayResizeFrame = null;
 
 function formatMs(value) {
@@ -47,6 +48,17 @@ function modelDisplay(result) {
   const model = result?.model || {};
   return model.model_name || model.model_id || "--";
 }
+
+function resultKey(result) {
+  return String(
+    result?.result_id
+    || result?.frame_id
+    || result?.capture_timestamp_ms
+    || result?.timestamp_ms
+    || "",
+  );
+}
+
 
 function placementSummary(result) {
   const placement = result?.placement;
@@ -80,7 +92,7 @@ function updateLiveSummary(result, elapsedMs = null) {
   currentModel.textContent = modelDisplay(result);
   resultBrief.textContent = placementSummary(result) || `${task} / ${count} 个结果`;
   timingTotal.textContent = formatMs(total);
-  const configuredFps = 1000 / Math.max(100, Number(getState().config.inference_interval_ms || 500));
+  const configuredFps = 1000 / Math.max(16, Number(getState().config.inference_interval_ms || 500));
   const actualFps = elapsedMs ? 1000 / elapsedMs : configuredFps;
   fpsText.textContent = `${formatFps(actualFps)} / 设定 ${formatFps(configuredFps)}`;
   liveStatus.textContent = `实时检测中 · ${task}`;
@@ -135,20 +147,47 @@ async function displaySnapshot() {
   redrawOverlayAfterLayout();
 }
 
-export async function productionInferOnce() {
+export async function productionInferOnce(options = {}) {
   const startedAt = performance.now();
   try {
     const source = getState().config.production_inference_source || "runtime";
-    const response = source === "app"
-      ? await postJson(endpoints.appEvaluate)
-      : await postJson(endpoints.inferOnce);
+    const force = options.force === true;
+    let response;
+
+    if (source === "app" && !force) {
+      // Production mode is an observer. Prefer the business app's background
+      // producer so the browser and the robot do not submit duplicate NPU work.
+      try {
+        response = await requestJson(endpoints.appLatestDecision);
+      } catch (error) {
+        if (![404, 405].includes(Number(error?.status))) throw error;
+        response = null;
+      }
+      if (!response || response.status === "empty") {
+        // Compatibility fallback for request-driven apps without a producer.
+        response = await postJson(endpoints.appEvaluate);
+      }
+    } else {
+      response = source === "app"
+        ? await postJson(endpoints.appEvaluate)
+        : await postJson(endpoints.inferOnce);
+    }
+
     const result = response?.visualization_result || response?.runtime_result || response;
     if (!result || result.message_type !== "inference_result") {
       throw new Error("生产业务应用未返回 visualization_result/inference_result");
     }
+
+    const key = resultKey(result);
+    if (!force && key && key === lastRenderedResultKey) {
+      liveStatus.textContent = `实时检测中 · ${result?.task_type || "--"} · 等待新结果`;
+      return result;
+    }
+
     const finishedAt = performance.now();
     const elapsedMs = lastLoopFinishedAt ? finishedAt - lastLoopFinishedAt : finishedAt - startedAt;
     lastLoopFinishedAt = finishedAt;
+    lastRenderedResultKey = key || null;
     updateLiveSummary(result, elapsedMs);
     await displaySnapshot();
     return result;
@@ -171,15 +210,21 @@ function scheduleLiveLoop(delayMs = 0) {
 async function runLiveLoop() {
   if (!liveEnabled || activeView !== "live") return;
   if (liveBusy) {
-    scheduleLiveLoop(getState().config.inference_interval_ms);
+    scheduleLiveLoop(1);
     return;
   }
+
+  const startedAt = performance.now();
   liveBusy = true;
   try {
     await productionInferOnce();
   } finally {
     liveBusy = false;
-    if (liveEnabled && activeView === "live") scheduleLiveLoop(getState().config.inference_interval_ms);
+    if (liveEnabled && activeView === "live") {
+      const targetMs = Math.max(16, Number(getState().config.inference_interval_ms || 500));
+      const remainingMs = Math.max(0, targetMs - (performance.now() - startedAt));
+      scheduleLiveLoop(remainingMs);
+    }
   }
 }
 
@@ -188,6 +233,7 @@ function startLive() {
   liveEnabled = true;
   liveStatus.textContent = "实时检测启动中";
   lastLoopFinishedAt = null;
+  lastRenderedResultKey = null;
   scheduleLiveLoop(0);
 }
 
@@ -260,7 +306,7 @@ export function setProductionActive(active) {
 export function initProduction() {
   refreshButton.addEventListener("click", async () => {
     if (activeView === "status") await refreshProductionStatus();
-    else await productionInferOnce();
+    else await productionInferOnce({ force: true });
   });
   viewToggle.addEventListener("click", () => showProductionView(activeView === "live" ? "status" : "live"));
   window.addEventListener("resize", redrawOverlayAfterLayout);

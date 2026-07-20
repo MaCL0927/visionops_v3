@@ -186,13 +186,21 @@ public:
             std::lock_guard<std::mutex> lk(mtx_);
             set_camera_state_locked(CameraState::Starting, "CAMERA_STARTING", "waiting for Orbbec camera");
         }
+
+        // Camera acquisition and JPEG production are intentionally separated:
+        // - camera_thread_ always consumes the SDK at the configured capture FPS;
+        // - jpeg_thread_ encodes at most mjpeg_fps_ and publishes one shared JPEG cache.
+        // This prevents every snapshot/MJPEG client from encoding the same frame again.
         camera_thread_ = std::thread([this]() { this->camera_loop(); });
+        jpeg_thread_ = std::thread([this]() { this->jpeg_loop(); });
         return true;
     }
 
     void stop_camera() {
         camera_stop_requested_ = true;
         cv_.notify_all();
+        jpeg_cv_.notify_all();
+        if (jpeg_thread_.joinable()) jpeg_thread_.join();
         if (camera_thread_.joinable()) camera_thread_.join();
         camera_started_ = false;
     }
@@ -416,13 +424,25 @@ private:
     void invalidate_frames_locked() {
         latest_bgr_.release();
         latest_depth_mm_.release();
+        latest_jpeg_.reset();
         last_color_ms_ = 0;
         last_depth_ms_ = 0;
+        last_jpeg_ms_ = 0;
+        jpeg_source_sequence_ = 0;
+        measured_color_fps_ = 0.0;
+        measured_mjpeg_fps_ = 0.0;
+        color_fps_window_started_ms_ = 0;
+        color_fps_window_frames_ = 0;
+        jpeg_fps_window_started_ms_ = 0;
+        jpeg_fps_window_frames_ = 0;
         calibration_ready_ = false;
         color_w_ = 0;
         color_h_ = 0;
         depth_w_ = 0;
         depth_h_ = 0;
+        // Wake snapshot/MJPEG waiters immediately so stale connections do not
+        // remain blocked until the camera happens to reconnect.
+        jpeg_cv_.notify_all();
     }
 
     void sleep_interruptible(int delay_ms) {
@@ -486,6 +506,7 @@ private:
                 ever_connected_ ? "pipeline started; waiting for fresh RGB/depth frames" : "waiting for first RGB/depth frames");
         }
         cv_.notify_all();
+        jpeg_cv_.notify_all();
         return pipeline;
     }
 
@@ -503,6 +524,7 @@ private:
             }
         }
         cv_.notify_all();
+        jpeg_cv_.notify_all();
         if (pipeline) {
             try {
                 // Some SDK/USB failures can block here. The external systemd
@@ -537,6 +559,21 @@ private:
                 color_format_ = frame_format_to_string(c->format());
                 color_w_ = bgr.cols;
                 color_h_ = bgr.rows;
+
+                if (color_fps_window_started_ms_ <= 0) {
+                    color_fps_window_started_ms_ = now;
+                    color_fps_window_frames_ = 1;
+                } else {
+                    ++color_fps_window_frames_;
+                    const int64_t color_window_ms = now - color_fps_window_started_ms_;
+                    if (color_window_ms >= 1000 && color_fps_window_frames_ >= 2) {
+                        measured_color_fps_ =
+                            static_cast<double>(color_fps_window_frames_ - 1) * 1000.0 /
+                            static_cast<double>(color_window_ms);
+                        color_fps_window_started_ms_ = now;
+                        color_fps_window_frames_ = 1;
+                    }
+                }
             }
             if (!depth_mm.empty()) {
                 latest_depth_mm_ = depth_mm;
@@ -561,6 +598,113 @@ private:
             std::cerr << "[INFO] Orbbec RGB/depth frames healthy; camera running" << std::endl;
         }
         cv_.notify_all();
+    }
+
+    void jpeg_loop() {
+        jpeg_thread_alive_ = true;
+
+        const auto frame_period = std::chrono::microseconds(
+            std::max<int64_t>(1, 1000000LL / std::max(1, mjpeg_fps_)));
+        auto next_encode_at = std::chrono::steady_clock::now();
+        uint64_t last_encoded_source_sequence = 0;
+
+        while (run_requested()) {
+            cv::Mat image;
+            uint64_t source_sequence = 0;
+
+            {
+                std::unique_lock<std::mutex> lk(mtx_);
+
+                // Wait for a genuinely new SDK color frame.  This avoids repeatedly
+                // encoding the same cached image when the HTTP clients are faster
+                // than the camera.
+                cv_.wait(lk, [this, last_encoded_source_sequence]() {
+                    return !run_requested() ||
+                        (camera_connected_locked(now_ms()) &&
+                         color_frame_count_ != last_encoded_source_sequence);
+                });
+                if (!run_requested()) break;
+
+                // Absolute-deadline pacing: encoding time is part of the target
+                // period, instead of encode + a full extra sleep.
+                const auto now = std::chrono::steady_clock::now();
+                if (now < next_encode_at) {
+                    cv_.wait_until(lk, next_encode_at, [this]() {
+                        return !run_requested();
+                    });
+                    if (!run_requested()) break;
+                }
+
+                if (!camera_connected_locked(now_ms()) ||
+                    color_frame_count_ == last_encoded_source_sequence) {
+                    continue;
+                }
+
+                source_sequence = color_frame_count_;
+                image = latest_bgr_.clone();
+            }
+
+            if (image.empty()) {
+                last_encoded_source_sequence = source_sequence;
+                continue;
+            }
+
+            const auto encode_started = std::chrono::steady_clock::now();
+            auto jpeg = std::make_shared<std::vector<uchar>>();
+            const bool encoded = encode_jpeg(image, jpeg_quality_, *jpeg);
+            const double encode_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - encode_started).count();
+
+            last_encoded_source_sequence = source_sequence;
+
+            if (encoded && !jpeg->empty()) {
+                const int64_t encoded_at_ms = now_ms();
+                {
+                    std::lock_guard<std::mutex> lk(mtx_);
+                    latest_jpeg_ = std::move(jpeg);
+                    last_jpeg_ms_ = encoded_at_ms;
+                    jpeg_source_sequence_ = source_sequence;
+                    ++jpeg_sequence_;
+                    jpeg_encode_ms_latest_ = encode_ms;
+                    if (jpeg_encode_count_ == 0) {
+                        jpeg_encode_ms_average_ = encode_ms;
+                    } else {
+                        // A light EMA is sufficient for runtime diagnostics and
+                        // avoids an unbounded statistics buffer.
+                        jpeg_encode_ms_average_ =
+                            jpeg_encode_ms_average_ * 0.90 + encode_ms * 0.10;
+                    }
+                    ++jpeg_encode_count_;
+
+                    if (jpeg_fps_window_started_ms_ <= 0) {
+                        jpeg_fps_window_started_ms_ = encoded_at_ms;
+                        jpeg_fps_window_frames_ = 1;
+                    } else {
+                        ++jpeg_fps_window_frames_;
+                        const int64_t jpeg_window_ms =
+                            encoded_at_ms - jpeg_fps_window_started_ms_;
+                        if (jpeg_window_ms >= 1000 && jpeg_fps_window_frames_ >= 2) {
+                            measured_mjpeg_fps_ =
+                                static_cast<double>(jpeg_fps_window_frames_ - 1) * 1000.0 /
+                                static_cast<double>(jpeg_window_ms);
+                            jpeg_fps_window_started_ms_ = encoded_at_ms;
+                            jpeg_fps_window_frames_ = 1;
+                        }
+                    }
+                }
+                jpeg_cv_.notify_all();
+            }
+
+            next_encode_at += frame_period;
+            const auto after_encode = std::chrono::steady_clock::now();
+            if (next_encode_at < after_encode) {
+                // We are already late. Do not add another full frame-period sleep.
+                next_encode_at = after_encode;
+            }
+        }
+
+        jpeg_thread_alive_ = false;
+        jpeg_cv_.notify_all();
     }
 
     void camera_loop() {
@@ -617,6 +761,7 @@ private:
                     if (stale) {
                         std::cerr << "[WARN] " << stale_message << "; rebuilding pipeline" << std::endl;
                         cv_.notify_all();
+                        jpeg_cv_.notify_all();
                         break;
                     }
                 }
@@ -642,6 +787,7 @@ private:
                     last_error_.empty() ? "camera unavailable; retry scheduled" : last_error_);
             }
             cv_.notify_all();
+            jpeg_cv_.notify_all();
             std::cerr << "[WARN] camera unavailable; retry in " << backoff_ms << " ms" << std::endl;
             sleep_interruptible(backoff_ms);
             if (reached_running) backoff_ms = reconnect_initial_ms_;
@@ -655,6 +801,7 @@ private:
             invalidate_frames_locked();
         }
         cv_.notify_all();
+        jpeg_cv_.notify_all();
         camera_thread_alive_ = false;
     }
 
@@ -869,14 +1016,15 @@ private:
         return !method.empty() && !path.empty();
     }
 
-    void send_all(int fd, const void *data, size_t len) {
+    bool send_all(int fd, const void *data, size_t len) {
         const char *p = reinterpret_cast<const char *>(data);
         while (len > 0) {
             ssize_t n = ::send(fd, p, len, MSG_NOSIGNAL);
-            if (n <= 0) return;
+            if (n <= 0) return false;
             p += n;
             len -= static_cast<size_t>(n);
         }
+        return true;
     }
 
     void send_text(int fd, int code, const std::string &ctype, const std::string &body) {
@@ -908,6 +1056,7 @@ private:
         const int64_t unhealthy_age_ms = unhealthy_since_ms_ > 0 ? now - unhealthy_since_ms_ : 0;
         const int64_t color_age_ms = last_color_ms_ > 0 ? now - last_color_ms_ : -1;
         const int64_t depth_age_ms = last_depth_ms_ > 0 ? now - last_depth_ms_ : -1;
+        const int64_t jpeg_age_ms = last_jpeg_ms_ > 0 ? now - last_jpeg_ms_ : -1;
         const bool connected = camera_connected_locked(now);
         const bool stale = !connected;
         std::string severity = "ok";
@@ -940,6 +1089,16 @@ private:
            << "\"frame_count\":" << frame_count_ << ","
            << "\"color_frame_count\":" << color_frame_count_ << ","
            << "\"depth_frame_count\":" << depth_frame_count_ << ","
+           << "\"jpeg_frame_count\":" << jpeg_sequence_ << ","
+           << "\"jpeg_source_sequence\":" << jpeg_source_sequence_ << ","
+           << "\"capture_fps_configured\":" << fps_ << ","
+           << "\"mjpeg_fps_configured\":" << mjpeg_fps_ << ","
+           << "\"capture_fps_measured\":" << std::fixed << std::setprecision(3) << measured_color_fps_ << ","
+           << "\"mjpeg_fps_measured\":" << std::fixed << std::setprecision(3) << measured_mjpeg_fps_ << ","
+           << "\"jpeg_encode_ms_latest\":" << std::fixed << std::setprecision(3) << jpeg_encode_ms_latest_ << ","
+           << "\"jpeg_encode_ms_average\":" << std::fixed << std::setprecision(3) << jpeg_encode_ms_average_ << ","
+           << "\"jpeg_thread_alive\":" << (jpeg_thread_alive_ ? "true" : "false") << ","
+           << "\"last_jpeg_age_ms\":" << jpeg_age_ms << ","
            << "\"color_width\":" << color_w_ << ","
            << "\"color_height\":" << color_h_ << ","
            << "\"depth_width\":" << depth_w_ << ","
@@ -1087,18 +1246,53 @@ private:
         return !depth.empty();
     }
 
+    bool wait_fresh_jpeg(
+        std::shared_ptr<const std::vector<uchar>> &jpeg,
+        uint64_t *jpeg_sequence,
+        uint64_t after_sequence,
+        int wait_ms) {
+        std::unique_lock<std::mutex> lk(mtx_);
+        const auto ready = [this, after_sequence]() {
+            const int64_t now = now_ms();
+            const bool cache_fresh =
+                latest_jpeg_ && !latest_jpeg_->empty() &&
+                last_jpeg_ms_ > 0 &&
+                now - last_jpeg_ms_ <= stale_timeout_ms_;
+            return !run_requested() ||
+                (after_sequence > 0 && !camera_connected_locked(now)) ||
+                (cache_fresh && jpeg_sequence_ > after_sequence);
+        };
+
+        if (wait_ms > 0) {
+            if (!jpeg_cv_.wait_for(
+                    lk, std::chrono::milliseconds(wait_ms), ready)) {
+                return false;
+            }
+        } else {
+            jpeg_cv_.wait(lk, ready);
+        }
+
+        const int64_t now = now_ms();
+        if (!run_requested() || !camera_connected_locked(now)) return false;
+        if (!latest_jpeg_ || latest_jpeg_->empty() ||
+            last_jpeg_ms_ <= 0 || now - last_jpeg_ms_ > stale_timeout_ms_ ||
+            jpeg_sequence_ <= after_sequence) {
+            return false;
+        }
+
+        jpeg = latest_jpeg_;
+        if (jpeg_sequence) *jpeg_sequence = jpeg_sequence_;
+        return true;
+    }
+
     void send_snapshot(int fd) {
-        cv::Mat img;
-        if (!copy_fresh_color(img, nullptr, 1500)) {
-            send_text(fd, 503, "application/json", "{\"ok\":false,\"error\":\"camera frame stale or reconnecting\"}");
+        std::shared_ptr<const std::vector<uchar>> jpeg;
+        uint64_t sequence = 0;
+        if (!wait_fresh_jpeg(jpeg, &sequence, 0, 1500)) {
+            send_text(fd, 503, "application/json", "{\"ok\":false,\"error\":\"camera frame stale or JPEG cache unavailable\"}");
             return;
         }
-        std::vector<uchar> jpg;
-        if (!encode_jpeg(img, jpeg_quality_, jpg)) {
-            send_text(fd, 503, "application/json", "{\"ok\":false,\"error\":\"no color frame\"}");
-            return;
-        }
-        send_binary(fd, 200, "image/jpeg", jpg);
+        send_binary(fd, 200, "image/jpeg", *jpeg);
     }
 
     void send_depth_png(int fd) {
@@ -1130,48 +1324,48 @@ private:
     }
 
     void send_mjpeg(int fd) {
-        cv::Mat initial;
+        std::shared_ptr<const std::vector<uchar>> jpeg;
         uint64_t last_sequence = 0;
-        if (!copy_fresh_color(initial, &last_sequence, 1500)) {
+        if (!wait_fresh_jpeg(jpeg, &last_sequence, 0, 1500)) {
             send_text(fd, 503, "application/json", "{\"ok\":false,\"error\":\"camera stream unavailable\"}");
             return;
         }
-        std::string boundary = "visionops-orbbec336l";
-        std::ostringstream h;
-        h << "HTTP/1.1 200 OK\r\n"
-          << "Content-Type: multipart/x-mixed-replace; boundary=" << boundary << "\r\n"
-          << "Cache-Control: no-cache\r\n"
-          << "Connection: close\r\n\r\n";
-        auto hs = h.str();
-        send_all(fd, hs.data(), hs.size());
 
-        const int delay_ms = std::max(10, 1000 / std::max(1, mjpeg_fps_));
-        cv::Mat img = initial;
+        const std::string boundary = "visionops-orbbec336l";
+        std::ostringstream header;
+        header << "HTTP/1.1 200 OK\r\n"
+               << "Content-Type: multipart/x-mixed-replace; boundary=" << boundary << "\r\n"
+               << "Cache-Control: no-cache, no-store, must-revalidate\r\n"
+               << "Pragma: no-cache\r\n"
+               << "Connection: close\r\n\r\n";
+        const auto header_text = header.str();
+        if (!send_all(fd, header_text.data(), header_text.size())) return;
+
         while (run_requested()) {
-            if (img.empty()) {
-                std::unique_lock<std::mutex> lk(mtx_);
-                cv_.wait_for(lk, std::chrono::milliseconds(std::max(100, delay_ms)), [this, last_sequence]() {
-                    return !run_requested() || !camera_connected_locked(now_ms()) || color_frame_count_ != last_sequence;
-                });
-                if (!run_requested() || !camera_connected_locked(now_ms())) break;
-                if (color_frame_count_ == last_sequence) continue;
-                img = latest_bgr_.clone();
-                last_sequence = color_frame_count_;
+            std::ostringstream part;
+            part << "--" << boundary << "\r\n"
+                 << "Content-Type: image/jpeg\r\n"
+                 << "Content-Length: " << jpeg->size() << "\r\n"
+                 << "X-JPEG-Sequence: " << last_sequence << "\r\n\r\n";
+            const auto part_text = part.str();
+            static const std::string tail = "\r\n";
+
+            if (!send_all(fd, part_text.data(), part_text.size())) break;
+            if (!send_all(fd, jpeg->data(), jpeg->size())) break;
+            if (!send_all(fd, tail.data(), tail.size())) break;
+
+            std::shared_ptr<const std::vector<uchar>> next_jpeg;
+            uint64_t next_sequence = last_sequence;
+            if (!wait_fresh_jpeg(
+                    next_jpeg,
+                    &next_sequence,
+                    last_sequence,
+                    0)) {
+                break;
             }
-            std::vector<uchar> jpg;
-            if (encode_jpeg(img, jpeg_quality_, jpg)) {
-                std::ostringstream ph;
-                ph << "--" << boundary << "\r\n"
-                   << "Content-Type: image/jpeg\r\n"
-                   << "Content-Length: " << jpg.size() << "\r\n\r\n";
-                auto ps = ph.str();
-                if (::send(fd, ps.data(), ps.size(), MSG_NOSIGNAL) <= 0) break;
-                if (::send(fd, jpg.data(), jpg.size(), MSG_NOSIGNAL) <= 0) break;
-                const std::string tail = "\r\n";
-                if (::send(fd, tail.data(), tail.size(), MSG_NOSIGNAL) <= 0) break;
-            }
-            img.release();
-            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+
+            jpeg = std::move(next_jpeg);
+            last_sequence = next_sequence;
         }
     }
 
@@ -1239,14 +1433,18 @@ private:
     std::shared_ptr<ob::VideoStreamProfile> color_profile_;
     std::shared_ptr<ob::VideoStreamProfile> depth_profile_;
     std::thread camera_thread_;
+    std::thread jpeg_thread_;
     std::atomic<bool> camera_started_{false};
     std::atomic<bool> camera_thread_alive_{false};
+    std::atomic<bool> jpeg_thread_alive_{false};
     std::atomic<bool> camera_stop_requested_{false};
 
     std::mutex mtx_;
     std::condition_variable cv_;
+    std::condition_variable jpeg_cv_;
     cv::Mat latest_bgr_;
     cv::Mat latest_depth_mm_;
+    std::shared_ptr<const std::vector<uchar>> latest_jpeg_;
     int64_t last_color_ms_ = 0;
     int64_t last_depth_ms_ = 0;
     int64_t pipeline_started_ms_ = 0;
@@ -1254,6 +1452,18 @@ private:
     uint64_t frame_count_ = 0;
     uint64_t color_frame_count_ = 0;
     uint64_t depth_frame_count_ = 0;
+    uint64_t jpeg_sequence_ = 0;
+    uint64_t jpeg_source_sequence_ = 0;
+    uint64_t jpeg_encode_count_ = 0;
+    int64_t last_jpeg_ms_ = 0;
+    int64_t color_fps_window_started_ms_ = 0;
+    uint64_t color_fps_window_frames_ = 0;
+    int64_t jpeg_fps_window_started_ms_ = 0;
+    uint64_t jpeg_fps_window_frames_ = 0;
+    double measured_color_fps_ = 0.0;
+    double measured_mjpeg_fps_ = 0.0;
+    double jpeg_encode_ms_latest_ = 0.0;
+    double jpeg_encode_ms_average_ = 0.0;
     CameraState camera_state_ = CameraState::Starting;
     int64_t state_since_ms_ = 0;
     int64_t state_since_epoch_ms_ = 0;

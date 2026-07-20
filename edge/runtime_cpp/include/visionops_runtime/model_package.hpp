@@ -24,6 +24,8 @@ struct LoadedModelInfo {
   int input_height{640};
   double score_threshold{0.5};
   double nms_threshold{0.45};
+  int max_detections{100};
+  int mask_max_points{160};
   std::string model_load_error;
 
   bool degraded() const { return !model_load_error.empty(); }

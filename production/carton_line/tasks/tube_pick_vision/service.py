@@ -204,7 +204,7 @@ class TubePickVisionService:
         self.status_thread: threading.Thread | None = None
         self.manual_request_id = 0
         debug = self.settings.get("debug") if isinstance(self.settings.get("debug"), Mapping) else {}
-        self.debug_enabled = bool(debug.get("save_every_trigger", True))
+        self.debug_enabled = bool(debug.get("save_every_trigger", False))
         self.debug_root = Path(str(debug.get("save_root", "/tmp/visionops_v3/carton_line/tube_pick_vision/latest")))
 
         ws = self.settings["websocket"]

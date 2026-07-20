@@ -150,3 +150,33 @@ def test_service_builds_collector_visualization_and_robot_message(monkeypatch):
     visual_item = decision["visualization_result"]["box_grasp"]["items"][0]
     assert visual_item["grasp_points_px"]["left_mid"]
     assert visual_item["contour_px"]
+
+
+def test_background_inference_fps_can_be_updated_and_persisted(tmp_path):
+    from production.carton_palletizing.tasks.box_grasp_vision.service import BoxGraspVisionService
+
+    config = load_config()
+    settings_path = tmp_path / "box_grasp_inference_settings.json"
+    config["box_grasp"]["app"]["inference_settings_path"] = str(settings_path)
+    service = BoxGraspVisionService(config)
+
+    result = service.set_detection_hz(12.5)
+
+    assert result["status"] == "ok"
+    assert result["detection_fps"] == 12.5
+    assert service.inference_settings()["detection_fps"] == 12.5
+    persisted = __import__("json").loads(settings_path.read_text(encoding="utf-8"))
+    assert persisted["detection_fps"] == 12.5
+
+
+def test_background_inference_fps_override_is_loaded_on_start(tmp_path):
+    from production.carton_palletizing.tasks.box_grasp_vision.service import BoxGraspVisionService
+
+    settings_path = tmp_path / "box_grasp_inference_settings.json"
+    settings_path.write_text('{"detection_fps":7.5}', encoding="utf-8")
+    config = load_config()
+    config["box_grasp"]["app"]["inference_settings_path"] = str(settings_path)
+
+    service = BoxGraspVisionService(config)
+
+    assert service.detection_hz() == 7.5

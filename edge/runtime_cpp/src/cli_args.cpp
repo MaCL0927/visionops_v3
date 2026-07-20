@@ -55,6 +55,10 @@ CliArgs parse_cli_args(int argc, char* argv[]) {
       args.config.score_threshold_override = std::stod(require_value(argc, argv, index));
     } else if (argument == "--nms-threshold") {
       args.config.nms_threshold_override = std::stod(require_value(argc, argv, index));
+    } else if (argument == "--max-detections") {
+      args.config.max_detections_override = std::stoi(require_value(argc, argv, index));
+    } else if (argument == "--mask-max-points") {
+      args.config.mask_max_points_override = std::stoi(require_value(argc, argv, index));
     } else if (argument == "--frame-source") {
       args.config.frame_source = require_value(argc, argv, index);
     } else if (argument == "--camera-device") {
@@ -120,6 +124,8 @@ std::string cli_help_text(const std::string& program) {
          "  --dump-rknn-io           启动时打印 RKNN 输入输出属性\n"
          "  --score-threshold <值>   覆盖模型置信度阈值\n"
          "  --nms-threshold <值>     覆盖模型 NMS 阈值\n"
+         "  --max-detections <数量>  覆盖后处理最大保留目标数；0 表示使用 model.yaml\n"
+         "  --mask-max-points <数量> 覆盖分割 polygon 最大点数；0 表示使用 model.yaml\n"
          "  --frame-source <类型>     mock、test_image、v4l2 或 hp60c_bridge，默认 mock\n"
          "  --camera-device <设备>    V4L2 设备，默认 /dev/video0\n"
          "  --camera-width <宽>       V4L2 宽度，默认 640\n"

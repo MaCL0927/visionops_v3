@@ -183,6 +183,7 @@ DEFAULT_CONFIG["box_grasp"] = {
         "listen_host": "127.0.0.1",
         "listen_port": 19211,
         "request_timeout_ms": 5000,
+        "inference_settings_path": "/opt/visionops_v3/config/box_grasp_inference_settings.json",
     },
     "collector": {
         "listen_host": "0.0.0.0",
@@ -228,7 +229,7 @@ DEFAULT_CONFIG["box_grasp"] = {
             "epsilon_steps": 28,
             "min_quad_area_ratio": 0.65,
             "max_quad_area_ratio": 1.35,
-            "contour_max_points": 160,
+            "contour_max_points": 64,
         },
         "depth": {
             "enabled": True,
@@ -242,7 +243,7 @@ DEFAULT_CONFIG["box_grasp"] = {
         },
     },
     "debug": {
-        "save_every_trigger": True,
+        "save_every_trigger": False,
         "save_root": "/tmp/visionops_v3/carton_palletizing/box_grasp_vision/latest",
     },
 }
@@ -428,6 +429,9 @@ def _validate_box_grasp(config: Dict[str, Any]) -> None:
     app["request_timeout_ms"] = int(app.get("request_timeout_ms", 5000))
     if app["request_timeout_ms"] <= 0:
         raise ValueError("box_grasp.app.request_timeout_ms 必须大于0")
+    app["inference_settings_path"] = _path(
+        app.get("inference_settings_path", "/opt/visionops_v3/config/box_grasp_inference_settings.json")
+    )
 
     collector = profile["collector"]
     collector["listen_port"] = _port(collector["listen_port"], "box_grasp.collector.listen_port")

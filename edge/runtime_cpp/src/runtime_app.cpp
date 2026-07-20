@@ -146,6 +146,12 @@ PreparedModelRuntime prepare_model_runtime(const AppConfig& config) {
   if (config.nms_threshold_override >= 0.0) {
     prepared.model_info.nms_threshold = config.nms_threshold_override;
   }
+  if (config.max_detections_override > 0) {
+    prepared.model_info.max_detections = config.max_detections_override;
+  }
+  if (config.mask_max_points_override >= 4) {
+    prepared.model_info.mask_max_points = config.mask_max_points_override;
+  }
   prepared.model_info.backend = prepared.runner->backend_name();
   if (config.backend == "rknn" &&
       (prepared.model_info.rknn_path.empty() ||
@@ -289,7 +295,7 @@ RuntimeApiResult RuntimeApp::update_roi(const std::string& request_body) {
 std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
   const auto now = now_timestamp_ms();
   const auto frame_source = stream_worker_.status();
-  const double inference_fps = snapshot.running && snapshot.mode == "detect" ? 1.0 : 0.0;
+  const double inference_fps = snapshot.inference_fps;
   const double snapshot_fps =
       snapshot.running && snapshot.mode == "preview" && !frame_source.stale
           ? frame_source.fps
@@ -318,7 +324,9 @@ std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
          << "\",\"rga_available\":" << json_bool(rga_backend_compiled()) << '}'
          << ",\"fps\":{\"camera_fps\":" << frame_source.fps << ",\"inference_fps\":" << inference_fps
          << ",\"snapshot_fps\":" << snapshot_fps << '}'
-         << ",\"latency_ms\":{\"latest\":16.0,\"average\":16.0,\"p95\":16.0}"
+         << ",\"latency_ms\":{\"latest\":" << snapshot.latency_latest_ms
+         << ",\"average\":" << snapshot.latency_average_ms
+         << ",\"p95\":" << snapshot.latency_p95_ms << '}'
          << ",\"counters\":{\"frames_in\":" << snapshot.counters.frames_in
          << ",\"frames_inferred\":" << snapshot.counters.frames_inferred
          << ",\"frames_dropped\":" << snapshot.counters.frames_dropped
@@ -356,6 +364,8 @@ std::string RuntimeApp::loaded_model_json() const {
          << ",\"height\":" << model_info_.input_height << '}'
          << ",\"score_threshold\":" << model_info_.score_threshold
          << ",\"nms_threshold\":" << model_info_.nms_threshold
+         << ",\"max_detections\":" << model_info_.max_detections
+         << ",\"mask_max_points\":" << model_info_.mask_max_points
          << ",\"model_load_error\":"
          << (model_info_.model_load_error.empty()
                  ? "null"
@@ -474,8 +484,9 @@ std::string RuntimeApp::infer_once() {
         model_info_.class_names,
         static_cast<float>(model_info_.score_threshold),
         static_cast<float>(model_info_.nms_threshold),
-        100,
-        roi_filter_.snapshot()};
+        model_info_.max_detections,
+        roi_filter_.snapshot(),
+        model_info_.mask_max_points};
     PostprocessResult postprocess;
     if (model_info_.task_type == "detection" || model_info_.task_type == "detect") {
       postprocess = postprocess_detection(inference.tensors, postprocess_config, preprocess.letterbox);

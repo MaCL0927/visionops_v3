@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -25,12 +26,17 @@ struct RuntimeSnapshot {
   std::optional<std::string> last_frame_id;
   std::optional<std::string> last_result_id;
   std::optional<std::string> latest_result_json;
+  double inference_fps{0.0};
+  double latency_latest_ms{0.0};
+  double latency_average_ms{0.0};
+  double latency_p95_ms{0.0};
 };
 
 struct InferenceIdentity {
   std::string frame_id;
   std::string result_id;
   std::uint64_t sequence{0};
+  std::chrono::steady_clock::time_point started_at;
 };
 
 class RuntimeState {
@@ -60,6 +66,8 @@ class RuntimeState {
   std::optional<std::string> last_frame_id_;
   std::optional<std::string> last_result_id_;
   std::optional<std::string> latest_result_json_;
+  std::deque<std::chrono::steady_clock::time_point> inference_completed_at_;
+  std::deque<double> inference_latency_ms_;
 };
 
 }  // namespace visionops::runtime

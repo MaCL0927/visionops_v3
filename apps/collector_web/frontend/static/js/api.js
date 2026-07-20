@@ -61,6 +61,7 @@ export const endpoints = {
   appStatus: "/api/app/status",
   appRegisters: "/api/app/registers",
   appEvaluate: "/api/app/evaluate_once",
+  appInferenceSettings: "/api/app/inference_settings",
   appLatestDecision: "/api/app/latest_decision",
   appLatestGatewayMessage: "/api/app/latest_gateway_message",
 };

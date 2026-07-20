@@ -46,7 +46,7 @@ class TaskExecutor:
         if not self.template_path.is_file():
             raise FileNotFoundError(f"隔板模板不存在: {self.template_path}")
         self.depth_url = str(config["camera_bridge"]["depth_url"])
-        self.save_enabled = bool(config["debug"].get("save_every_trigger", True))
+        self.save_enabled = bool(config["debug"].get("save_every_trigger", False))
         self.save_root = Path(str(config["debug"]["save_root"]))
 
     @staticmethod

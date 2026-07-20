@@ -67,10 +67,12 @@ const state = {
 };
 const listeners = new Set();
 
+const MIN_TIMER_INTERVAL_MS = 16;
+
 function clampMs(value, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
-  return Math.max(100, Math.round(number));
+  return Math.max(MIN_TIMER_INTERVAL_MS, Math.round(number));
 }
 
 function clampNumber(value, fallback, min = -Infinity, max = Infinity) {
@@ -81,7 +83,7 @@ function clampNumber(value, fallback, min = -Infinity, max = Infinity) {
 
 function fpsToIntervalMs(fps, fallbackMs = 200) {
   const number = clampNumber(fps, 1000 / fallbackMs, 1, 60);
-  return Math.max(100, Math.round(1000 / number));
+  return Math.max(MIN_TIMER_INTERVAL_MS, Math.round(1000 / number));
 }
 
 function normalizeOverlay(overlay = {}) {

@@ -34,6 +34,9 @@ void validate_app_config(const AppConfig& config) {
   if (config.score_threshold_override > 1.0 || config.nms_threshold_override > 1.0) {
     throw std::invalid_argument("score-threshold 和 nms-threshold 必须位于 0 到 1");
   }
+  if (config.max_detections_override < 0 || config.mask_max_points_override < 0) {
+    throw std::invalid_argument("max-detections 和 mask-max-points 不得为负数");
+  }
   if (config.frame_source != "mock" && config.frame_source != "test_image" &&
       config.frame_source != "v4l2" && config.frame_source != "hp60c_bridge" &&
       config.frame_source != "hp60c") {

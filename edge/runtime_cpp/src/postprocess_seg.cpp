@@ -448,6 +448,7 @@ void attach_proto_masks(
     const std::vector<float>& proto,
     const std::vector<std::uint32_t>& proto_shape,
     const LetterboxMeta& letterbox,
+    int mask_max_points,
     float mask_threshold = 0.5F) {
   int channels = 0;
   int proto_h = 0;
@@ -499,7 +500,10 @@ void attach_proto_masks(
       const float input_y = point.y * letterbox.input_height / static_cast<float>(proto_h);
       polygon.push_back({map_x(input_x, letterbox), map_y(input_y, letterbox)});
     }
-    polygon = simplify_polygon(std::move(polygon), 2.0F, 160);
+    polygon = simplify_polygon(
+        std::move(polygon),
+        2.0F,
+        std::max(4, mask_max_points));
     if (polygon.size() >= 3) detection.mask_polygon = std::move(polygon);
   }
 }
@@ -767,7 +771,12 @@ PostprocessResult postprocess_segmentation(
     decoded = apply_nms(std::move(decoded), config.nms_threshold, config.max_detections);
     result.raw_result_count = static_cast<int>(decoded.size());
     apply_roi_filter(decoded, config.roi, letterbox);
-    attach_proto_masks(decoded, proto_values, proto_shape, letterbox);
+    attach_proto_masks(
+        decoded,
+        proto_values,
+        proto_shape,
+        letterbox,
+        config.mask_max_points);
     result.success = true;
     result.result_count = static_cast<int>(decoded.size());
     result.roi_filtered_count = result.raw_result_count - result.result_count;
@@ -786,7 +795,12 @@ PostprocessResult postprocess_segmentation(
     decoded = apply_nms(std::move(decoded), config.nms_threshold, config.max_detections);
     result.raw_result_count = static_cast<int>(decoded.size());
     apply_roi_filter(decoded, config.roi, letterbox);
-    attach_proto_masks(decoded, proto_values, proto_shape, letterbox);
+    attach_proto_masks(
+        decoded,
+        proto_values,
+        proto_shape,
+        letterbox,
+        config.mask_max_points);
     result.success = true;
     result.result_count = static_cast<int>(decoded.size());
     result.roi_filtered_count = result.raw_result_count - result.result_count;

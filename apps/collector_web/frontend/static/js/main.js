@@ -113,21 +113,27 @@ async function checkCollector() {
   catch (_error) { dot.className = "error"; text.textContent = "Collector unreachable"; }
 }
 
-function scheduleSnapshotRefresh() {
+function scheduleSnapshotRefresh(delayMs = 0) {
   setTimeout(async () => {
+    const startedAt = performance.now();
     const state = getState();
     if (!state.productionMode && state.activePage === "calibration") await refreshCalibration();
     if (!state.productionMode && state.activePage === "capture") await refreshCapture();
-    scheduleSnapshotRefresh();
-  }, getState().config.preview_refresh_interval_ms);
+    const targetMs = Math.max(16, Number(getState().config.preview_refresh_interval_ms || 200));
+    const remainingMs = Math.max(0, targetMs - (performance.now() - startedAt));
+    scheduleSnapshotRefresh(remainingMs);
+  }, Math.max(0, delayMs));
 }
 
-function scheduleStatusRefresh() {
+function scheduleStatusRefresh(delayMs = 0) {
   setTimeout(async () => {
+    const startedAt = performance.now();
     await checkCollector();
     if (getState().productionMode) await refreshProduction();
-    scheduleStatusRefresh();
-  }, getState().config.status_refresh_interval_ms);
+    const targetMs = Math.max(16, Number(getState().config.status_refresh_interval_ms || 2000));
+    const remainingMs = Math.max(0, targetMs - (performance.now() - startedAt));
+    scheduleStatusRefresh(remainingMs);
+  }, Math.max(0, delayMs));
 }
 
 async function main() {

@@ -552,16 +552,19 @@ function toggleRealtime() {
   const runLoop = async () => {
     if (!realtimeEnabled) return;
     if (realtimeBusy) {
-      realtimeTimer = setTimeout(runLoop, getState().config.inference_interval_ms);
+      realtimeTimer = setTimeout(runLoop, 1);
       return;
     }
+    const startedAt = performance.now();
     realtimeBusy = true;
     try {
       await inferOnce();
     } finally {
       realtimeBusy = false;
       if (realtimeEnabled) {
-        realtimeTimer = setTimeout(runLoop, getState().config.inference_interval_ms);
+        const targetMs = Math.max(16, Number(getState().config.inference_interval_ms || 500));
+        const remainingMs = Math.max(0, targetMs - (performance.now() - startedAt));
+        realtimeTimer = setTimeout(runLoop, remainingMs);
       }
     }
   };

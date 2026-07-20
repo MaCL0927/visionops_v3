@@ -53,6 +53,14 @@ def _runtime(config: dict, profile: str) -> int:
         "--camera-reconnect-initial-ms", str(recovery["initial_backoff_ms"]),
         "--camera-reconnect-max-ms", str(recovery["max_backoff_ms"]),
     ]
+    if profile == "box_grasp":
+        algorithm = config["box_grasp"]["algorithm"]
+        command.extend([
+            "--max-detections",
+            str(algorithm["selection"]["max_targets"]),
+            "--mask-max-points",
+            str(algorithm["geometry"]["contour_max_points"]),
+        ])
     os.execv(command[0], command)
     return 0
 

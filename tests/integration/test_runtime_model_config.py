@@ -150,3 +150,43 @@ def test_missing_model_files_degrade_without_stopping_runtime(
         result = _request_json(f"{base_url}/api/runtime/infer_once", method="POST")
         assert result["message_type"] == "inference_result"
         assert result["model"]["model_name"] == "broken_model"
+
+
+def test_runtime_reads_postprocess_limits_and_cli_overrides(
+    model_config_runtime_binary: Path, tmp_path: Path
+) -> None:
+    package = tmp_path / "limited_segmentation"
+    package.mkdir()
+    (package / "model.rknn").write_bytes(b"mock")
+    (package / "model.yaml").write_text(
+        "\n".join(
+            [
+                'model_id: limited-segmentation',
+                'model_name: limited-segmentation',
+                'version: 1.0.0',
+                'task: segmentation',
+                'target_platform: rk3576',
+                'input_size: [640, 640]',
+                'class_names: [box]',
+                'max_detections: 3',
+                'mask_max_points: 48',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with _running_runtime(
+        model_config_runtime_binary,
+        [
+            "--model-dir",
+            str(package),
+            "--max-detections",
+            "1",
+            "--mask-max-points",
+            "32",
+        ],
+    ) as base_url:
+        status = _request_json(f"{base_url}/api/runtime/status")
+        model = status["loaded_model"]
+        assert model["max_detections"] == 1
+        assert model["mask_max_points"] == 32
