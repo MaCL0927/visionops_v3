@@ -80,6 +80,7 @@ class RuntimeApp {
   SnapshotProvider snapshot_provider_;
   RoiFilterStore roi_filter_;
   mutable std::recursive_mutex model_mutex_;
+  std::mutex inference_mutex_;
 };
 
 }  // namespace visionops::runtime

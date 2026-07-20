@@ -100,16 +100,36 @@ box_grasp:
 每个 `app_decision` 及 `visualization_result.box_grasp` 中新增 `app_timing`：
 
 ```text
-runtime_http_ms
+runtime_http_ms / runtime_roundtrip_ms
+runtime_lock_wait_ms
+runtime_headers_wait_ms
+runtime_body_read_ms
+runtime_json_decode_ms
+runtime_response_bytes
+runtime_server_queue_ms
+runtime_server_route_ms
 runtime_internal_ms
 runtime_transport_overhead_ms
+runtime_non_route_ms
 classify_ms
 depth_sample_deproject_ms
+depth_bridge_internal_ms
+depth_http_roundtrip_ms
+depth_http_headers_wait_ms
+depth_http_body_read_ms
+depth_json_decode_ms
 result_build_ms
 postprocess_stage_ms
 pipeline_age_ms
 total_ms
 ```
+
+
+`runtime_http_ms` 是 App 客户端从发起请求到读完响应正文的完整往返时间。
+优化后 JSON 解码已移到 CPU 后处理线程，因此该字段不再包含 `json.loads`；
+`runtime_server_queue_ms` 和 `runtime_server_route_ms` 来自 Runtime 响应头，可用于区分
+HTTP 工作队列等待与实际路由处理。Runtime 默认启动 4 个 HTTP worker，但通过
+`inference_mutex_` 保证单个 RKNN context 仍只执行一路推理。
 
 状态接口同时给出流水线和最近一次分阶段耗时：
 

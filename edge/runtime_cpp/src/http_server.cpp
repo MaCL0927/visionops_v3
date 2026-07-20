@@ -2,12 +2,16 @@
 
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
+#include <cstdlib>
 #include <cctype>
 #include <cstring>
 #include <iostream>
@@ -46,6 +50,54 @@ std::vector<std::uint8_t> bytes(std::string value) {
   return {value.begin(), value.end()};
 }
 
+
+int positive_env_int(const char* name, int fallback, int minimum, int maximum) {
+  const char* raw = std::getenv(name);
+  if (raw == nullptr || *raw == '\0') return fallback;
+  try {
+    const int value = std::stoi(raw);
+    return std::max(minimum, std::min(maximum, value));
+  } catch (const std::exception&) {
+    return fallback;
+  }
+}
+
+double elapsed_ms(std::chrono::steady_clock::time_point started) {
+  return std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
+}
+
+bool send_iov_all(int fd, const std::string& header, const std::vector<std::uint8_t>& body) {
+  iovec parts[2]{};
+  parts[0].iov_base = const_cast<char*>(header.data());
+  parts[0].iov_len = header.size();
+  parts[1].iov_base = body.empty() ? nullptr : const_cast<std::uint8_t*>(body.data());
+  parts[1].iov_len = body.size();
+  int first = 0;
+  int count = body.empty() ? 1 : 2;
+  while (first < count) {
+    msghdr message{};
+    message.msg_iov = parts + first;
+    message.msg_iovlen = static_cast<std::size_t>(count - first);
+    const ssize_t sent = sendmsg(fd, &message, MSG_NOSIGNAL);
+    if (sent < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    if (sent == 0) return false;
+    std::size_t remaining = static_cast<std::size_t>(sent);
+    while (first < count && remaining >= parts[first].iov_len) {
+      remaining -= parts[first].iov_len;
+      ++first;
+    }
+    if (first < count && remaining > 0) {
+      auto* base = static_cast<std::uint8_t*>(parts[first].iov_base);
+      parts[first].iov_base = base + remaining;
+      parts[first].iov_len -= remaining;
+    }
+  }
+  return true;
+}
 std::string status_reason(int status_code) {
   switch (status_code) {
     case 200: return "OK";
@@ -69,9 +121,15 @@ HttpServer::HttpServer(
     : host_(std::move(host)),
       port_(port),
       app_(app),
-      stop_requested_(stop_requested) {}
+      stop_requested_(stop_requested),
+      worker_count_(positive_env_int("VISIONOPS_RUNTIME_HTTP_WORKERS", 4, 1, 32)),
+      queue_capacity_(static_cast<std::size_t>(
+          positive_env_int("VISIONOPS_RUNTIME_HTTP_QUEUE", 64, 4, 1024))) {}
 
-HttpServer::~HttpServer() { close_listener(); }
+HttpServer::~HttpServer() {
+  close_listener();
+  stop_workers();
+}
 
 bool HttpServer::open_listener() {
   addrinfo hints{};
@@ -122,8 +180,10 @@ int HttpServer::run() {
   if (!open_listener()) {
     return 1;
   }
+  start_workers();
   std::cout << "VisionOps Runtime Mock 正在监听 " << host_ << ':' << port_
-            << "，task=" << app_.config().mock_task_type << '\n';
+            << "，task=" << app_.config().mock_task_type
+            << "，http_workers=" << worker_count_ << '\n';
 
   while (!stop_requested_.load()) {
     pollfd descriptor{};
@@ -135,6 +195,7 @@ int HttpServer::run() {
         continue;
       }
       std::cerr << "poll 失败: " << std::strerror(errno) << '\n';
+      stop_workers();
       return 1;
     }
     if (ready == 0 || (descriptor.revents & POLLIN) == 0) {
@@ -145,47 +206,133 @@ int HttpServer::run() {
     socklen_t peer_length = sizeof(peer);
     const int client_fd = accept(listen_fd_, reinterpret_cast<sockaddr*>(&peer), &peer_length);
     if (client_fd < 0) {
-      if (errno != EINTR) {
+      if (errno != EINTR && !stop_requested_.load()) {
         std::cerr << "accept 失败: " << std::strerror(errno) << '\n';
       }
       continue;
     }
-    handle_client(client_fd);
-    close(client_fd);
+    configure_client_socket(client_fd);
+    const auto accepted_at = std::chrono::steady_clock::now();
+    if (!enqueue_client(client_fd, accepted_at)) {
+      auto response = error_response(
+          503,
+          "Service Unavailable",
+          "HTTP_WORK_QUEUE_FULL",
+          "Runtime HTTP 工作队列已满",
+          true);
+      response.headers.emplace_back("Retry-After", "1");
+      write_response(client_fd, response);
+      close(client_fd);
+    }
   }
 
+  stop_workers();
   std::cout << "VisionOps Runtime Mock 已停止\n";
   return 0;
 }
 
-void HttpServer::handle_client(int client_fd) {
+void HttpServer::start_workers() {
+  std::lock_guard<std::mutex> lock(queue_mutex_);
+  if (!workers_.empty()) return;
+  workers_stopping_ = false;
+  workers_.reserve(static_cast<std::size_t>(worker_count_));
+  for (int index = 0; index < worker_count_; ++index) {
+    workers_.emplace_back(&HttpServer::worker_loop, this);
+  }
+}
+
+void HttpServer::stop_workers() {
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (workers_.empty() && workers_stopping_) return;
+    workers_stopping_ = true;
+  }
+  queue_cv_.notify_all();
+  for (auto& worker : workers_) {
+    if (worker.joinable()) worker.join();
+  }
+  workers_.clear();
+  std::queue<QueuedClient> remaining;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    remaining.swap(client_queue_);
+  }
+  while (!remaining.empty()) {
+    if (remaining.front().fd >= 0) close(remaining.front().fd);
+    remaining.pop();
+  }
+}
+
+bool HttpServer::enqueue_client(
+    int client_fd,
+    std::chrono::steady_clock::time_point accepted_at) {
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (workers_stopping_ || client_queue_.size() >= queue_capacity_) return false;
+    client_queue_.push(QueuedClient{client_fd, accepted_at});
+  }
+  queue_cv_.notify_one();
+  return true;
+}
+
+void HttpServer::worker_loop() {
+  while (true) {
+    QueuedClient client;
+    {
+      std::unique_lock<std::mutex> lock(queue_mutex_);
+      queue_cv_.wait(lock, [this]() {
+        return workers_stopping_ || !client_queue_.empty();
+      });
+      if (workers_stopping_ && client_queue_.empty()) return;
+      client = client_queue_.front();
+      client_queue_.pop();
+    }
+    handle_client(client.fd, client.accepted_at);
+    close(client.fd);
+  }
+}
+
+void HttpServer::configure_client_socket(int client_fd) const {
   timeval timeout{};
   timeout.tv_sec = 3;
   setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
   setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  int one = 1;
+  setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+}
 
+void HttpServer::handle_client(
+    int client_fd,
+    std::chrono::steady_clock::time_point accepted_at) {
+  const double queue_wait_ms = elapsed_ms(accepted_at);
   HttpRequest request;
   std::string error_message;
   if (!read_request(client_fd, request, error_message)) {
     const bool too_large = error_message == "请求体过大";
-    write_response(
-        client_fd,
-        error_response(
-            too_large ? 413 : 400,
-            too_large ? "Payload Too Large" : "Bad Request",
-            "INVALID_HTTP_REQUEST",
-            error_message,
-            true));
+    auto response = error_response(
+        too_large ? 413 : 400,
+        too_large ? "Payload Too Large" : "Bad Request",
+        "INVALID_HTTP_REQUEST",
+        error_message,
+        true);
+    response.headers.emplace_back("X-VisionOps-Http-Queue-Ms", std::to_string(queue_wait_ms));
+    write_response(client_fd, response);
     return;
   }
 
+  const auto route_started = std::chrono::steady_clock::now();
   try {
-    write_response(client_fd, route(request));
+    auto response = route(request);
+    response.headers.emplace_back("X-VisionOps-Http-Queue-Ms", std::to_string(queue_wait_ms));
+    response.headers.emplace_back("X-VisionOps-Http-Route-Ms", std::to_string(elapsed_ms(route_started)));
+    write_response(client_fd, response);
   } catch (const std::exception& error) {
     app_.record_error();
-    write_response(
-        client_fd,
-        error_response(500, "Internal Server Error", "INTERNAL_ERROR", error.what(), true));
+    auto response = error_response(
+        500, "Internal Server Error", "INTERNAL_ERROR", error.what(), true);
+    response.headers.emplace_back("X-VisionOps-Http-Queue-Ms", std::to_string(queue_wait_ms));
+    response.headers.emplace_back("X-VisionOps-Http-Route-Ms", std::to_string(elapsed_ms(route_started)));
+    write_response(client_fd, response);
   }
 }
 
@@ -408,22 +555,7 @@ bool HttpServer::write_response(int client_fd, const HttpResponse& response) con
   header << "\r\n";
 
   const std::string header_text = header.str();
-  auto send_all = [&](const std::uint8_t* data, std::size_t size) {
-    std::size_t sent = 0;
-    while (sent < size) {
-      const ssize_t count = send(client_fd, data + sent, size - sent, MSG_NOSIGNAL);
-      if (count <= 0) {
-        return false;
-      }
-      sent += static_cast<std::size_t>(count);
-    }
-    return true;
-  };
-
-  if (!send_all(reinterpret_cast<const std::uint8_t*>(header_text.data()), header_text.size())) {
-    return false;
-  }
-  return response.body.empty() || send_all(response.body.data(), response.body.size());
+  return send_iov_all(client_fd, header_text, response.body);
 }
 
 }  // namespace visionops::runtime

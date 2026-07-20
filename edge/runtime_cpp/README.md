@@ -105,6 +105,26 @@ cmake --build build-rknn-rga-release -j4
 - `application/octet-stream` 的 `RGB888 / BGR888`
 - `image/bmp`
 
+## HTTP 并发与诊断
+
+Runtime 默认使用固定 4 个 HTTP worker。`status`、`snapshot` 和 `latest_result` 可以与推理请求并发处理，
+完整 `infer_once` 仍通过独立互斥锁串行进入同一个 RKNN context。可通过实际部署环境覆盖：
+
+```bash
+VISIONOPS_RUNTIME_HTTP_WORKERS=4
+VISIONOPS_RUNTIME_HTTP_QUEUE=64
+```
+
+每个 HTTP 响应都会返回：
+
+```text
+X-VisionOps-Http-Queue-Ms
+X-VisionOps-Http-Route-Ms
+```
+
+前者表示连接被接受后在工作队列中等待的时间，后者表示 Runtime 路由本身的处理时间。
+连接启用了 `TCP_NODELAY`，HTTP header 与 body 使用 vectored I/O 一起发送，减少小响应抖动。
+
 ## 常用启动方式
 
 ### 1. 默认 Mock

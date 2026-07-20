@@ -391,6 +391,9 @@ std::string RuntimeApp::stop_preview() {
 }
 
 std::string RuntimeApp::infer_once() {
+  // One RKNN context is shared by all HTTP workers. Snapshot/status requests may
+  // run concurrently, but complete inference transactions remain serialized.
+  std::lock_guard<std::mutex> inference_lock(inference_mutex_);
   const auto identity = state_.begin_inference(
       frame_prefix_for_source(config_.frame_source),
       result_prefix_for_backend(config_.backend));

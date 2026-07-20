@@ -134,7 +134,24 @@ def test_service_builds_collector_visualization_and_robot_message(monkeypatch):
     service = BoxGraspVisionService(config)
     polygon = [[235, 221], [426, 214], [457, 329], [222, 336]]
     payload = runtime_result(polygon)
-    monkeypatch.setattr(service.runtime, "infer_once", lambda: payload)
+    from production.carton_palletizing.tasks.box_grasp_vision.service import HttpBytesResult
+
+    raw_payload = __import__("json").dumps(payload, separators=(",", ":")).encode("utf-8")
+    monkeypatch.setattr(
+        service.runtime,
+        "infer_once_raw",
+        lambda: HttpBytesResult(
+            body=raw_payload,
+            status_code=200,
+            headers={
+                "x-visionops-http-queue-ms": "0.2",
+                "x-visionops-http-route-ms": "5.0",
+            },
+            headers_wait_ms=5.2,
+            body_read_ms=0.1,
+            total_ms=5.3,
+        ),
+    )
     captured = {}
 
     def sample_deproject(points, *args):
@@ -196,6 +213,10 @@ def test_service_builds_collector_visualization_and_robot_message(monkeypatch):
     assert visual_item["grasp_points_px"]["left_mid"]
     assert visual_item["contour_px"]
     assert decision["app_timing"]["depth_sample_deproject_ms"] >= 0
+    assert decision["app_timing"]["runtime_response_bytes"] == len(raw_payload)
+    assert decision["app_timing"]["runtime_server_queue_ms"] == 0.2
+    assert decision["app_timing"]["runtime_server_route_ms"] == 5.0
+    assert decision["app_timing"]["runtime_json_decode_ms"] >= 0
     assert decision["visualization_result"]["box_grasp"]["app_timing"] == decision["app_timing"]
     assert len(captured["points"]) == 7
     assert all(len(point) == 4 for point in captured["points"])

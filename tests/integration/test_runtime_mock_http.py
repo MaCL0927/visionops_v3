@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import socket
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import time
 import urllib.error
@@ -188,6 +189,39 @@ def test_runtime_mock_snapshot_is_embedded_jpeg(runtime_server: str) -> None:
         assert response.headers["Cache-Control"] == "no-store"
     assert body.startswith(b"\xff\xd8")
     assert body.endswith(b"\xff\xd9")
+
+
+def test_runtime_http_exposes_queue_and_route_timing_headers(runtime_server: str) -> None:
+    request = urllib.request.Request(
+        f"{runtime_server}/api/runtime/infer_once",
+        data=b"{}",
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=3) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+        queue_ms = float(response.headers["X-VisionOps-Http-Queue-Ms"])
+        route_ms = float(response.headers["X-VisionOps-Http-Route-Ms"])
+    assert payload["status"] == "ok"
+    assert queue_ms >= 0.0
+    assert route_ms >= 0.0
+
+
+def test_runtime_http_workers_allow_status_and_snapshot_concurrency(runtime_server: str) -> None:
+    def request(index: int) -> int:
+        if index % 3 == 0:
+            status, _ = _request_json(f"{runtime_server}/api/runtime/infer_once", method="POST")
+            return status
+        if index % 3 == 1:
+            status, _ = _request_json(f"{runtime_server}/api/runtime/status")
+            return status
+        with urllib.request.urlopen(f"{runtime_server}/api/runtime/snapshot.jpg", timeout=3) as response:
+            response.read()
+            return int(response.status)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        statuses = list(pool.map(request, range(24)))
+    assert statuses == [200] * 24
 
 
 @pytest.mark.parametrize("task_type", ["obb", "segmentation"])

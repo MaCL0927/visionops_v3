@@ -65,19 +65,41 @@ class CameraUnavailableError(UpstreamError):
     pass
 
 
+@dataclass(frozen=True)
+class HttpBytesResult:
+    body: bytes
+    status_code: int
+    headers: Mapping[str, str]
+    headers_wait_ms: float
+    body_read_ms: float
+    total_ms: float
+
+    def header_float(self, name: str) -> float:
+        raw = self.headers.get(name.lower())
+        try:
+            return float(raw) if raw is not None else 0.0
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+
 class JsonHttpClient:
     def __init__(self, timeout_s: float = 5.0, max_response_bytes: int = MAX_RESPONSE_BYTES) -> None:
         self.timeout_s = float(timeout_s)
         self.max_response_bytes = int(max_response_bytes)
 
-    def request_bytes(self, method: str, url: str, body: Optional[bytes] = None) -> bytes:
+    def request_bytes_timed(self, method: str, url: str, body: Optional[bytes] = None) -> HttpBytesResult:
         headers = {"Accept": "application/json,image/jpeg,image/png,*/*", "User-Agent": "visionops-box-grasp/1.0"}
         if body is not None:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(url, data=body, method=method, headers=headers)
+        started = time.perf_counter()
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+                headers_received = time.perf_counter()
                 raw = response.read(self.max_response_bytes + 1)
+                finished = time.perf_counter()
+                status_code = int(getattr(response, "status", 200))
+                normalized_headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
         except urllib.error.HTTPError as error:
             detail = error.read(1000).decode("utf-8", errors="replace")
             raise UpstreamError("{} {} HTTP {}: {}".format(method, url, error.code, detail)) from error
@@ -85,13 +107,20 @@ class JsonHttpClient:
             raise UpstreamError("{} {} failed: {}".format(method, url, getattr(error, "reason", error))) from error
         if len(raw) > self.max_response_bytes:
             raise UpstreamError("upstream response exceeds size limit")
-        return raw
+        return HttpBytesResult(
+            body=raw,
+            status_code=status_code,
+            headers=normalized_headers,
+            headers_wait_ms=(headers_received - started) * 1000.0,
+            body_read_ms=(finished - headers_received) * 1000.0,
+            total_ms=(finished - started) * 1000.0,
+        )
 
-    def request_json(self, method: str, url: str, document: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
-        body = None
-        if document is not None:
-            body = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        raw = self.request_bytes(method, url, body)
+    def request_bytes(self, method: str, url: str, body: Optional[bytes] = None) -> bytes:
+        return self.request_bytes_timed(method, url, body).body
+
+    @staticmethod
+    def decode_json(raw: bytes) -> Dict[str, Any]:
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -100,17 +129,36 @@ class JsonHttpClient:
             raise UpstreamError("upstream JSON root must be an object")
         return payload
 
+    def request_json(self, method: str, url: str, document: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        body = None
+        if document is not None:
+            body = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        response = self.request_bytes_timed(method, url, body)
+        return self.decode_json(response.body)
+
 
 class RuntimeClient:
     def __init__(self, base_url: str, timeout_s: float) -> None:
         self.base_url = str(base_url).rstrip("/")
         self.http = JsonHttpClient(timeout_s)
 
-    def infer_once(self) -> Dict[str, Any]:
-        result = self.http.request_json("POST", self.base_url + "/api/runtime/infer_once", {})
+    @staticmethod
+    def decode_inference(raw: bytes) -> Dict[str, Any]:
+        result = JsonHttpClient.decode_json(raw)
         if result.get("message_type") != "inference_result" or result.get("status") != "ok":
             raise UpstreamError("Runtime infer_once did not return a successful inference_result")
         return result
+
+    def infer_once_raw(self) -> HttpBytesResult:
+        body = b"{}"
+        return self.http.request_bytes_timed(
+            "POST",
+            self.base_url + "/api/runtime/infer_once",
+            body,
+        )
+
+    def infer_once(self) -> Dict[str, Any]:
+        return self.decode_inference(self.infer_once_raw().body)
 
     def status(self) -> Dict[str, Any]:
         return self.http.request_json("GET", self.base_url + "/api/runtime/status")
@@ -219,8 +267,19 @@ class CameraBridgeClient:
             "max_depth_mm": int(max_depth_mm),
             "max_depth_age_ms": int(self.max_depth_age_ms),
         }
+        body = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         try:
-            response = self.http.request_json("POST", self.sample_deproject_url, document)
+            timed_response = self.http.request_bytes_timed("POST", self.sample_deproject_url, body)
+            decode_started = time.perf_counter()
+            response = self.http.decode_json(timed_response.body)
+            decode_ms = (time.perf_counter() - decode_started) * 1000.0
+            response["_client_timing"] = {
+                "roundtrip_ms": timed_response.total_ms,
+                "headers_wait_ms": timed_response.headers_wait_ms,
+                "body_read_ms": timed_response.body_read_ms,
+                "json_decode_ms": decode_ms,
+                "response_bytes": len(timed_response.body),
+            }
         except UpstreamError as error:
             raise CameraUnavailableError("camera depth sample/deproject unavailable: {}".format(error)) from error
         if response.get("ok") is not True:
@@ -263,8 +322,16 @@ class InferencePacket:
     request_id: object
     started_at: float
     started_monotonic: float
+    runtime_raw: bytes = b""
     runtime_result: Optional[Dict[str, Any]] = None
+    runtime_lock_wait_ms: float = 0.0
     runtime_http_ms: float = 0.0
+    runtime_headers_wait_ms: float = 0.0
+    runtime_body_read_ms: float = 0.0
+    runtime_json_decode_ms: float = 0.0
+    runtime_response_bytes: int = 0
+    runtime_server_queue_ms: float = 0.0
+    runtime_server_route_ms: float = 0.0
     runtime_internal_ms: float = 0.0
     error: Optional[Exception] = None
     trigger: Optional[TriggerRequest] = None
@@ -734,18 +801,25 @@ class BoxGraspVisionService:
             continuous=continuous,
         )
         self.state.begin_inference()
-        runtime_started = time.perf_counter()
+        lock_started = time.perf_counter()
         try:
-            # The C++ Runtime owns one RKNN context.  Serialize only the Runtime
-            # call; CPU geometry/depth work for frame N may run in parallel with
-            # NPU inference for frame N+1.
+            # The C++ Runtime owns one RKNN context. Serialize only the Runtime
+            # request. JSON decoding is deliberately deferred to the CPU
+            # postprocess stage, so the inference producer can submit the next
+            # frame while Python parses/processes the previous result.
             with self.runtime_lock:
-                packet.runtime_result = self.runtime.infer_once()
-            packet.runtime_http_ms = (time.perf_counter() - runtime_started) * 1000.0
-            packet.runtime_internal_ms = self._runtime_internal_ms(packet.runtime_result)
-            self._validate_runtime(packet.runtime_result)
+                packet.runtime_lock_wait_ms = (time.perf_counter() - lock_started) * 1000.0
+                response = self.runtime.infer_once_raw()
+            packet.runtime_raw = response.body
+            packet.runtime_http_ms = response.total_ms
+            packet.runtime_headers_wait_ms = response.headers_wait_ms
+            packet.runtime_body_read_ms = response.body_read_ms
+            packet.runtime_response_bytes = len(response.body)
+            packet.runtime_server_queue_ms = response.header_float("x-visionops-http-queue-ms")
+            packet.runtime_server_route_ms = response.header_float("x-visionops-http-route-ms")
         except Exception as error:
-            packet.runtime_http_ms = (time.perf_counter() - runtime_started) * 1000.0
+            if packet.runtime_lock_wait_ms <= 0.0:
+                packet.runtime_lock_wait_ms = (time.perf_counter() - lock_started) * 1000.0
             packet.error = error
         finally:
             self.state.end_inference()
@@ -812,12 +886,18 @@ class BoxGraspVisionService:
                 "depth_age_ms": response.get("depth_age_ms"),
                 "depth_sequence": response.get("depth_sequence"),
             }))
+        client_timing = response.get("_client_timing") if isinstance(response.get("_client_timing"), Mapping) else {}
         bridge_debug = {
             "mode": "sample_deproject",
             "depth_age_ms": response.get("depth_age_ms"),
             "depth_sequence": response.get("depth_sequence"),
             "sample_ms": response.get("sample_ms"),
             "point_count": len(flat_points),
+            "roundtrip_ms": client_timing.get("roundtrip_ms"),
+            "headers_wait_ms": client_timing.get("headers_wait_ms"),
+            "body_read_ms": client_timing.get("body_read_ms"),
+            "json_decode_ms": client_timing.get("json_decode_ms"),
+            "response_bytes": client_timing.get("response_bytes"),
         }
         return output, b"", bridge_debug
 
@@ -852,14 +932,38 @@ class BoxGraspVisionService:
         self.state.begin_postprocess()
         postprocess_started = time.perf_counter()
         timing = {
+            # Compatibility: runtime_http_ms remains the complete client request
+            # round trip, but it no longer includes JSON decoding.
             "runtime_http_ms": round(packet.runtime_http_ms, 3),
-            "runtime_internal_ms": round(packet.runtime_internal_ms, 3),
-            "runtime_transport_overhead_ms": round(max(0.0, packet.runtime_http_ms - packet.runtime_internal_ms), 3),
+            "runtime_roundtrip_ms": round(packet.runtime_http_ms, 3),
+            "runtime_lock_wait_ms": round(packet.runtime_lock_wait_ms, 3),
+            "runtime_headers_wait_ms": round(packet.runtime_headers_wait_ms, 3),
+            "runtime_body_read_ms": round(packet.runtime_body_read_ms, 3),
+            "runtime_response_bytes": int(packet.runtime_response_bytes),
+            "runtime_server_queue_ms": round(packet.runtime_server_queue_ms, 3),
+            "runtime_server_route_ms": round(packet.runtime_server_route_ms, 3),
         }  # type: Dict[str, Any]
         try:
             if packet.error is not None:
                 raise self._camera_error_if_disconnected(packet.error)
-            runtime_result = packet.runtime_result or {}
+            runtime_result = packet.runtime_result
+            if runtime_result is None:
+                decode_started = time.perf_counter()
+                runtime_result = self.runtime.decode_inference(packet.runtime_raw)
+                packet.runtime_json_decode_ms = (time.perf_counter() - decode_started) * 1000.0
+                packet.runtime_result = runtime_result
+            packet.runtime_internal_ms = self._runtime_internal_ms(runtime_result)
+            self._validate_runtime(runtime_result)
+            timing["runtime_json_decode_ms"] = round(packet.runtime_json_decode_ms, 3)
+            timing["runtime_internal_ms"] = round(packet.runtime_internal_ms, 3)
+            timing["runtime_transport_overhead_ms"] = round(
+                max(0.0, packet.runtime_http_ms - packet.runtime_internal_ms),
+                3,
+            )
+            timing["runtime_non_route_ms"] = round(
+                max(0.0, packet.runtime_http_ms - packet.runtime_server_queue_ms - packet.runtime_server_route_ms),
+                3,
+            )
 
             classify_started = time.perf_counter()
             classified = self.algorithm.classify(runtime_result)
@@ -872,6 +976,13 @@ class BoxGraspVisionService:
                 classified.image_height,
             )
             timing["depth_sample_deproject_ms"] = round((time.perf_counter() - depth_started) * 1000.0, 3)
+            if isinstance(bridge_debug, Mapping):
+                timing["depth_bridge_internal_ms"] = round(float(bridge_debug.get("sample_ms") or 0.0), 3)
+                timing["depth_http_roundtrip_ms"] = round(float(bridge_debug.get("roundtrip_ms") or 0.0), 3)
+                timing["depth_http_headers_wait_ms"] = round(float(bridge_debug.get("headers_wait_ms") or 0.0), 3)
+                timing["depth_http_body_read_ms"] = round(float(bridge_debug.get("body_read_ms") or 0.0), 3)
+                timing["depth_json_decode_ms"] = round(float(bridge_debug.get("json_decode_ms") or 0.0), 3)
+                timing["depth_response_bytes"] = int(bridge_debug.get("response_bytes") or 0)
 
             build_started = time.perf_counter()
             external_items = []  # type: List[Dict[str, Any]]

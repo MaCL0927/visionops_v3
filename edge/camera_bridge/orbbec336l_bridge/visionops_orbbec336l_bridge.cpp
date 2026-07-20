@@ -38,7 +38,9 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -252,6 +254,8 @@ public:
                 if (!g_running) break;
                 continue;
             }
+            int one = 1;
+            setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
             std::thread(&OrbbecBridge::handle_client, this, fd).detach();
         }
         g_server_fd.store(-1);
@@ -1522,9 +1526,33 @@ private:
         const char *p = reinterpret_cast<const char *>(data);
         while (len > 0) {
             ssize_t n = ::send(fd, p, len, MSG_NOSIGNAL);
+            if (n < 0 && errno == EINTR) continue;
             if (n <= 0) return false;
             p += n;
             len -= static_cast<size_t>(n);
+        }
+        return true;
+    }
+
+    bool send_iov_all(int fd, iovec *parts, int count) {
+        int first = 0;
+        while (first < count) {
+            msghdr message{};
+            message.msg_iov = parts + first;
+            message.msg_iovlen = static_cast<size_t>(count - first);
+            const ssize_t sent = ::sendmsg(fd, &message, MSG_NOSIGNAL);
+            if (sent < 0 && errno == EINTR) continue;
+            if (sent <= 0) return false;
+            size_t remaining = static_cast<size_t>(sent);
+            while (first < count && remaining >= parts[first].iov_len) {
+                remaining -= parts[first].iov_len;
+                ++first;
+            }
+            if (first < count && remaining > 0) {
+                auto *base = static_cast<unsigned char *>(parts[first].iov_base);
+                parts[first].iov_base = base + remaining;
+                parts[first].iov_len -= remaining;
+            }
         }
         return true;
     }
@@ -1536,8 +1564,12 @@ private:
           << "Content-Length: " << body.size() << "\r\n"
           << "Connection: close\r\n\r\n";
         auto hs = h.str();
-        send_all(fd, hs.data(), hs.size());
-        send_all(fd, body.data(), body.size());
+        iovec parts[2]{};
+        parts[0].iov_base = const_cast<char *>(hs.data());
+        parts[0].iov_len = hs.size();
+        parts[1].iov_base = body.empty() ? nullptr : const_cast<char *>(body.data());
+        parts[1].iov_len = body.size();
+        send_iov_all(fd, parts, body.empty() ? 1 : 2);
     }
 
     void send_binary(int fd, int code, const std::string &ctype, const std::vector<uchar> &body) {
@@ -1547,8 +1579,12 @@ private:
           << "Content-Length: " << body.size() << "\r\n"
           << "Connection: close\r\n\r\n";
         auto hs = h.str();
-        send_all(fd, hs.data(), hs.size());
-        if (!body.empty()) send_all(fd, body.data(), body.size());
+        iovec parts[2]{};
+        parts[0].iov_base = const_cast<char *>(hs.data());
+        parts[0].iov_len = hs.size();
+        parts[1].iov_base = body.empty() ? nullptr : const_cast<uchar *>(body.data());
+        parts[1].iov_len = body.size();
+        send_iov_all(fd, parts, body.empty() ? 1 : 2);
     }
 
     std::string status_json() {
@@ -1867,9 +1903,14 @@ private:
             const auto part_text = part.str();
             static const std::string tail = "\r\n";
 
-            if (!send_all(fd, part_text.data(), part_text.size())) break;
-            if (!send_all(fd, jpeg->data(), jpeg->size())) break;
-            if (!send_all(fd, tail.data(), tail.size())) break;
+            iovec parts[3]{};
+            parts[0].iov_base = const_cast<char *>(part_text.data());
+            parts[0].iov_len = part_text.size();
+            parts[1].iov_base = const_cast<uchar *>(jpeg->data());
+            parts[1].iov_len = jpeg->size();
+            parts[2].iov_base = const_cast<char *>(tail.data());
+            parts[2].iov_len = tail.size();
+            if (!send_iov_all(fd, parts, 3)) break;
 
             std::shared_ptr<const std::vector<uchar>> next_jpeg;
             uint64_t next_sequence = last_sequence;
