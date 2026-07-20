@@ -158,6 +158,23 @@ curl -s http://127.0.0.1:18182/stream/status | jq '{
 或编码整幅 `depth.png`。
 
 
+
+## 统一生产 FPS
+
+Box grasp 不再从 `box_grasp.websocket.detection_hz` 读取固定值，也没有独立的机器人推送频率。
+唯一目标值通过以下接口设置：
+
+```bash
+curl -s -X POST http://127.0.0.1:19211/api/app/inference_settings \
+  -H 'Content-Type: application/json' \
+  -d '{"detection_fps":15}' | python3 -m json.tool
+```
+
+响应同时提供 `production_inference_fps`、`actual_inference_fps` 和
+`push_mode=every_completed_result`。每个成功完成的连续推理结果都会广播给 WebSocket 客户端；
+若硬件只能达到 13 FPS，实际推送也自然是约 13 FPS，不会再被 YAML 中的 5 Hz 二次限速。
+生产画面读取同一 `latest_decision`，显示 App 的精确设定值和实测值。
+
 ## 抓取点内缩与深度稳定性
 
 左右抓取点不再直接使用 mask 四边形左右边的原始中点。算法先计算左右边中点，

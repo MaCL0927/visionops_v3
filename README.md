@@ -219,4 +219,6 @@ python3 -m pytest tests/unit tests/integration
 
 `box_grasp_vision` 已采用 Runtime 推理与 CPU 几何/深度处理双线程流水线，并通过
 Orbbec Bridge 的 `/api/coordinate/sample_deproject` 在内存中完成 7 点深度采样与
-反投影，避免逐帧传输和解码整幅 Depth PNG。诊断字段见任务 README。
+反投影，避免逐帧传输和解码整幅 Depth PNG。生产 FPS 由
+`/api/app/inference_settings` 统一控制，WebSocket 对每个完成结果立即推送，不再读取
+`box_grasp.websocket.detection_hz`。诊断字段见任务 README。

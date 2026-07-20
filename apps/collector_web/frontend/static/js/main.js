@@ -1,5 +1,5 @@
 import { endpoints, postJson, requestJson } from "./api.js";
-import { getState, loadPersistedConfig, normalizeConfig, updateState } from "./state.js";
+import { getState, loadPersistedConfig, normalizeConfig, persistConfig, updateState } from "./state.js";
 import { initCalibration, refreshCalibration } from "./pages/calibration.js";
 import { initCapture, refreshCapture } from "./pages/capture.js";
 import { initValidate } from "./pages/validate.js";
@@ -107,6 +107,35 @@ async function loadConfig() {
   }
 }
 
+
+async function syncAppInferenceSettings() {
+  if (getState().config.production_inference_source !== "app") return;
+  try {
+    let payload = await requestJson(endpoints.appInferenceSettings);
+    let fps = Number(payload?.production_inference_fps ?? payload?.detection_fps);
+    const preferred = Number(getState().config.production_inference_fps);
+
+    // After upgrading from the legacy 5 Hz YAML/file model, the App reports
+    // settings_source=default.  Bootstrap it once from the browser's exact FPS
+    // (including migration from the old inference_interval_ms local setting).
+    if (payload?.settings_source === "default" && Number.isFinite(preferred) && preferred > 0) {
+      payload = await postJson(endpoints.appInferenceSettings, { detection_fps: preferred });
+      fps = Number(payload?.production_inference_fps ?? payload?.detection_fps);
+    }
+
+    if (Number.isFinite(fps) && fps > 0) {
+      const config = normalizeConfig({
+        ...getState().config,
+        production_inference_fps: fps,
+      });
+      updateState({ config });
+      persistConfig(config);
+    }
+  } catch (error) {
+    console.warn("sync app inference settings failed", error);
+  }
+}
+
 async function checkCollector() {
   const dot = document.getElementById("global-status-dot"), text = document.getElementById("global-status");
   try { const health = await requestJson("/health"); dot.className = "ok"; text.textContent = `${health.component} / online`; }
@@ -138,6 +167,7 @@ function scheduleStatusRefresh(delayMs = 0) {
 
 async function main() {
   await loadConfig();
+  await syncAppInferenceSettings();
   initCalibration(); initCapture(); initValidate(); initSettings(); initProduction();
 
   try {

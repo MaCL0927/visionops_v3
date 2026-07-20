@@ -36,6 +36,16 @@ FAULT_TYPE_NONE = "NONE"
 FAULT_TYPE_CAMERA_DISCONNECTED = "CAMERA_DISCONNECTED"
 FAULT_TYPE_VISION_INFERENCE_ERROR = "VISION_INFERENCE_ERROR"
 
+# The production App owns one authoritative target FPS.  WebSocket clients and
+# Collector production mode receive every completed result; there is no separate
+# WebSocket push frequency.  A persisted v2 setting written through the App API
+# overrides this startup default.  Legacy v1 files are intentionally ignored so
+# an old hard-coded 5 Hz value cannot silently throttle a newly upgraded service.
+DEFAULT_PRODUCTION_INFERENCE_FPS = 15.0
+MIN_PRODUCTION_INFERENCE_FPS = 0.1
+MAX_PRODUCTION_INFERENCE_FPS = 30.0
+INFERENCE_SETTINGS_SCHEMA_VERSION = "2.0"
+
 
 def _timestamp_ms() -> int:
     return int(time.time() * 1000)
@@ -479,7 +489,7 @@ class InferencePacket:
 
 
 class ServiceState:
-    def __init__(self, config: Mapping[str, Any]) -> None:
+    def __init__(self, config: Mapping[str, Any], configured_detection_fps: float) -> None:
         self.config = config
         self.lock = threading.RLock()
         self.started_at = time.monotonic()
@@ -488,6 +498,7 @@ class ServiceState:
         self.inference_busy = False
         self.postprocess_busy = False
         self.continuous_enabled = bool(config["box_grasp"]["websocket"].get("auto_start", True))
+        self.configured_detection_fps = float(configured_detection_fps)
         self.latest_decision = None  # type: Optional[Dict[str, Any]]
         self.latest_robot_message = None  # type: Optional[Dict[str, Any]]
         self.latest_runtime_result = None  # type: Optional[Dict[str, Any]]
@@ -507,6 +518,10 @@ class ServiceState:
     def set_continuous(self, enabled: bool) -> None:
         with self.lock:
             self.continuous_enabled = bool(enabled)
+
+    def set_configured_detection_fps(self, fps: float) -> None:
+        with self.lock:
+            self.configured_detection_fps = float(fps)
 
     def begin(self) -> None:
         with self.lock:
@@ -613,7 +628,7 @@ class ServiceState:
                 "postprocess_busy": self.postprocess_busy,
                 "continuous_enabled": self.continuous_enabled,
                 "detection_fps": self.fps(),
-                "configured_detection_fps": float(ws.get("detection_hz", 5.0)),
+                "configured_detection_fps": round(self.configured_detection_fps, 6),
                 "last_latency_ms": round(self.last_latency_ms, 3),
                 "latency_ms": {
                     "latest": round(self.last_latency_ms, 3),
@@ -660,13 +675,15 @@ class BoxGraspVisionService:
                 "/opt/visionops_v3/config/box_grasp_inference_settings.json",
             ))
         )
-        self._load_detection_hz_override()
-        self.state = ServiceState(config)
+        self.production_fps_lock = threading.Lock()
+        self.production_inference_fps = DEFAULT_PRODUCTION_INFERENCE_FPS
+        self.production_fps_source = "default"
+        self._load_production_fps_override()
+        self.state = ServiceState(config, self.production_inference_fps)
         self.execution_lock = threading.Lock()
         self.runtime_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.wakeup = threading.Event()
-        self.detection_hz_lock = threading.Lock()
         self.manual_request_id = 0
         self.trigger_queue = queue.Queue(maxsize=int(self.settings["websocket"].get("trigger_queue_size", 32)))
         pipeline_settings = self.settings.get("pipeline") if isinstance(self.settings.get("pipeline"), Mapping) else {}
@@ -698,24 +715,33 @@ class BoxGraspVisionService:
             read_timeout_s=float(ws.get("read_timeout_s", 30.0)),
         )
 
-    def _load_detection_hz_override(self) -> None:
+    def _load_production_fps_override(self) -> None:
         try:
             payload = json.loads(self.inference_settings_path.read_text(encoding="utf-8"))
-            hz = float(payload.get("detection_fps"))
-            if 0.1 <= hz <= 30.0:
-                self.settings["websocket"]["detection_hz"] = hz
+            if str(payload.get("schema_version") or "") != INFERENCE_SETTINGS_SCHEMA_VERSION:
+                # Ignore legacy v1 files.  Older frontends could persist the
+                # browser polling FPS as 5 Hz and unintentionally throttle the
+                # producer after an upgrade.
+                return
+            hz = float(payload.get("production_inference_fps"))
+            if MIN_PRODUCTION_INFERENCE_FPS <= hz <= MAX_PRODUCTION_INFERENCE_FPS:
+                self.production_inference_fps = hz
+                self.production_fps_source = "persistent"
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return
 
-    def _persist_detection_hz(self, hz: float) -> None:
+    def _persist_production_fps(self, hz: float) -> None:
         path = self.inference_settings_path
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(
             json.dumps(
                 {
-                    "schema_version": "1.0",
+                    "schema_version": INFERENCE_SETTINGS_SCHEMA_VERSION,
+                    "production_inference_fps": hz,
+                    # Compatibility field for older diagnostic scripts.
                     "detection_fps": hz,
+                    "source": "app_inference_settings_api",
                     "updated_at_ms": _timestamp_ms(),
                 },
                 ensure_ascii=False,
@@ -725,40 +751,54 @@ class BoxGraspVisionService:
         )
         os.replace(str(temporary), str(path))
 
-    def detection_hz(self) -> float:
-        with self.detection_hz_lock:
-            return max(0.1, float(self.settings["websocket"].get("detection_hz", 5.0)))
+    def production_fps(self) -> float:
+        with self.production_fps_lock:
+            return float(self.production_inference_fps)
 
-    def set_detection_hz(self, value: object) -> Dict[str, Any]:
+    def set_production_fps(self, value: object) -> Dict[str, Any]:
         try:
             hz = float(value)
         except (TypeError, ValueError, OverflowError) as error:
             raise ValueError("detection_fps 必须是数字") from error
-        if not 0.1 <= hz <= 30.0:
+        if not MIN_PRODUCTION_INFERENCE_FPS <= hz <= MAX_PRODUCTION_INFERENCE_FPS:
             raise ValueError("detection_fps 必须位于 0.1..30")
-        with self.detection_hz_lock:
-            self.settings["websocket"]["detection_hz"] = hz
-            self._persist_detection_hz(hz)
+        with self.production_fps_lock:
+            self.production_inference_fps = hz
+            self.production_fps_source = "persistent"
+            self._persist_production_fps(hz)
+        self.state.set_configured_detection_fps(hz)
         self.wakeup.set()
+        return self.inference_settings()
+
+    # Compatibility aliases for existing tests and external scripts.  They no
+    # longer read or write box_grasp.websocket.detection_hz.
+    def detection_hz(self) -> float:
+        return self.production_fps()
+
+    def set_detection_hz(self, value: object) -> Dict[str, Any]:
+        return self.set_production_fps(value)
+
+    def inference_settings(self) -> Dict[str, Any]:
+        configured = self.production_fps()
         return {
-            "schema_version": "1.0",
+            "schema_version": INFERENCE_SETTINGS_SCHEMA_VERSION,
             "message_type": "app_inference_settings",
             "status": "ok",
             "app_id": "box_grasp_vision",
-            "detection_fps": hz,
+            "production_inference_fps": configured,
+            "detection_fps": configured,
+            "actual_inference_fps": self.state.fps(),
+            "settings_source": self.production_fps_source,
+            "push_mode": "every_completed_result",
             "continuous_enabled": self.state.continuous_enabled,
             "timestamp_ms": _timestamp_ms(),
         }
 
-    def inference_settings(self) -> Dict[str, Any]:
+    def producer_metadata(self) -> Dict[str, Any]:
         return {
-            "schema_version": "1.0",
-            "message_type": "app_inference_settings",
-            "status": "ok",
-            "app_id": "box_grasp_vision",
-            "detection_fps": self.detection_hz(),
-            "continuous_enabled": self.state.continuous_enabled,
-            "timestamp_ms": _timestamp_ms(),
+            "configured_fps": self.production_fps(),
+            "actual_fps": self.state.fps(),
+            "push_mode": "every_completed_result",
         }
 
     def ipc_status(self) -> Dict[str, Any]:
@@ -948,6 +988,7 @@ class BoxGraspVisionService:
             "timestamp_ms": _timestamp_ms(),
             "robot_message": robot,
             "visualization_result": None,
+            "producer": self.producer_metadata(),
             "error": {"code": type(error).__name__, "message": str(error), "recoverable": True},
         }
         return decision, robot
@@ -1224,6 +1265,8 @@ class BoxGraspVisionService:
                 "point_order": list(self.algorithm.POINT_ORDER),
                 "ignored": classified.ignored,
             }
+            producer = self.producer_metadata()
+            visualization["producer"] = producer
             decision = {
                 "schema_version": "1.0",
                 "message_type": "app_decision",
@@ -1237,6 +1280,7 @@ class BoxGraspVisionService:
                 "result_id": runtime_result.get("result_id"),
                 "robot_message": robot,
                 "visualization_result": visualization,
+                "producer": producer,
             }
             timing["result_build_ms"] = round((time.perf_counter() - build_started) * 1000.0, 3)
             timing["postprocess_stage_ms"] = round((time.perf_counter() - postprocess_started) * 1000.0, 3)
@@ -1340,7 +1384,7 @@ class BoxGraspVisionService:
                     decision = self._complete_packet(packet)
                     self._dispatch_packet(packet, decision)
                 if due:
-                    period_s = 1.0 / self.detection_hz()
+                    period_s = 1.0 / self.production_fps()
                     next_continuous = max(next_continuous + period_s, time.monotonic())
                 continue
 
@@ -1402,6 +1446,8 @@ class BoxGraspVisionService:
             "task": "box_grasp_vision",
             "online": True,
             "fps": snapshot["detection_fps"],
+            "configured_fps": snapshot["configured_detection_fps"],
+            "push_mode": "every_completed_result",
             "model": model_name,
             "camera_connected": camera_connected,
             "fault_code": fault_code,
@@ -1531,7 +1577,15 @@ class StatusHandler(BaseHTTPRequestHandler):
         elif path in {"/api/app/registers", "/api/gateway/registers"}:
             self._send(200, {"schema_version": "1.0", "message_type": "register_snapshot", "status": "not_applicable", "protocol": "websocket", "registers": []})
         elif path == "/api/app/latest_decision":
-            self._send(200, snapshot.get("latest_decision") or {"status": "empty", "message_type": "app_decision"})
+            latest = snapshot.get("latest_decision")
+            if isinstance(latest, Mapping):
+                latest = deepcopy(dict(latest))
+                producer = self.service.producer_metadata()
+                latest["producer"] = producer
+                visualization = latest.get("visualization_result")
+                if isinstance(visualization, dict):
+                    visualization["producer"] = producer
+            self._send(200, latest or {"status": "empty", "message_type": "app_decision"})
         elif path == "/api/app/inference_settings":
             self._send(200, self.service.inference_settings())
         elif path == "/api/app/latest_gateway_message":
@@ -1547,7 +1601,7 @@ class StatusHandler(BaseHTTPRequestHandler):
         try:
             document = self._read_json()
             if path == "/api/app/inference_settings":
-                self._send(200, self.service.set_detection_hz(document.get("detection_fps")))
+                self._send(200, self.service.set_production_fps(document.get("detection_fps")))
                 return
             request_id = document.get("request_id")
             if request_id is None:

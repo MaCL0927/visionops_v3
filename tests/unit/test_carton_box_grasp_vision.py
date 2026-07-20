@@ -266,20 +266,48 @@ def test_background_inference_fps_can_be_updated_and_persisted(tmp_path):
     result = service.set_detection_hz(12.5)
 
     assert result["status"] == "ok"
+    assert result["production_inference_fps"] == 12.5
     assert result["detection_fps"] == 12.5
-    assert service.inference_settings()["detection_fps"] == 12.5
+    assert result["push_mode"] == "every_completed_result"
+    assert service.inference_settings()["production_inference_fps"] == 12.5
+    assert service.state.snapshot(service.websocket)["configured_detection_fps"] == 12.5
     persisted = __import__("json").loads(settings_path.read_text(encoding="utf-8"))
-    assert persisted["detection_fps"] == 12.5
+    assert persisted["schema_version"] == "2.0"
+    assert persisted["production_inference_fps"] == 12.5
 
 
 def test_background_inference_fps_override_is_loaded_on_start(tmp_path):
     from production.carton_palletizing.tasks.box_grasp_vision.service import BoxGraspVisionService
 
     settings_path = tmp_path / "box_grasp_inference_settings.json"
-    settings_path.write_text('{"detection_fps":7.5}', encoding="utf-8")
+    settings_path.write_text(
+        '{"schema_version":"2.0","production_inference_fps":7.5}',
+        encoding="utf-8",
+    )
     config = load_config()
     config["box_grasp"]["app"]["inference_settings_path"] = str(settings_path)
 
     service = BoxGraspVisionService(config)
 
     assert service.detection_hz() == 7.5
+
+
+def test_legacy_five_hz_file_does_not_throttle_upgraded_service(tmp_path):
+    from production.carton_palletizing.tasks.box_grasp_vision.service import (
+        DEFAULT_PRODUCTION_INFERENCE_FPS,
+        BoxGraspVisionService,
+    )
+
+    settings_path = tmp_path / "box_grasp_inference_settings.json"
+    settings_path.write_text(
+        '{"schema_version":"1.0","detection_fps":5.0}',
+        encoding="utf-8",
+    )
+    config = load_config()
+    config["box_grasp"]["app"]["inference_settings_path"] = str(settings_path)
+
+    service = BoxGraspVisionService(config)
+
+    assert service.detection_hz() == DEFAULT_PRODUCTION_INFERENCE_FPS
+    assert service.inference_settings()["settings_source"] == "default"
+    assert "detection_hz" not in config["box_grasp"]["websocket"]

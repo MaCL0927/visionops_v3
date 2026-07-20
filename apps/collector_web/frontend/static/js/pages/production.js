@@ -97,8 +97,16 @@ function updateLiveSummary(result, elapsedMs = null) {
   currentModel.textContent = modelDisplay(result);
   resultBrief.textContent = placementSummary(result) || `${task} / ${count} 个结果`;
   timingTotal.textContent = formatMs(total);
-  const configuredFps = 1000 / Math.max(16, Number(getState().config.inference_interval_ms || 500));
-  const actualFps = elapsedMs ? 1000 / elapsedMs : configuredFps;
+  const producer = result?.producer || {};
+  const configuredFps = Number(
+    producer.configured_fps
+    ?? getState().config.production_inference_fps
+    ?? 15,
+  );
+  const measuredProducerFps = Number(producer.actual_fps);
+  const actualFps = Number.isFinite(measuredProducerFps) && measuredProducerFps > 0
+    ? measuredProducerFps
+    : (elapsedMs ? 1000 / elapsedMs : configuredFps);
   fpsText.textContent = `${formatFps(actualFps)} / 设定 ${formatFps(configuredFps)}`;
   liveStatus.textContent = `实时检测中 · ${task}`;
 }
@@ -176,6 +184,14 @@ export async function productionInferOnce(options = {}) {
       response = source === "app"
         ? await postJson(endpoints.appEvaluate)
         : await postJson(endpoints.inferOnce);
+    }
+
+    if (response?.status === "error") {
+      throw new Error(
+        response?.error?.message
+        || response?.error?.code
+        || "生产业务应用返回错误",
+      );
     }
 
     const result = response?.visualization_result || response?.runtime_result || response;

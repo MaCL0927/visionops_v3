@@ -217,7 +217,6 @@ DEFAULT_CONFIG["box_grasp"] = {
         "path": "/vision",
         "token": "",
         "auto_start": True,
-        "detection_hz": 5.0,
         "status_interval_s": 2.0,
         "read_timeout_s": 30.0,
         "max_clients": 4,
@@ -482,9 +481,10 @@ def _validate_box_grasp(config: Dict[str, Any]) -> None:
     websocket["path"] = str(websocket.get("path") or "/vision")
     if not websocket["path"].startswith("/"):
         websocket["path"] = "/" + websocket["path"]
-    websocket["detection_hz"] = float(websocket.get("detection_hz", 5.0))
-    if websocket["detection_hz"] <= 0:
-        raise ValueError("box_grasp.websocket.detection_hz 必须大于0")
+    # Legacy detection_hz is ignored.  The production inference target is
+    # owned by /api/app/inference_settings and persisted separately, while
+    # WebSocket broadcasts every completed result.
+    websocket.pop("detection_hz", None)
     for key in ("max_clients", "max_payload_bytes", "trigger_queue_size"):
         websocket[key] = int(websocket.get(key, 4 if key == "max_clients" else 32))
         if websocket[key] <= 0:

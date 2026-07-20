@@ -543,32 +543,46 @@ async function loadAlgorithmSettings(modelId = "") {
 
 async function loadAppInferenceSettings() {
   try {
-    const payload = await requestJson(endpoints.appInferenceSettings);
-    const fps = Number(payload?.detection_fps);
+    let payload = await requestJson(endpoints.appInferenceSettings);
+    let fps = Number(payload?.production_inference_fps ?? payload?.detection_fps);
+    const preferred = Number(getState().config.production_inference_fps);
+    if (payload?.settings_source === "default" && Number.isFinite(preferred) && preferred > 0) {
+      payload = await postJson(endpoints.appInferenceSettings, { detection_fps: preferred });
+      fps = Number(payload?.production_inference_fps ?? payload?.detection_fps);
+    }
     if (Number.isFinite(fps) && fps > 0) {
+      const config = normalizeConfig({
+        ...getState().config,
+        production_inference_fps: fps,
+      });
+      updateState({ config });
+      persistConfig(config);
       setValue(fields.inference_fps, fps);
     }
+    return payload;
   } catch (_error) {
     // Some production apps are request-driven and do not expose a background FPS.
+    return null;
   }
 }
 
-async function saveAppInferenceSettings(config) {
-  const detectionFps = 1000 / Math.max(16, Number(config.inference_interval_ms || 500));
+async function saveAppInferenceSettings(requestedFps) {
+  const detectionFps = Math.min(30, Math.max(0.1, Number(requestedFps)));
   try {
     const result = await postJson(endpoints.appInferenceSettings, {
       detection_fps: detectionFps,
     });
-    const applied = Number(result?.detection_fps);
+    const applied = Number(result?.production_inference_fps ?? result?.detection_fps);
     return {
       skipped: false,
+      appliedFps: Number.isFinite(applied) ? applied : detectionFps,
       message: Number.isFinite(applied)
-        ? `后台生产推理已设为 ${applied.toFixed(applied >= 10 ? 1 : 2)} FPS`
-        : "后台生产推理 FPS 已应用",
+        ? `生产推理与机器人推送已统一设为 ${applied.toFixed(applied >= 10 ? 1 : 2)} FPS`
+        : "生产推理 FPS 已应用",
     };
   } catch (error) {
     if (error instanceof ApiError && [0, 404, 405, 502, 503].includes(error.status)) {
-      return { skipped: true, message: "后台业务应用未提供推理 FPS 接口，已保留 Web 刷新设置" };
+      return { skipped: true, appliedFps: detectionFps, message: "后台业务应用未提供推理 FPS 接口，仅应用模型验证刷新设置" };
     }
     throw error;
   }
@@ -576,7 +590,7 @@ async function saveAppInferenceSettings(config) {
 
 function fill(config) {
   const displayFps = config.display_fps ?? intervalMsToFps(config.preview_refresh_interval_ms, 5);
-  const inferenceFps = intervalMsToFps(config.inference_interval_ms, 2);
+  const inferenceFps = Number(config.production_inference_fps || intervalMsToFps(config.inference_interval_ms, 15));
   for (const [key, id] of Object.entries(fields)) {
     if (key === "display_fps") setValue(id, displayFps);
     else if (key === "status_refresh_fps") setValue(id, intervalMsToFps(config.status_refresh_interval_ms, 0.5));
@@ -595,7 +609,7 @@ function readConfigFromForm() {
   const current = getState().config;
   const displayFps = getNumber(fields.display_fps, 5);
   const previewIntervalMs = Math.max(16, Math.round(1000 / Math.max(1, displayFps)));
-  const inferenceFps = getNumber(fields.inference_fps, intervalMsToFps(current.inference_interval_ms, 2));
+  const inferenceFps = getNumber(fields.inference_fps, current.production_inference_fps || 15);
   const inferenceIntervalMs = fpsToIntervalMs(inferenceFps, current.inference_interval_ms || 500);
   const rgbProfile = getValue(fields.rgb_profile, current.rgb_profile || "orbbec:1280x720@30");
   const rgbParsed = parseProfile(rgbProfile, { resolution: current.camera_resolution || "1280x720", fps: current.camera_read_fps || 30 });
@@ -606,6 +620,7 @@ function readConfigFromForm() {
     display_fps: displayFps,
     preview_refresh_interval_ms: previewIntervalMs,
     snapshot_refresh_interval_ms: previewIntervalMs,
+    production_inference_fps: inferenceFps,
     inference_interval_ms: inferenceIntervalMs,
     status_refresh_interval_ms: fpsToIntervalMs(getNumber(fields.status_refresh_fps, intervalMsToFps(current.status_refresh_interval_ms, 0.5)), current.status_refresh_interval_ms || 2000),
     rgb_profile: rgbProfile,
@@ -728,7 +743,7 @@ function activateSettingsTab(panelId) {
 function markUnsaved() { showSaveStatus("有未保存的修改"); }
 
 async function saveSettings() {
-  const config = readConfigFromForm();
+  let config = readConfigFromForm();
   const cameraModel = config.camera_model || "orbbec336l";
   showSaveStatus("正在保存设置...", "loading");
   const messages = [];
@@ -767,8 +782,12 @@ async function saveSettings() {
   try {
     const alg = await saveAlgorithmSettings();
     messages.push(alg.message);
-    const inference = await saveAppInferenceSettings(config);
+    const inference = await saveAppInferenceSettings(config.production_inference_fps);
     messages.push(inference.message);
+    config = normalizeConfig({
+      ...config,
+      production_inference_fps: inference.appliedFps,
+    });
   } catch (error) {
     const detail = error instanceof ApiError && error.body?.error?.message ? error.body.error.message : error.message;
     showSaveStatus(`算法设置保存失败：${detail}`, "error");

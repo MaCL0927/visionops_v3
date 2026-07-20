@@ -216,8 +216,12 @@ curl -s -X POST http://127.0.0.1:19211/api/app/inference_settings \
   -d '{"detection_fps":10}' | python3 -m json.tool
 ```
 
-设置持久化到 `/opt/visionops_v3/config/box_grasp_inference_settings.json`。默认关闭
-`debug.save_every_trigger`，避免每次推理创建保存线程并写入 RGB、Depth、JSON 和
+设置以 schema `2.0` 持久化到 `/opt/visionops_v3/config/box_grasp_inference_settings.json`，
+字段为 `production_inference_fps`。`box_grasp.websocket` 不再配置 `detection_hz`：后台生产者
+只有一个目标 FPS，WebSocket 和 Collector 都消费同一结果流，并对每个完成结果立即推送。
+旧 schema `1.0` 的 5 Hz 文件会被忽略，Web 启动时会用统一推理 FPS 完成一次迁移。
+
+默认关闭 `debug.save_every_trigger`，避免每次推理创建保存线程并写入 RGB、Depth、JSON 和
 Overlay。需要现场取证时再临时开启。
 
 该任务启动 Runtime 时会使用：

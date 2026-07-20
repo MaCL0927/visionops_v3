@@ -97,12 +97,12 @@ POST /api/runtime/start_preview
 
 这样可以让 Runtime 进入 preview 状态，持续刷新 `snapshot.jpg`。如果该调用失败，页面不会阻塞，但实时预览会退化，需要检查 Runtime 与帧源状态。
 
-当前前端还支持两个浏览器侧节流设置：
+当前前端保留预览刷新节流，并使用一个统一的精确推理 FPS：
 
-- `preview_refresh_interval_ms`：控制校验页、采集页对 `/api/runtime/snapshot.jpg` 的刷新间隔，默认 `200ms`
-- `inference_interval_ms`：控制模型验证页“实时检测”循环触发 `/api/runtime/infer_once` 的间隔，默认 `500ms`
+- `preview_refresh_interval_ms`：控制校验页、采集页快照刷新；
+- `production_inference_fps`：设置页中的“生产 / 验证推理 FPS（统一）”。对于支持后台生产者的 App，该值会原样提交到 `/api/app/inference_settings`；模型验证定时器也由同一精确 FPS 换算。
 
-这两个设置通过设置页保存到浏览器 `localStorage`，刷新页面后仍会生效，但不会写入 Runtime 或 Collector 的后端配置文件。
+`inference_interval_ms` 仅是浏览器定时器的派生值，不再作为生产推理 FPS 的独立数据源。旧 localStorage 只有 `inference_interval_ms` 时会一次性迁移为精确 FPS。
 
 ## 模型扫描与切换
 
@@ -303,5 +303,7 @@ GET  /api/app/inference_settings
 POST /api/app/inference_settings  {"detection_fps":10}
 ```
 
-算法设置中的“推理 FPS”会同时更新 Web 刷新周期与后台生产频率；不支持该接口的
-应用只保留 Web 刷新设置。
+算法设置中的“生产 / 验证推理 FPS（统一）”会把用户填写的数值直接提交给后台生产者，
+不会先换算成整数毫秒再反算，因此输入 `15` 时 App 收到的就是 `15.0`，不会变成
+`14.925...`。生产画面显示 App 返回的 `configured_fps` 与 `actual_fps`，不再把浏览器
+轮询频率误标为生产推理设定。WebSocket 没有独立推送 Hz，每个完成的生产结果都会立即推送。

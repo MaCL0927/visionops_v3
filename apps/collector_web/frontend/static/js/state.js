@@ -21,7 +21,10 @@ const state = {
     production_inference_source: "runtime",
     device_id: "",
     preview_refresh_interval_ms: 200,
-    inference_interval_ms: 500,
+    // Single authoritative production/model-validation FPS.  The App API stores
+    // the exact value; inference_interval_ms is only its timer representation.
+    production_inference_fps: 15,
+    inference_interval_ms: 67,
     snapshot_refresh_interval_ms: 200,
     status_refresh_interval_ms: 2000,
     camera_type: "sdk_bridge",
@@ -104,6 +107,12 @@ function normalizeOverlay(overlay = {}) {
 export function normalizeConfig(config = {}) {
   const displayFps = clampNumber(config.display_fps ?? config.camera_read_fps, 5, 1, 30);
   const previewRefresh = fpsToIntervalMs(displayFps, 200);
+  const productionInferenceFps = clampNumber(
+    config.production_inference_fps,
+    state.config.production_inference_fps,
+    0.1,
+    30,
+  );
   const overlay = normalizeOverlay(config.overlay || {});
   return {
     ...state.config,
@@ -112,7 +121,8 @@ export function normalizeConfig(config = {}) {
     camera_model: config.camera_model || state.config.camera_model,
     display_fps: displayFps,
     preview_refresh_interval_ms: previewRefresh,
-    inference_interval_ms: clampMs(config.inference_interval_ms, 500),
+    production_inference_fps: productionInferenceFps,
+    inference_interval_ms: fpsToIntervalMs(productionInferenceFps, 67),
     snapshot_refresh_interval_ms: previewRefresh,
     status_refresh_interval_ms: clampMs(config.status_refresh_interval_ms, 2000),
     camera_read_fps: clampNumber(config.camera_read_fps, 30, 1, 60),
@@ -153,7 +163,12 @@ export function loadPersistedConfig() {
   try {
     const raw = window.localStorage.getItem(LOCAL_CONFIG_KEY);
     if (!raw) return null;
-    return normalizeConfig(JSON.parse(raw));
+    const parsed = JSON.parse(raw);
+    // One-time migration from old browser-only interval settings.
+    if (parsed.production_inference_fps == null && Number(parsed.inference_interval_ms) > 0) {
+      parsed.production_inference_fps = 1000 / Number(parsed.inference_interval_ms);
+    }
+    return normalizeConfig(parsed);
   } catch (_error) {
     return null;
   }
@@ -164,6 +179,7 @@ export function persistConfig(config) {
   window.localStorage.setItem(LOCAL_CONFIG_KEY, JSON.stringify({
     preview_refresh_interval_ms: next.preview_refresh_interval_ms,
     snapshot_refresh_interval_ms: next.snapshot_refresh_interval_ms,
+    production_inference_fps: next.production_inference_fps,
     inference_interval_ms: next.inference_interval_ms,
     status_refresh_interval_ms: next.status_refresh_interval_ms,
     camera_type: next.camera_type,
