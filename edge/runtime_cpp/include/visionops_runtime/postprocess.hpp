@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,22 @@ struct PostprocessResult {
   std::vector<std::uint32_t> proto_shape;
 };
 
-std::vector<float> tensor_float_data(const RuntimeTensor& tensor);
+class FloatTensorView {
+ public:
+  FloatTensorView() = default;
+  FloatTensorView(const float* data, std::size_t size) : data_(data), size_(size) {}
+  const float* data() const { return data_; }
+  std::size_t size() const { return size_; }
+  bool empty() const { return size_ == 0; }
+  const float& operator[](std::size_t index) const { return data_[index]; }
+  const float* begin() const { return data_; }
+  const float* end() const { return data_ + size_; }
+
+ private:
+  const float* data_{nullptr};
+  std::size_t size_{0};
+};
+
+FloatTensorView tensor_float_data(const RuntimeTensor& tensor);
 
 }  // namespace visionops::runtime

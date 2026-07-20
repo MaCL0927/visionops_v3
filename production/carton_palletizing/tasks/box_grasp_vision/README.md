@@ -162,3 +162,43 @@ box_grasp:
 
 Collector 可视化中的左右抓取点以及 WebSocket `items[].center_px` 会同步使用新位置。
 调试结果中的 `grasp_geometry.edge_midpoints_px` 保留原始左右边中点，便于比较内缩量。
+
+## FPS 第三阶段：原始 RGB 与 RKNN 缓冲复用
+
+Orbbec 336L 场景默认启用：
+
+```yaml
+camera_bridge:
+  shared_rgb_enabled: true
+  shared_rgb_name: /visionops_orbbec336l_rgb
+  shared_rgb_fallback_http: true
+```
+
+Launcher 会为 Orbbec Runtime 选择 `frame_source=shared_memory`。相机切换到 HP60C 时仍
+选择 `hp60c_bridge`，不改变 HP60C 现有链路。
+
+这一阶段删除 Runtime 每帧 JPEG 下载和 OpenCV 解码，并减少 RKNN 输入、输出的 host
+内存申请与复制。验证时同时观察：
+
+```bash
+curl -s http://127.0.0.1:18182/stream/status | jq '{
+  shared_rgb_ready,
+  shared_rgb_publish_count,
+  shared_rgb_publish_ms_average
+}'
+
+curl -s http://127.0.0.1:28085/api/runtime/status | jq '.frame_source'
+
+curl -s -X POST http://127.0.0.1:28085/api/runtime/infer_once | jq '{
+  timing,
+  timing_detail,
+  debug: {
+    host_input_copy_avoided: .debug.host_input_copy_avoided,
+    output_buffers_preallocated: .debug.output_buffers_preallocated,
+    output_view_bytes: .debug.output_view_bytes
+  }
+}'
+```
+
+`decode_ms` 应降为 0；生产模式的最终吞吐仍由 `rknn_run_ms`、分割后处理和 App
+流水线中的最慢阶段决定。

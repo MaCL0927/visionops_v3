@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "visionops_runtime/json_utils.hpp"
+#include "interfaces/cpp/visionops_shared_rgb.hpp"
 
 #ifdef VISIONOPS_HAS_OPENCV
 #include <opencv2/imgcodecs.hpp>
@@ -24,6 +25,7 @@
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -76,8 +78,12 @@ bool is_hp60c_source(const std::string& type) {
   return type == "hp60c_bridge" || type == "hp60c";
 }
 
+bool is_shared_memory_source(const std::string& type) {
+  return type == "shared_memory";
+}
+
 bool is_live_source(const std::string& type) {
-  return type == "v4l2" || is_hp60c_source(type);
+  return type == "v4l2" || is_hp60c_source(type) || is_shared_memory_source(type);
 }
 
 void sleep_interruptible(const std::atomic_bool& stop_requested, int total_ms) {
@@ -390,11 +396,38 @@ bool StreamWorkerMock::latest_frame(ImageBuffer& image) const {
 }
 
 bool StreamWorkerMock::latest_snapshot_jpeg(std::vector<std::uint8_t>& jpeg) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (latest_jpeg_.empty()) return false;
-  if (!frame_is_fresh_locked(static_cast<std::uint64_t>(now_timestamp_ms()))) return false;
-  jpeg = latest_jpeg_;
-  return true;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!latest_jpeg_.empty() &&
+        frame_is_fresh_locked(static_cast<std::uint64_t>(now_timestamp_ms()))) {
+      jpeg = latest_jpeg_;
+      return true;
+    }
+  }
+
+  // The shared-memory inference path intentionally carries raw RGB only.  For
+  // browser snapshots, proxy the Bridge's already-encoded JPEG cache on demand
+  // instead of running Runtime's software JPEG encoder on every UI refresh.
+  // This preserves zero-decode inference while keeping snapshot requests cheap.
+  if (is_shared_memory_source(config_.type) && config_.shared_memory_fallback_http) {
+    std::vector<std::uint8_t> body;
+    int status_code = 0;
+    std::string content_type;
+    std::string error;
+    const std::string url = join_url_path(config_.hp60c_url, config_.hp60c_snapshot_path);
+    if (http_get_bytes(
+            url,
+            config_.camera_read_timeout_ms,
+            body,
+            status_code,
+            content_type,
+            error) &&
+        content_type.find("image/jpeg") != std::string::npos && !body.empty()) {
+      jpeg = std::move(body);
+      return true;
+    }
+  }
+  return false;
 }
 
 FrameSourceStatus StreamWorkerMock::status() const {
@@ -420,15 +453,26 @@ FrameSourceStatus StreamWorkerMock::status() const {
       : (measured_fps_ > 0.0 ? measured_fps_ : (config_.type == "mock" ? 15.0 : config_.camera_fps));
   status.pixel_format = config_.type == "v4l2" ? normalize_pixel_format(config_.camera_pixel_format) : "RGB888";
   if (is_hp60c_source(config_.type)) status.pixel_format = "JPEG/RGB888";
+  if (is_shared_memory_source(config_.type)) status.pixel_format = "RGB888";
   status.latest_timestamp_ms = latest_image_.timestamp_ms > 0 ? latest_image_.timestamp_ms : latest_jpeg_timestamp_ms_;
   status.last_error = last_error_;
-  if (is_hp60c_source(config_.type) && !latest_jpeg_.empty()) {
+  if (is_shared_memory_source(config_.type)) {
+    status.snapshot_encoder = config_.shared_memory_fallback_http ? "bridge_cached_jpeg_proxy" : "shared_memory_rgb_software_jpeg";
+    status.transport = "posix_shared_memory";
+    status.shared_memory_sequence = shared_memory_last_sequence_;
+    status.shared_memory_retry_count = shared_memory_retry_count_;
+  } else if (is_hp60c_source(config_.type) && !latest_jpeg_.empty()) {
     status.snapshot_encoder = "hp60c_bridge_jpeg";
+    status.transport = "http_jpeg";
   } else {
     status.snapshot_encoder = image_buffer_valid_rgb(latest_image_) ? "rgb888_jpeg" : "mock_jpeg";
+    status.transport = config_.type == "v4l2" ? "v4l2_mmap" : "mock";
   }
   status.camera_id = config_.type == "v4l2" ? config_.camera_device : config_.type + "-camera";
-  if (is_hp60c_source(config_.type)) {
+  if (is_shared_memory_source(config_.type)) {
+    status.camera_id = config_.shared_memory_name;
+    status.device = config_.shared_memory_name;
+  } else if (is_hp60c_source(config_.type)) {
     status.camera_id = config_.hp60c_url;
     status.device = join_url_path(config_.hp60c_url, config_.hp60c_snapshot_path);
   }
@@ -437,6 +481,8 @@ FrameSourceStatus StreamWorkerMock::status() const {
     std::ostringstream frame_id;
     if (is_hp60c_source(config_.type)) {
       frame_id << "frame-hp60c-";
+    } else if (is_shared_memory_source(config_.type)) {
+      frame_id << "frame-shm-";
     } else if (config_.type == "v4l2") {
       frame_id << "frame-v4l2-";
     } else {
@@ -471,7 +517,7 @@ FrameReadResult StreamWorkerMock::next_frame(std::uint64_t sequence) {
     update_latest(result.image);
     return result;
   }
-  if (config_.type != "v4l2" && !is_hp60c_source(config_.type)) {
+  if (config_.type != "v4l2" && !is_hp60c_source(config_.type) && !is_shared_memory_source(config_.type)) {
     result.ok = false;
     result.error = "不支持的 frame-source: " + config_.type;
     set_error(result.error);
@@ -524,6 +570,11 @@ bool StreamWorkerMock::open_source(std::string& error) {
     opened_ = true;
     return true;
   }
+  if (is_shared_memory_source(config_.type)) {
+    if (open_shared_memory(error)) return true;
+    if (config_.shared_memory_fallback_http) return open_hp60c_bridge(error);
+    return false;
+  }
   if (is_hp60c_source(config_.type)) {
     return open_hp60c_bridge(error);
   }
@@ -535,8 +586,9 @@ bool StreamWorkerMock::open_source(std::string& error) {
 }
 
 void StreamWorkerMock::close_source() {
+  if (is_shared_memory_source(config_.type)) close_shared_memory();
   if (config_.type == "v4l2") close_v4l2();
-  if (is_hp60c_source(config_.type)) {
+  if (is_hp60c_source(config_.type) || is_shared_memory_source(config_.type)) {
     std::lock_guard<std::mutex> lock(mutex_);
     opened_ = false;
   }
@@ -551,6 +603,7 @@ void StreamWorkerMock::camera_loop() {
   const auto http_frame_period = std::chrono::microseconds(
       std::max<std::int64_t>(1, 1000000LL / std::max(1, config_.camera_fps)));
   auto next_http_capture_at = std::chrono::steady_clock::now();
+  ImageBuffer image;
 
   while (!stop_thread_.load()) {
     bool source_opened = false;
@@ -580,7 +633,6 @@ void StreamWorkerMock::camera_loop() {
       }
     }
 
-    ImageBuffer image;
     std::string error;
     double capture_ms = 0.0;
     double decode_ms = 0.0;
@@ -593,7 +645,7 @@ void StreamWorkerMock::camera_loop() {
       ++frames;
       consecutive_failures = 0;
       reconnect_backoff_ms = config_.reconnect_initial_ms;
-      update_latest(std::move(image));
+      exchange_latest(image);
       {
         std::lock_guard<std::mutex> lock(mutex_);
         consecutive_read_errors_ = 0;
@@ -606,7 +658,7 @@ void StreamWorkerMock::camera_loop() {
       }
       clear_error();
 
-      if (is_hp60c_source(config_.type)) {
+      if (is_hp60c_source(config_.type) || is_shared_memory_source(config_.type)) {
         // HTTP snapshot sources return immediately from a cached Bridge frame.
         // Pace this loop to the configured camera rate so Runtime does not open
         // and decode hundreds of duplicate JPEGs per second.  The remaining
@@ -658,6 +710,13 @@ bool StreamWorkerMock::read_frame_once(
     std::string& error) {
   capture_ms = 0.0;
   decode_ms = 0.0;
+  if (is_shared_memory_source(config_.type)) {
+    if (read_shared_memory_frame(image, capture_ms, error)) return true;
+    if (config_.shared_memory_fallback_http) {
+      return read_hp60c_bridge_frame(image, capture_ms, decode_ms, error);
+    }
+    return false;
+  }
   if (is_hp60c_source(config_.type)) {
     return read_hp60c_bridge_frame(image, capture_ms, decode_ms, error);
   }
@@ -677,6 +736,153 @@ void StreamWorkerMock::update_latest(ImageBuffer image) {
   consecutive_read_errors_ = 0;
 }
 
+void StreamWorkerMock::exchange_latest(ImageBuffer& image) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (image.sequence == 0) image.sequence = ++latest_sequence_;
+  latest_sequence_ = std::max(latest_sequence_, image.sequence);
+  std::swap(latest_image_, image);
+  opened_ = true;
+  consecutive_read_errors_ = 0;
+}
+
+
+bool StreamWorkerMock::open_shared_memory(std::string& error) {
+#ifndef __linux__
+  error = "当前平台不支持 POSIX 共享内存帧源";
+  return false;
+#else
+  if (shared_memory_mapping_ != nullptr && shared_memory_fd_ >= 0) return true;
+  const int fd = ::shm_open(config_.shared_memory_name.c_str(), O_RDONLY, 0);
+  if (fd < 0) {
+    error = "无法打开 RGB 共享内存 " + config_.shared_memory_name + ": " + std::strerror(errno);
+    return false;
+  }
+  struct stat info{};
+  if (::fstat(fd, &info) != 0 || info.st_size < static_cast<off_t>(sizeof(visionops::ipc::SharedRgbHeader))) {
+    error = "RGB 共享内存大小非法: " + config_.shared_memory_name;
+    ::close(fd);
+    return false;
+  }
+  const std::size_t mapping_size = static_cast<std::size_t>(info.st_size);
+  void* mapping = ::mmap(nullptr, mapping_size, PROT_READ, MAP_SHARED, fd, 0);
+  if (mapping == MAP_FAILED) {
+    error = "映射 RGB 共享内存失败: " + std::string(std::strerror(errno));
+    ::close(fd);
+    return false;
+  }
+  const auto* header = static_cast<const visionops::ipc::SharedRgbHeader*>(mapping);
+  if (!visionops::ipc::valid_shared_rgb_header(*header, mapping_size)) {
+    error = "RGB 共享内存协议头无效或版本不匹配";
+    ::munmap(mapping, mapping_size);
+    ::close(fd);
+    return false;
+  }
+  shared_memory_fd_ = fd;
+  shared_memory_mapping_ = mapping;
+  shared_memory_mapping_size_ = mapping_size;
+  shared_memory_last_sequence_ = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    opened_ = true;
+    last_error_.clear();
+  }
+  return true;
+#endif
+}
+
+void StreamWorkerMock::close_shared_memory() {
+#ifdef __linux__
+  if (shared_memory_mapping_ != nullptr && shared_memory_mapping_ != MAP_FAILED) {
+    ::munmap(shared_memory_mapping_, shared_memory_mapping_size_);
+  }
+  shared_memory_mapping_ = nullptr;
+  shared_memory_mapping_size_ = 0;
+  if (shared_memory_fd_ >= 0) ::close(shared_memory_fd_);
+  shared_memory_fd_ = -1;
+  shared_memory_last_sequence_ = 0;
+#endif
+}
+
+bool StreamWorkerMock::read_shared_memory_frame(
+    ImageBuffer& image,
+    double& capture_ms,
+    std::string& error) {
+#ifndef __linux__
+  (void)image;
+  (void)capture_ms;
+  error = "当前平台不支持 POSIX 共享内存帧源";
+  return false;
+#else
+  const auto started = std::chrono::steady_clock::now();
+  if (!open_shared_memory(error)) return false;
+  const auto deadline = started + std::chrono::milliseconds(
+      std::min(100, std::max(1, config_.camera_read_timeout_ms)));
+
+  while (!stop_thread_.load()) {
+    const auto* header = static_cast<const visionops::ipc::SharedRgbHeader*>(shared_memory_mapping_);
+    if (!visionops::ipc::valid_shared_rgb_header(*header, shared_memory_mapping_size_)) {
+      error = "RGB 共享内存协议头在运行中失效";
+      close_shared_memory();
+      return false;
+    }
+    const std::uint64_t sequence_before = visionops::ipc::atomic_load_u64(&header->sequence);
+    const std::uint32_t state = visionops::ipc::atomic_load_u32(&header->state);
+    if (state != visionops::ipc::kSharedRgbStateRunning || sequence_before == 0 ||
+        sequence_before == shared_memory_last_sequence_) {
+      if (std::chrono::steady_clock::now() >= deadline) {
+        error = state == visionops::ipc::kSharedRgbStateRunning
+            ? "RGB 共享内存等待新帧超时"
+            : "RGB 共享内存写入端未运行";
+        return false;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      continue;
+    }
+
+    const std::uint32_t active = visionops::ipc::atomic_load_u32(&header->active_buffer);
+    const std::uint64_t timestamp = visionops::ipc::atomic_load_u64(&header->timestamp_epoch_ms);
+    const std::size_t frame_bytes = static_cast<std::size_t>(header->frame_bytes);
+    const int width = static_cast<int>(header->width);
+    const int height = static_cast<int>(header->height);
+    if (frame_bytes != static_cast<std::size_t>(width) * height * 3u ||
+        frame_bytes > header->frame_capacity) {
+      error = "RGB 共享内存帧尺寸非法";
+      return false;
+    }
+    const std::uint64_t now_ms = static_cast<std::uint64_t>(now_timestamp_ms());
+    if (timestamp == 0 || (now_ms >= timestamp &&
+        now_ms - timestamp > static_cast<std::uint64_t>(config_.stale_frame_timeout_ms))) {
+      error = "RGB 共享内存帧已过期";
+      return false;
+    }
+
+    image.data.resize(frame_bytes);
+    const auto* source = visionops::ipc::shared_rgb_buffer(
+        shared_memory_mapping_, static_cast<std::size_t>(header->frame_capacity), active);
+    std::memcpy(image.data.data(), source, frame_bytes);
+    const std::uint64_t sequence_after = visionops::ipc::atomic_load_u64(&header->sequence);
+    if (sequence_before != sequence_after) {
+      ++shared_memory_retry_count_;
+      continue;
+    }
+
+    image.width = width;
+    image.height = height;
+    image.channels = 3;
+    image.pixel_format = "RGB888";
+    image.timestamp_ms = timestamp;
+    image.sequence = sequence_after;
+    image.camera_id = config_.shared_memory_name;
+    image.source = "frame_source:shared_memory";
+    shared_memory_last_sequence_ = sequence_after;
+    capture_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    return true;
+  }
+  error = "RGB 共享内存读取已停止";
+  return false;
+#endif
+}
 
 bool StreamWorkerMock::open_hp60c_bridge(std::string& error) {
   const std::string health_url = join_url_path(config_.hp60c_url, config_.hp60c_health_path);

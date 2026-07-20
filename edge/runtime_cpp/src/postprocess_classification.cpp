@@ -72,8 +72,9 @@ std::vector<float> softmax(const std::vector<float>& logits) {
 }
 
 std::vector<float> classification_scores(const RuntimeTensor& tensor) {
-  auto values = tensor_float_data(tensor);
-  if (values.empty()) return values;
+  const auto view = tensor_float_data(tensor);
+  if (view.empty()) return {};
+  std::vector<float> values(view.begin(), view.end());
 
   // YOLOv8-cls 的 RKNN 输出常见形状为 [1,nc] / [nc] / [1,nc,1,1]。
   // rknn_outputs_get(want_float=1) 已经返回 float，本函数只负责拉平单 batch 输出。

@@ -29,6 +29,8 @@ struct FrameSourceConfig {
   std::string hp60c_url{"http://127.0.0.1:18181"};
   std::string hp60c_snapshot_path{"/stream/snapshot.jpg"};
   std::string hp60c_health_path{"/health"};
+  std::string shared_memory_name{"/visionops_orbbec336l_rgb"};
+  bool shared_memory_fallback_http{true};
   std::string test_image;
   std::string snapshot_source{"latest_frame"};
   bool enable_camera_thread{true};
@@ -53,6 +55,9 @@ struct FrameSourceStatus {
   std::uint64_t latest_timestamp_ms{0};
   std::string last_error;
   std::string snapshot_encoder{"mock_jpeg"};
+  std::string transport{"mock"};
+  std::uint64_t shared_memory_sequence{0};
+  std::uint64_t shared_memory_retry_count{0};
   std::uint64_t frames_captured{0};
   std::uint64_t latest_frame_age_ms{0};
   bool stale{false};
@@ -101,9 +106,13 @@ class StreamWorkerMock {
   bool read_v4l2_frame(ImageBuffer& image, double& capture_ms, std::string& error);
   bool read_hp60c_bridge_frame(ImageBuffer& image, double& capture_ms, double& decode_ms, std::string& error);
   bool open_hp60c_bridge(std::string& error);
+  bool open_shared_memory(std::string& error);
+  bool read_shared_memory_frame(ImageBuffer& image, double& capture_ms, std::string& error);
+  void close_shared_memory();
   bool open_v4l2(std::string& error);
   void close_v4l2();
   void update_latest(ImageBuffer image);
+  void exchange_latest(ImageBuffer& image);
 
   FrameSourceConfig config_;
   mutable std::mutex mutex_;
@@ -123,6 +132,12 @@ class StreamWorkerMock {
   std::uint64_t last_reconnect_timestamp_ms_{0};
 
 #ifdef __linux__
+  int shared_memory_fd_{-1};
+  void* shared_memory_mapping_{nullptr};
+  std::size_t shared_memory_mapping_size_{0};
+  std::uint64_t shared_memory_last_sequence_{0};
+  std::uint64_t shared_memory_retry_count_{0};
+
   struct MmapBuffer {
     void* start{nullptr};
     std::size_t length{0};

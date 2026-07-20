@@ -39,12 +39,17 @@ void validate_app_config(const AppConfig& config) {
   }
   if (config.frame_source != "mock" && config.frame_source != "test_image" &&
       config.frame_source != "v4l2" && config.frame_source != "hp60c_bridge" &&
-      config.frame_source != "hp60c") {
-    throw std::invalid_argument("frame-source 仅支持 mock、test_image、v4l2 或 hp60c_bridge");
+      config.frame_source != "hp60c" && config.frame_source != "shared_memory") {
+    throw std::invalid_argument("frame-source 仅支持 mock、test_image、v4l2、hp60c_bridge 或 shared_memory");
   }
-  if ((config.frame_source == "hp60c_bridge" || config.frame_source == "hp60c") &&
+  if ((config.frame_source == "hp60c_bridge" || config.frame_source == "hp60c" ||
+       (config.frame_source == "shared_memory" && config.shared_memory_fallback_http)) &&
       config.hp60c_url.empty()) {
     throw std::invalid_argument("hp60c-url 不能为空");
+  }
+  if (config.frame_source == "shared_memory" &&
+      (config.shared_memory_name.empty() || config.shared_memory_name.front() != '/')) {
+    throw std::invalid_argument("shared-memory-name 必须是以 / 开头的 POSIX 共享内存名");
   }
   if (config.camera_width <= 0 || config.camera_height <= 0 || config.camera_fps <= 0) {
     throw std::invalid_argument("camera-width、camera-height、camera-fps 必须为正数");

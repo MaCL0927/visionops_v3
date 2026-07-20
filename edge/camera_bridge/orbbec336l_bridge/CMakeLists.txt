@@ -31,5 +31,9 @@ if(NOT ORBBEC_SDK_LIBRARY)
 endif()
 
 add_executable(visionops_orbbec336l_bridge visionops_orbbec336l_bridge.cpp)
-target_include_directories(visionops_orbbec336l_bridge PRIVATE "${ORBBEC_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_include_directories(visionops_orbbec336l_bridge PRIVATE "${ORBBEC_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS} "${CMAKE_CURRENT_SOURCE_DIR}/../../..")
 target_link_libraries(visionops_orbbec336l_bridge PRIVATE ${ORBBEC_SDK_LIBRARY} ${OpenCV_LIBS} pthread)
+if(UNIX AND NOT APPLE)
+  # shm_open lived in librt on older glibc releases used by some Rockchip images.
+  target_link_libraries(visionops_orbbec336l_bridge PRIVATE rt)
+endif()

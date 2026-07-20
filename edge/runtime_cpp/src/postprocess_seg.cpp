@@ -88,13 +88,13 @@ std::string output_shapes_message(const std::vector<RuntimeTensor>& outputs) {
   for (std::size_t index = 0; index < outputs.size(); ++index) {
     if (index != 0) stream << "; ";
     stream << "output[" << index << "] dims=" << shape_string(outputs[index])
-           << " bytes=" << outputs[index].data.size();
+           << " bytes=" << outputs[index].data_size();
   }
   return stream.str();
 }
 
 bool values_need_sigmoid_sampled(
-    const std::vector<float>& values,
+    const FloatTensorView& values,
     int base_channel,
     int channel_count,
     int spatial_size) {
@@ -118,7 +118,7 @@ bool values_need_sigmoid_sampled(
 }
 
 float dfl_expectation(
-    const std::vector<float>& logits,
+    const FloatTensorView& logits,
     int side,
     int spatial_size,
     int index) {
@@ -445,7 +445,7 @@ bool proto_geometry(const std::vector<std::uint32_t>& proto_shape, int& channels
 
 void attach_proto_masks(
     std::vector<SegItem>& detections,
-    const std::vector<float>& proto,
+    const FloatTensorView& proto,
     const std::vector<std::uint32_t>& proto_shape,
     const LetterboxMeta& letterbox,
     int mask_max_points,
@@ -550,7 +550,7 @@ bool decode_split_dfl_segmentation(
     const LetterboxMeta& letterbox,
     std::vector<SegItem>& decoded,
     std::vector<std::uint32_t>& proto_shape,
-    std::vector<float>& proto_values,
+    FloatTensorView& proto_values,
     int& mask_dim) {
   const int class_count = std::max(1, static_cast<int>(config.class_names.size()));
   const RuntimeTensor* proto_tensor = find_split_proto_tensor(outputs, class_count);
@@ -585,7 +585,7 @@ bool decode_split_dfl_segmentation(
 
     const auto boxes = tensor_float_data(*box_tensor);
     const auto classes = tensor_float_data(*class_tensor);
-    std::vector<float> objectness;
+    FloatTensorView objectness;
     if (object_tensor != nullptr) objectness = tensor_float_data(*object_tensor);
     if (boxes.size() < static_cast<std::size_t>(kDflBoxChannels * spatial_size) ||
         classes.size() < static_cast<std::size_t>(class_count * spatial_size)) {
@@ -666,7 +666,7 @@ bool decode_fused_segmentation(
     const LetterboxMeta& letterbox,
     std::vector<SegItem>& decoded,
     std::vector<std::uint32_t>& proto_shape,
-    std::vector<float>& proto_values,
+    FloatTensorView& proto_values,
     int& mask_dim) {
   if (outputs.size() < 2) return false;
   const int class_count = std::max(1, static_cast<int>(config.class_names.size()));
@@ -764,7 +764,7 @@ PostprocessResult postprocess_segmentation(
   PostprocessResult result;
   std::vector<SegItem> decoded;
   std::vector<std::uint32_t> proto_shape;
-  std::vector<float> proto_values;
+  FloatTensorView proto_values;
   int mask_dim = 0;
 
   if (decode_split_dfl_segmentation(outputs, config, letterbox, decoded, proto_shape, proto_values, mask_dim)) {
@@ -789,7 +789,7 @@ PostprocessResult postprocess_segmentation(
 
   decoded.clear();
   proto_shape.clear();
-  proto_values.clear();
+  proto_values = {};
   mask_dim = 0;
   if (decode_fused_segmentation(outputs, config, letterbox, decoded, proto_shape, proto_values, mask_dim)) {
     decoded = apply_nms(std::move(decoded), config.nms_threshold, config.max_detections);

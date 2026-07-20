@@ -35,6 +35,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "deproject_path": "/api/coordinate/deproject",
         "sample_deproject_path": "/api/coordinate/sample_deproject",
         "max_depth_age_ms": 1500,
+        "shared_rgb_enabled": True,
+        "shared_rgb_name": "/visionops_orbbec336l_rgb",
+        "shared_rgb_fallback_http": True,
     },
     "runtime_recovery": {
         "stale_frame_timeout_ms": 3000,

@@ -125,7 +125,7 @@ std::string detections_json(const std::vector<Detection>& detections) {
 }
 
 float dfl_expectation(
-    const std::vector<float>& data,
+    const FloatTensorView& data,
     int side,
     int spatial_size,
     int index) {

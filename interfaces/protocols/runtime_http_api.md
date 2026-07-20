@@ -438,3 +438,20 @@ HTTP `200 OK`，结构同 `GET /api/runtime/roi`。
 ### 调用关系
 
 模型验证页调用该接口。更新后后续所有 Web、TCP、Modbus 推理结果立即使用新 ROI。
+
+## Local raw RGB transport extension
+
+When Orbbec Bridge and Runtime run on the same Linux device, Runtime may start with
+`frame_source=shared_memory`. The shared-memory binary layout is defined by
+`interfaces/cpp/visionops_shared_rgb.hpp` and currently uses:
+
+- POSIX shared-memory name `/visionops_orbbec336l_rgb`;
+- protocol version `1`;
+- `RGB888`, tightly packed rows;
+- two frame buffers;
+- release/acquire publication using `active_buffer`, `timestamp_epoch_ms` and `sequence`.
+
+This transport only replaces the internal Bridge→Runtime frame path. Existing HTTP endpoints and
+JSON response schemas remain unchanged. `GET /api/runtime/status` reports
+`frame_source.transport=posix_shared_memory`; inference results report `timing.decode_ms=0` when the
+raw path is active. If configured, Runtime may fall back to the existing HTTP JPEG snapshot path.

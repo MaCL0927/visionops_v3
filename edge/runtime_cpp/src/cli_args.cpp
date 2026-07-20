@@ -77,6 +77,11 @@ CliArgs parse_cli_args(int argc, char* argv[]) {
       args.config.hp60c_snapshot_path = require_value(argc, argv, index);
     } else if (argument == "--hp60c-health-path") {
       args.config.hp60c_health_path = require_value(argc, argv, index);
+    } else if (argument == "--shared-memory-name") {
+      args.config.shared_memory_name = require_value(argc, argv, index);
+    } else if (argument == "--shared-memory-fallback-http") {
+      const auto value = require_value(argc, argv, index);
+      args.config.shared_memory_fallback_http = !(value == "false" || value == "0" || value == "no");
     } else if (argument == "--snapshot-source") {
       args.config.snapshot_source = require_value(argc, argv, index);
     } else if (argument == "--enable-camera-thread") {
@@ -126,7 +131,7 @@ std::string cli_help_text(const std::string& program) {
          "  --nms-threshold <值>     覆盖模型 NMS 阈值\n"
          "  --max-detections <数量>  覆盖后处理最大保留目标数；0 表示使用 model.yaml\n"
          "  --mask-max-points <数量> 覆盖分割 polygon 最大点数；0 表示使用 model.yaml\n"
-         "  --frame-source <类型>     mock、test_image、v4l2 或 hp60c_bridge，默认 mock\n"
+         "  --frame-source <类型>     mock、test_image、v4l2、hp60c_bridge 或 shared_memory\n"
          "  --camera-device <设备>    V4L2 设备，默认 /dev/video0\n"
          "  --camera-width <宽>       V4L2 宽度，默认 640\n"
          "  --camera-height <高>      V4L2 高度，默认 480\n"
@@ -134,7 +139,9 @@ std::string cli_help_text(const std::string& program) {
          "  --camera-pixel-format <格式> V4L2 像素格式，当前支持 YUYV\n"
          "  --hp60c-url <URL>         HP60C SDK HTTP Bridge 地址，默认 http://127.0.0.1:18181\n"
          "  --hp60c-snapshot-path <路径> HP60C 快照路径，默认 /stream/snapshot.jpg\n"
-         "  --hp60c-health-path <路径> HP60C 健康检查路径，默认 /health\n"
+         "  --hp60c-health-path <路径> HTTP Bridge 健康检查路径，默认 /health\n"
+         "  --shared-memory-name <名称> POSIX RGB共享内存名，默认 /visionops_orbbec336l_rgb\n"
+         "  --shared-memory-fallback-http <true/false> 共享内存不可用时回退HTTP快照\n"
          "  --snapshot-source <来源>  latest_frame 或 mock，当前 JPEG 编码默认仍为 mock\n"
          "  --enable-camera-thread <true/false> 是否开启取流线程，默认 true\n"
          "  --camera-open-timeout-ms <毫秒> 摄像头打开超时占位参数\n"

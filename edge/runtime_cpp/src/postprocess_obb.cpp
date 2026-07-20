@@ -39,7 +39,7 @@ float logit_threshold(float probability) {
 float clip(float value, float maximum) { return std::clamp(value, 0.0F, maximum); }
 
 bool valid_tensor_data(const RuntimeTensor& tensor, std::size_t minimum_float_count) {
-  return tensor.data.size() >= minimum_float_count * sizeof(float);
+  return tensor.data_size() >= minimum_float_count * sizeof(float);
 }
 
 std::string shape_string(const RuntimeTensor& tensor) {
@@ -59,19 +59,19 @@ std::string output_shapes_message(const std::vector<RuntimeTensor>& outputs) {
   for (std::size_t index = 0; index < outputs.size(); ++index) {
     if (index != 0) stream << "; ";
     stream << "output[" << index << "] dims=" << shape_string(outputs[index])
-           << " bytes=" << outputs[index].data.size();
+           << " bytes=" << outputs[index].data_size();
   }
   return stream.str();
 }
 
-bool tensor_need_sigmoid(const std::vector<float>& values) {
+bool tensor_need_sigmoid(const FloatTensorView& values) {
   if (values.empty()) return false;
   auto [min_it, max_it] = std::minmax_element(values.begin(), values.end());
   return *min_it < 0.0F || *max_it > 1.0F;
 }
 
 bool tensor_need_sigmoid_sampled(
-    const std::vector<float>& values,
+    const FloatTensorView& values,
     int base_channel,
     int channel_count,
     int spatial_size) {
@@ -95,7 +95,7 @@ bool tensor_need_sigmoid_sampled(
 }
 
 float dfl_expectation(
-    const std::vector<float>& logits,
+    const FloatTensorView& logits,
     int side,
     int spatial_size,
     int index) {

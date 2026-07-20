@@ -40,6 +40,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include <opencv2/core.hpp>
@@ -48,6 +49,7 @@
 
 #include "libobsensor/ObSensor.hpp"
 #include "libobsensor/hpp/Utils.hpp"
+#include "interfaces/cpp/visionops_shared_rgb.hpp"
 
 namespace {
 
@@ -180,7 +182,9 @@ public:
           reconnect_alarm_ms_(std::max(1000, getenv_int("VISIONOPS_ORBBEC336L_RECONNECT_FAILURE_ALARM_SEC", 15) * 1000)),
           flip_vertical_(getenv_bool("VISIONOPS_ORBBEC336L_FLIP_VERTICAL", false)),
           flip_horizontal_(getenv_bool("VISIONOPS_ORBBEC336L_FLIP_HORIZONTAL", false)),
-          serial_(getenv_str("VISIONOPS_ORBBEC336L_SERIAL", "")) {}
+          serial_(getenv_str("VISIONOPS_ORBBEC336L_SERIAL", "")),
+          shared_rgb_enabled_(getenv_bool("VISIONOPS_ORBBEC336L_SHARED_RGB_ENABLED", true)),
+          shared_rgb_name_(getenv_str("VISIONOPS_ORBBEC336L_SHARED_RGB_NAME", "/visionops_orbbec336l_rgb")) {}
 
     bool start_camera() {
         start_ms_ = now_ms();
@@ -205,6 +209,7 @@ public:
         jpeg_cv_.notify_all();
         if (jpeg_thread_.joinable()) jpeg_thread_.join();
         if (camera_thread_.joinable()) camera_thread_.join();
+        close_shared_rgb();
         camera_started_ = false;
     }
 
@@ -257,6 +262,172 @@ private:
     static int64_t now_ms() {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+
+    bool ensure_shared_rgb(int width, int height) {
+        if (!shared_rgb_enabled_) return false;
+        if (width <= 0 || height <= 0 || shared_rgb_name_.empty() || shared_rgb_name_.front() != '/') {
+            return false;
+        }
+        const std::size_t frame_capacity =
+            static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u;
+        const std::size_t total_size = visionops::ipc::shared_rgb_total_size(frame_capacity);
+        std::lock_guard<std::mutex> lk(shared_rgb_mtx_);
+        if (shared_rgb_mapping_ != MAP_FAILED && shared_rgb_mapping_ != nullptr &&
+            shared_rgb_mapping_size_ == total_size && shared_rgb_width_ == width &&
+            shared_rgb_height_ == height) {
+            return true;
+        }
+        if (shared_rgb_mapping_ != MAP_FAILED && shared_rgb_mapping_ != nullptr) {
+            ::munmap(shared_rgb_mapping_, shared_rgb_mapping_size_);
+            shared_rgb_mapping_ = MAP_FAILED;
+            shared_rgb_mapping_size_ = 0;
+            shared_rgb_header_ = nullptr;
+        }
+        if (shared_rgb_fd_ >= 0) {
+            ::close(shared_rgb_fd_);
+            shared_rgb_fd_ = -1;
+        }
+        shared_rgb_fd_ = ::shm_open(shared_rgb_name_.c_str(), O_CREAT | O_RDWR, 0660);
+        if (shared_rgb_fd_ < 0) {
+            shared_rgb_error_ = std::string("shm_open failed: ") + std::strerror(errno);
+            return false;
+        }
+        ::fchmod(shared_rgb_fd_, 0660);
+        if (::ftruncate(shared_rgb_fd_, static_cast<off_t>(total_size)) != 0) {
+            shared_rgb_error_ = std::string("ftruncate failed: ") + std::strerror(errno);
+            ::close(shared_rgb_fd_);
+            shared_rgb_fd_ = -1;
+            return false;
+        }
+        void* mapping = ::mmap(nullptr, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, shared_rgb_fd_, 0);
+        if (mapping == MAP_FAILED) {
+            shared_rgb_error_ = std::string("mmap failed: ") + std::strerror(errno);
+            ::close(shared_rgb_fd_);
+            shared_rgb_fd_ = -1;
+            return false;
+        }
+        shared_rgb_mapping_ = mapping;
+        shared_rgb_mapping_size_ = total_size;
+        shared_rgb_header_ = static_cast<visionops::ipc::SharedRgbHeader*>(mapping);
+        std::memset(mapping, 0, total_size);
+        shared_rgb_header_->magic = visionops::ipc::kSharedRgbMagic;
+        shared_rgb_header_->version = visionops::ipc::kSharedRgbVersion;
+        shared_rgb_header_->header_size = sizeof(visionops::ipc::SharedRgbHeader);
+        shared_rgb_header_->total_size = total_size;
+        shared_rgb_header_->frame_capacity = frame_capacity;
+        shared_rgb_header_->frame_bytes = frame_capacity;
+        shared_rgb_header_->width = static_cast<std::uint32_t>(width);
+        shared_rgb_header_->height = static_cast<std::uint32_t>(height);
+        shared_rgb_header_->channels = 3;
+        shared_rgb_header_->stride_bytes = static_cast<std::uint32_t>(width * 3);
+        shared_rgb_header_->pixel_format = visionops::ipc::kSharedRgbPixelFormatRgb888;
+        shared_rgb_header_->buffer_count = visionops::ipc::kSharedRgbBufferCount;
+        shared_rgb_header_->writer_pid = static_cast<std::uint64_t>(::getpid());
+        visionops::ipc::atomic_store_u32(
+            &shared_rgb_header_->state, visionops::ipc::kSharedRgbStateOffline);
+        visionops::ipc::atomic_store_u64(&shared_rgb_header_->sequence, 0);
+        shared_rgb_width_ = width;
+        shared_rgb_height_ = height;
+        shared_rgb_error_.clear();
+        return true;
+    }
+
+    void publish_shared_rgb(
+        const std::shared_ptr<ob::ColorFrame>& frame,
+        const cv::Mat& bgr,
+        std::uint64_t timestamp_epoch_ms) {
+        if (!shared_rgb_enabled_ || bgr.empty() || bgr.type() != CV_8UC3) return;
+        const auto started = std::chrono::steady_clock::now();
+        if (!ensure_shared_rgb(bgr.cols, bgr.rows)) return;
+        std::lock_guard<std::mutex> lk(shared_rgb_mtx_);
+        if (shared_rgb_header_ == nullptr || shared_rgb_mapping_ == MAP_FAILED) return;
+        const std::uint64_t previous = visionops::ipc::atomic_load_u64(&shared_rgb_header_->sequence);
+        const std::uint32_t target = static_cast<std::uint32_t>(
+            (previous + 1) % visionops::ipc::kSharedRgbBufferCount);
+        auto* destination = visionops::ipc::shared_rgb_buffer(
+            shared_rgb_mapping_, static_cast<std::size_t>(shared_rgb_header_->frame_capacity), target);
+        cv::Mat rgb(
+            bgr.rows,
+            bgr.cols,
+            CV_8UC3,
+            destination,
+            static_cast<std::size_t>(bgr.cols) * 3u);
+
+        // The selected Orbbec color profile is normally RGB888.  In that case
+        // publish the SDK buffer directly (or flip directly into the shared
+        // destination) instead of doing RGB->BGR for Web and then BGR->RGB for
+        // Runtime.  Non-RGB profiles keep the robust BGR conversion fallback.
+        bool direct_rgb = false;
+        const auto* sdk_rgb = frame
+            ? reinterpret_cast<const std::uint8_t*>(frame->data())
+            : nullptr;
+        if (frame && frame->format() == OB_FORMAT_RGB && sdk_rgb != nullptr &&
+            static_cast<std::size_t>(frame->dataSize()) >= bgr.total() * bgr.elemSize()) {
+            cv::Mat source_rgb(
+                static_cast<int>(frame->height()),
+                static_cast<int>(frame->width()),
+                CV_8UC3,
+                const_cast<std::uint8_t*>(sdk_rgb));
+            if (flip_vertical_ || flip_horizontal_) {
+                const int flip_code = flip_vertical_ && flip_horizontal_
+                    ? -1
+                    : (flip_vertical_ ? 0 : 1);
+                cv::flip(source_rgb, rgb, flip_code);
+                shared_rgb_publish_mode_ = "sdk_rgb_flip";
+            } else {
+                std::memcpy(destination, sdk_rgb, bgr.total() * bgr.elemSize());
+                shared_rgb_publish_mode_ = "sdk_rgb_memcpy";
+            }
+            direct_rgb = true;
+        }
+        if (!direct_rgb) {
+            cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
+            shared_rgb_publish_mode_ = "bgr_to_rgb";
+        }
+
+        shared_rgb_header_->frame_bytes = static_cast<std::uint64_t>(bgr.total() * bgr.elemSize());
+        shared_rgb_header_->width = static_cast<std::uint32_t>(bgr.cols);
+        shared_rgb_header_->height = static_cast<std::uint32_t>(bgr.rows);
+        shared_rgb_header_->stride_bytes = static_cast<std::uint32_t>(bgr.cols * 3);
+        visionops::ipc::atomic_store_u32(
+            &shared_rgb_header_->state, visionops::ipc::kSharedRgbStateRunning);
+        visionops::ipc::atomic_store_u32(&shared_rgb_header_->active_buffer, target);
+        visionops::ipc::atomic_store_u64(&shared_rgb_header_->timestamp_epoch_ms, timestamp_epoch_ms);
+        visionops::ipc::atomic_store_u64(&shared_rgb_header_->publish_count, previous + 1);
+        visionops::ipc::atomic_store_u64(&shared_rgb_header_->sequence, previous + 1);
+        const double elapsed_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        shared_rgb_publish_ms_latest_ = elapsed_ms;
+        shared_rgb_publish_ms_average_ = shared_rgb_publish_count_ == 0
+            ? elapsed_ms
+            : shared_rgb_publish_ms_average_ * 0.90 + elapsed_ms * 0.10;
+        ++shared_rgb_publish_count_;
+        shared_rgb_last_publish_ms_ = now_ms();
+    }
+
+    void mark_shared_rgb_state(std::uint32_t state) {
+        std::lock_guard<std::mutex> lk(shared_rgb_mtx_);
+        if (shared_rgb_header_ != nullptr && shared_rgb_mapping_ != MAP_FAILED) {
+            visionops::ipc::atomic_store_u32(&shared_rgb_header_->state, state);
+        }
+    }
+
+    void close_shared_rgb() {
+        std::lock_guard<std::mutex> lk(shared_rgb_mtx_);
+        if (shared_rgb_header_ != nullptr && shared_rgb_mapping_ != MAP_FAILED) {
+            visionops::ipc::atomic_store_u32(
+                &shared_rgb_header_->state, visionops::ipc::kSharedRgbStateOffline);
+        }
+        if (shared_rgb_mapping_ != MAP_FAILED && shared_rgb_mapping_ != nullptr) {
+            ::munmap(shared_rgb_mapping_, shared_rgb_mapping_size_);
+        }
+        shared_rgb_mapping_ = MAP_FAILED;
+        shared_rgb_mapping_size_ = 0;
+        shared_rgb_header_ = nullptr;
+        if (shared_rgb_fd_ >= 0) ::close(shared_rgb_fd_);
+        shared_rgb_fd_ = -1;
     }
 
     std::shared_ptr<ob::VideoStreamProfile> enable_color_stream(
@@ -552,6 +723,7 @@ private:
         if (c) bgr = color_frame_to_bgr(c);
         if (d) depth_mm = depth_frame_to_mm(d);
         const auto now = now_ms();
+        if (!bgr.empty()) publish_shared_rgb(c, bgr, static_cast<std::uint64_t>(epoch_now_ms()));
         bool became_running = false;
         {
             std::lock_guard<std::mutex> lk(mtx_);
@@ -1380,6 +1552,7 @@ private:
     }
 
     std::string status_json() {
+        std::lock_guard<std::mutex> shared_lk(shared_rgb_mtx_);
         std::lock_guard<std::mutex> lk(mtx_);
         const int64_t now = now_ms();
         const int64_t state_age_ms = state_since_ms_ > 0 ? now - state_since_ms_ : 0;
@@ -1431,6 +1604,16 @@ private:
            << "\"sample_deproject_ms_latest\":" << std::fixed << std::setprecision(3) << sample_deproject_last_ms_ << ","
            << "\"sample_deproject_ms_average\":" << std::fixed << std::setprecision(3)
            << (sample_deproject_count_ > 0 ? sample_deproject_total_ms_ / static_cast<double>(sample_deproject_count_) : 0.0) << ","
+           << "\"shared_rgb_enabled\":" << (shared_rgb_enabled_ ? "true" : "false") << ","
+           << "\"shared_rgb_name\":\"" << json_escape(shared_rgb_name_) << "\","
+           << "\"shared_rgb_ready\":" << (shared_rgb_header_ != nullptr ? "true" : "false") << ","
+           << "\"shared_rgb_publish_count\":" << shared_rgb_publish_count_ << ","
+           << "\"shared_rgb_last_publish_age_ms\":"
+           << (shared_rgb_last_publish_ms_ > 0 ? now - shared_rgb_last_publish_ms_ : -1) << ","
+           << "\"shared_rgb_publish_ms_latest\":" << std::fixed << std::setprecision(3) << shared_rgb_publish_ms_latest_ << ","
+           << "\"shared_rgb_publish_ms_average\":" << std::fixed << std::setprecision(3) << shared_rgb_publish_ms_average_ << ","
+           << "\"shared_rgb_publish_mode\":\"" << json_escape(shared_rgb_publish_mode_) << "\","
+           << "\"shared_rgb_error\":\"" << json_escape(shared_rgb_error_) << "\","
            << "\"jpeg_thread_alive\":" << (jpeg_thread_alive_ ? "true" : "false") << ","
            << "\"last_jpeg_age_ms\":" << jpeg_age_ms << ","
            << "\"color_width\":" << color_w_ << ","
@@ -1763,6 +1946,8 @@ private:
     bool flip_vertical_;
     bool flip_horizontal_;
     std::string serial_;
+    bool shared_rgb_enabled_;
+    std::string shared_rgb_name_;
 
     std::shared_ptr<ob::Context> ctx_;
     std::shared_ptr<ob::Pipeline> pipeline_;
@@ -1826,6 +2011,20 @@ private:
     std::string color_format_ = "";
     std::string fault_code_ = "CAMERA_STARTING";
     std::string last_error_ = "";
+
+    std::mutex shared_rgb_mtx_;
+    int shared_rgb_fd_ = -1;
+    void* shared_rgb_mapping_ = MAP_FAILED;
+    std::size_t shared_rgb_mapping_size_ = 0;
+    visionops::ipc::SharedRgbHeader* shared_rgb_header_ = nullptr;
+    int shared_rgb_width_ = 0;
+    int shared_rgb_height_ = 0;
+    uint64_t shared_rgb_publish_count_ = 0;
+    int64_t shared_rgb_last_publish_ms_ = 0;
+    double shared_rgb_publish_ms_latest_ = 0.0;
+    double shared_rgb_publish_ms_average_ = 0.0;
+    std::string shared_rgb_publish_mode_{"uninitialized"};
+    std::string shared_rgb_error_;
 
     int server_fd_ = -1;
 };

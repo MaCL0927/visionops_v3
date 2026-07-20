@@ -34,13 +34,20 @@ def _runtime(config: dict, profile: str) -> int:
         raise FileNotFoundError("Runtime binary not found or not executable: {}".format(runtime_bin))
     if not (model_dir / "model.rknn").is_file() or not (model_dir / "model.yaml").is_file():
         raise FileNotFoundError("Model package must contain model.rknn and model.yaml: {}".format(model_dir))
+    bridge_cfg = config.get("camera_bridge", {})
+    active_model = str(config.get("active_camera", {}).get("camera_model") or bridge_cfg.get("camera_model") or "orbbec336l")
+    use_shared_rgb = bool(bridge_cfg.get("shared_rgb_enabled", True)) and active_model == "orbbec336l"
+    frame_source = "shared_memory" if use_shared_rgb else "hp60c_bridge"
     command = [
         str(runtime_bin),
         "--backend", "rknn",
-        "--frame-source", "hp60c_bridge",
+        "--frame-source", frame_source,
         "--hp60c-url", bridge_url,
         "--hp60c-snapshot-path", str(config["camera_bridge"]["snapshot_path"]),
         "--hp60c-health-path", str(config["camera_bridge"]["health_path"]),
+        "--shared-memory-name", str(bridge_cfg.get("shared_rgb_name", "/visionops_orbbec336l_rgb")),
+        "--shared-memory-fallback-http", "true" if bool(bridge_cfg.get("shared_rgb_fallback_http", True)) else "false",
+        "--camera-fps", str(int(bridge_cfg.get("fps", 30))),
         "--model-dir", str(model_dir),
         "--roi-config", str(runtime["roi_config_path"]),
         "--preprocess-backend", "auto",

@@ -59,6 +59,7 @@ add_executable(visionops_runtime_mock ${VISIONOPS_RUNTIME_SOURCES})
 target_include_directories(visionops_runtime_mock
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../..
 )
 
 if(VISIONOPS_ENABLE_RKNN)
@@ -88,6 +89,10 @@ target_compile_options(visionops_runtime_mock
 
 find_package(Threads REQUIRED)
 target_link_libraries(visionops_runtime_mock PRIVATE Threads::Threads)
+if(UNIX AND NOT APPLE)
+  # Keep compatibility with Rockchip rootfs versions where POSIX shm is in librt.
+  target_link_libraries(visionops_runtime_mock PRIVATE rt)
+endif()
 
 add_executable(visionops_postprocess_fixture
   tests/postprocess_fixture.cpp
@@ -99,5 +104,5 @@ add_executable(visionops_postprocess_fixture
   src/postprocess_seg.cpp
   src/roi_filter.cpp
 )
-target_include_directories(visionops_postprocess_fixture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(visionops_postprocess_fixture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 target_compile_options(visionops_postprocess_fixture PRIVATE -Wall -Wextra -Wpedantic)

@@ -41,6 +41,7 @@ std::string runtime_source(const AppConfig& config) {
 
 std::string frame_prefix_for_source(const std::string& frame_source) {
   if (frame_source == "hp60c_bridge" || frame_source == "hp60c") return "frame-hp60c";
+  if (frame_source == "shared_memory") return "frame-shm";
   if (frame_source == "v4l2") return "frame-v4l2";
   if (frame_source == "test_image") return "frame-test-image";
   return "frame-mock";
@@ -196,6 +197,8 @@ FrameSourceConfig make_frame_source_config(const AppConfig& config) {
   frame_config.hp60c_url = config.hp60c_url;
   frame_config.hp60c_snapshot_path = config.hp60c_snapshot_path;
   frame_config.hp60c_health_path = config.hp60c_health_path;
+  frame_config.shared_memory_name = config.shared_memory_name;
+  frame_config.shared_memory_fallback_http = config.shared_memory_fallback_http;
   frame_config.test_image = config.test_image;
   frame_config.snapshot_source = config.snapshot_source;
   frame_config.enable_camera_thread = config.enable_camera_thread;
@@ -222,6 +225,9 @@ std::string frame_source_json(const FrameSourceStatus& frame_source) {
          << (frame_source.latest_frame_id.empty() ? "null" : '"' + json_escape(frame_source.latest_frame_id) + '"')
          << ",\"latest_timestamp_ms\":" << frame_source.latest_timestamp_ms
          << ",\"snapshot_encoder\":\"" << json_escape(frame_source.snapshot_encoder) << '"'
+         << ",\"transport\":\"" << json_escape(frame_source.transport) << '"'
+         << ",\"shared_memory_sequence\":" << frame_source.shared_memory_sequence
+         << ",\"shared_memory_retry_count\":" << frame_source.shared_memory_retry_count
          << ",\"latest_frame_age_ms\":" << frame_source.latest_frame_age_ms
          << ",\"stale\":" << json_bool(frame_source.stale)
          << ",\"thread_alive\":" << json_bool(frame_source.thread_alive)
@@ -252,7 +258,7 @@ bool RuntimeApp::runtime_degraded() const {
   const bool live_preview_unhealthy =
       stream_worker_.preview_running() &&
       (config_.frame_source == "v4l2" || config_.frame_source == "hp60c_bridge" ||
-       config_.frame_source == "hp60c") &&
+       config_.frame_source == "hp60c" || config_.frame_source == "shared_memory") &&
       (!frame_source.opened || frame_source.stale || !frame_source.thread_alive ||
        !frame_source.last_error.empty());
   return model_info_.degraded() || !rknn_runner_->is_loaded() || live_preview_unhealthy;
@@ -462,7 +468,8 @@ std::string RuntimeApp::infer_once() {
   input.width = preprocess.input.width;
   input.height = preprocess.input.height;
   input.channels = preprocess.input.channels;
-  input.data = preprocess.input.data;
+  input.data = preprocess.input.data.data();
+  input.size = preprocess.input.data.size();
   auto inference = rknn_runner_->infer(input);
   if (!inference.success) {
     const auto error = inference_error_json(
@@ -707,6 +714,9 @@ std::string RuntimeApp::inference_result_json(
            << ",\"postprocess_raw_count\":" << inference.postprocess_raw_count
            << ",\"postprocess_result_count\":" << inference.postprocess_result_count
            << ",\"roi_filtered_count\":" << inference.roi_filtered_count
+           << ",\"host_input_copy_avoided\":" << json_bool(inference.host_input_copy_avoided)
+           << ",\"output_buffers_preallocated\":" << json_bool(inference.output_buffers_preallocated)
+           << ",\"output_view_bytes\":" << inference.output_view_bytes
            << ",\"runner_error\":"
            << (inference.error.empty()
                    ? "null"
@@ -793,7 +803,7 @@ std::string RuntimeApp::postprocess_error_json(
            << ",\"data_type\":\"" << json_escape(tensor.info.data_type) << '"'
            << ",\"layout\":\"" << json_escape(tensor.info.layout) << '"'
            << ",\"byte_size\":" << tensor.info.byte_size
-           << ",\"data_bytes\":" << tensor.data.size()
+           << ",\"data_bytes\":" << tensor.data_size()
            << ",\"dims\":[";
     for (std::size_t dim = 0; dim < tensor.info.dimensions.size(); ++dim) {
       if (dim != 0) stream << ',';
@@ -921,7 +931,7 @@ std::vector<std::uint8_t> RuntimeApp::snapshot_jpeg() {
   }
 
   if (config_.frame_source == "v4l2" || config_.frame_source == "hp60c_bridge" ||
-      config_.frame_source == "hp60c") {
+      config_.frame_source == "hp60c" || config_.frame_source == "shared_memory") {
     // 实时帧源不可用或缓存已过期时返回空，让 HTTP 层明确返回 503，
     // 避免把数分钟前的旧图或 mock 占位图伪装成实时画面。
     return {};

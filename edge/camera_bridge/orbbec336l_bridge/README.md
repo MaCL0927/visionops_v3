@@ -187,3 +187,41 @@ sample_deproject_ms_average
 ```
 
 `/stream/depth.png` 仍保留给多层堆垛、调试和需要整幅深度图的任务使用。
+
+## 第三阶段：Bridge → Runtime 原始 RGB 共享内存
+
+Orbbec 336L 与 Runtime 位于同一台视觉盒时，Runtime 不再逐帧请求
+`/stream/snapshot.jpg`、下载 JPEG、执行 `cv::imdecode()` 和 BGR→RGB 转换。Bridge
+会把每个新 Color 帧发布到 POSIX 共享内存，Runtime 直接读取 `RGB888`。
+
+默认配置：
+
+```bash
+VISIONOPS_ORBBEC336L_SHARED_RGB_ENABLED=true
+VISIONOPS_ORBBEC336L_SHARED_RGB_NAME=/visionops_orbbec336l_rgb
+```
+
+共享内存使用双缓冲和递增序列号：Bridge 先完整写入非活动缓冲区，再以 release
+store 发布 buffer index、时间戳和 sequence；Runtime 在复制前后校验 sequence，避免
+读到撕裂帧。HTTP JPEG/MJPEG 接口仍然保留给浏览器、远程调试和旧 Runtime 使用。
+
+检查发布状态：
+
+```bash
+curl -s http://127.0.0.1:18182/stream/status | jq '{
+  shared_rgb_enabled,
+  shared_rgb_name,
+  shared_rgb_ready,
+  shared_rgb_publish_count,
+  shared_rgb_last_publish_age_ms,
+  shared_rgb_publish_ms_latest,
+  shared_rgb_publish_ms_average,
+  shared_rgb_error
+}'
+
+ls -lh /dev/shm/visionops_orbbec336l_rgb
+```
+
+正常运行时 `shared_rgb_ready=true`、`shared_rgb_publish_count` 持续增长，且
+`shared_rgb_last_publish_age_ms` 应维持在一个相机周期附近。相机断线时 Runtime 会按
+配置自动回退到 HTTP JPEG，避免共享内存异常导致生产服务完全不可用。

@@ -93,7 +93,9 @@ class RknnRunnerReal final : public RknnRunner {
       input_infos_.push_back(std::move(info));
     }
     output_infos_.clear();
+    output_attrs_.clear();
     output_infos_.reserve(output_count_);
+    output_attrs_.reserve(output_count_);
     for (std::uint32_t index = 0; index < output_count_; ++index) {
       rknn_tensor_attr attribute{};
       attribute.index = index;
@@ -109,11 +111,30 @@ class RknnRunnerReal final : public RknnRunner {
       info.name = attribute.name;
       info.data_type = std::to_string(static_cast<int>(attribute.type));
       info.layout = std::to_string(static_cast<int>(attribute.fmt));
-      info.byte_size = attribute.size;
+      const std::size_t float_bytes = static_cast<std::size_t>(attribute.n_elems) * sizeof(float);
+      info.byte_size = float_bytes > 0 ? float_bytes : attribute.size;
       for (std::uint32_t dimension = 0; dimension < attribute.n_dims; ++dimension) {
         info.dimensions.push_back(attribute.dims[dimension]);
       }
       output_infos_.push_back(std::move(info));
+      output_attrs_.push_back(attribute);
+    }
+    output_float_buffers_.clear();
+    reusable_outputs_.clear();
+    output_float_buffers_.resize(output_count_);
+    reusable_outputs_.resize(output_count_);
+    for (std::uint32_t index = 0; index < output_count_; ++index) {
+      std::size_t elements = static_cast<std::size_t>(output_attrs_[index].n_elems);
+      if (elements == 0) {
+        elements = 1;
+        for (const auto dimension : output_infos_[index].dimensions) elements *= dimension;
+      }
+      output_float_buffers_[index].resize(elements);
+      reusable_outputs_[index].index = index;
+      reusable_outputs_[index].want_float = 1;
+      reusable_outputs_[index].is_prealloc = 1;
+      reusable_outputs_[index].buf = output_float_buffers_[index].data();
+      reusable_outputs_[index].size = static_cast<std::uint32_t>(elements * sizeof(float));
     }
     if (dump_io_) {
       std::cout << "RKNN IO: inputs=" << input_count_ << " outputs=" << output_count_ << '\n';
@@ -140,7 +161,7 @@ class RknnRunnerReal final : public RknnRunner {
       result.error = last_error_.empty() ? "RKNN 模型尚未加载" : last_error_;
       return result;
     }
-    if (input.data.empty()) {
+    if (input.data == nullptr || input.size == 0) {
       result.error = "RKNN 输入数据为空";
       last_error_ = result.error;
       return result;
@@ -148,8 +169,8 @@ class RknnRunnerReal final : public RknnRunner {
 
     rknn_input rknn_input_value{};
     rknn_input_value.index = 0;
-    rknn_input_value.buf = const_cast<std::uint8_t*>(input.data.data());
-    rknn_input_value.size = static_cast<std::uint32_t>(input.data.size());
+    rknn_input_value.buf = const_cast<std::uint8_t*>(input.data);
+    rknn_input_value.size = static_cast<std::uint32_t>(input.size);
     rknn_input_value.pass_through = 0;
     rknn_input_value.type = RKNN_TENSOR_UINT8;
     rknn_input_value.fmt = RKNN_TENSOR_NHWC;
@@ -173,14 +194,38 @@ class RknnRunnerReal final : public RknnRunner {
       return result;
     }
 
-    std::vector<rknn_output> outputs(output_count_);
-    for (std::uint32_t index = 0; index < output_count_; ++index) {
-      outputs[index].index = index;
-      outputs[index].want_float = 1;
-      outputs[index].is_prealloc = 0;
-    }
+    bool used_preallocated_outputs = output_preallocation_supported_;
+    std::vector<rknn_output> dynamic_outputs;
     const auto get_output_started = std::chrono::steady_clock::now();
-    code = rknn_outputs_get(context_, output_count_, outputs.data(), nullptr);
+    if (used_preallocated_outputs) {
+      for (std::uint32_t index = 0; index < output_count_; ++index) {
+        reusable_outputs_[index].index = index;
+        reusable_outputs_[index].want_float = 1;
+        reusable_outputs_[index].is_prealloc = 1;
+        reusable_outputs_[index].buf = output_float_buffers_[index].data();
+        reusable_outputs_[index].size = static_cast<std::uint32_t>(
+            output_float_buffers_[index].size() * sizeof(float));
+      }
+      code = rknn_outputs_get(context_, output_count_, reusable_outputs_.data(), nullptr);
+      if (code < 0) {
+        // Some older runtime/driver combinations reject preallocated float
+        // outputs. Fall back to the legacy allocation path and keep the model
+        // operational; subsequent frames skip the failed preallocation attempt.
+        output_preallocation_supported_ = false;
+        used_preallocated_outputs = false;
+        std::cerr << "[WARN] RKNN preallocated float outputs are unsupported by the current "
+                  << "runtime/driver; falling back to dynamic output buffers, code=" << code << '\n';
+      }
+    }
+    if (!used_preallocated_outputs) {
+      dynamic_outputs.resize(output_count_);
+      for (std::uint32_t index = 0; index < output_count_; ++index) {
+        dynamic_outputs[index].index = index;
+        dynamic_outputs[index].want_float = 1;
+        dynamic_outputs[index].is_prealloc = 0;
+      }
+      code = rknn_outputs_get(context_, output_count_, dynamic_outputs.data(), nullptr);
+    }
     if (code < 0) {
       result.get_output_ms = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - get_output_started).count();
@@ -190,17 +235,30 @@ class RknnRunnerReal final : public RknnRunner {
     }
 
     result.tensors.reserve(output_count_);
+    result.host_input_copy_avoided = true;
+    result.output_buffers_preallocated = used_preallocated_outputs;
     for (std::uint32_t index = 0; index < output_count_; ++index) {
       RuntimeTensor tensor;
       tensor.info = output_infos_[index];
-      tensor.info.byte_size = outputs[index].size;
-      if (outputs[index].buf != nullptr && outputs[index].size > 0) {
-        const auto* begin = static_cast<const std::uint8_t*>(outputs[index].buf);
-        tensor.data.assign(begin, begin + outputs[index].size);
+      if (used_preallocated_outputs) {
+        const std::size_t capacity = output_float_buffers_[index].size() * sizeof(float);
+        std::size_t actual_size = reusable_outputs_[index].size;
+        if (actual_size == 0 || actual_size > capacity) actual_size = capacity;
+        tensor.info.byte_size = actual_size;
+        tensor.set_data_view(output_float_buffers_[index].data(), actual_size);
+        result.output_view_bytes += actual_size;
+      } else {
+        tensor.info.byte_size = dynamic_outputs[index].size;
+        if (dynamic_outputs[index].buf != nullptr && dynamic_outputs[index].size > 0) {
+          const auto* begin = static_cast<const std::uint8_t*>(dynamic_outputs[index].buf);
+          tensor.data.assign(begin, begin + dynamic_outputs[index].size);
+        }
       }
       result.tensors.push_back(std::move(tensor));
     }
-    rknn_outputs_release(context_, output_count_, outputs.data());
+    if (!used_preallocated_outputs) {
+      rknn_outputs_release(context_, output_count_, dynamic_outputs.data());
+    }
     result.get_output_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - get_output_started).count();
 
@@ -226,6 +284,10 @@ class RknnRunnerReal final : public RknnRunner {
     input_count_ = 0;
     output_count_ = 0;
     output_infos_.clear();
+    output_attrs_.clear();
+    output_float_buffers_.clear();
+    reusable_outputs_.clear();
+    output_preallocation_supported_ = true;
     model_data_.clear();
   }
 
@@ -241,6 +303,10 @@ class RknnRunnerReal final : public RknnRunner {
   std::vector<std::uint8_t> model_data_;
   std::vector<TensorInfo> output_infos_;
   std::vector<TensorInfo> input_infos_;
+  std::vector<rknn_tensor_attr> output_attrs_;
+  std::vector<std::vector<float>> output_float_buffers_;
+  std::vector<rknn_output> reusable_outputs_;
+  bool output_preallocation_supported_{true};
   std::mutex mutex_;
 };
 

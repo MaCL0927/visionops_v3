@@ -228,3 +228,14 @@ Overlay。需要现场取证时再临时开启。
 ```
 
 它只影响输出候选和 mask polygon 后处理，不改变模型输入或 NPU 网络结构。
+
+### Box grasp 第三阶段 FPS 优化
+
+Orbbec 336L Bridge 会通过 `/visionops_orbbec336l_rgb` POSIX 共享内存发布 RGB888
+双缓冲帧，box-grasp Runtime 默认使用 `shared_memory` 帧源，删除逐帧 JPEG HTTP
+下载和 OpenCV 解码。RKNN Runner 同时复用输入引用和预分配输出 buffer，降低
+segmentation 大输出带来的动态分配、复制和时延抖动。
+
+兼容策略：共享内存异常时可回退 `/stream/snapshot.jpg`；旧 RKNN driver 不支持预分配
+float 输出时自动回退动态 `rknn_outputs_get/release`。详细验证方式见
+`tasks/box_grasp_vision/README.md`。

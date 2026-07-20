@@ -14,6 +14,11 @@ camera_bridge:
   sample_deproject_path: /api/coordinate/sample_deproject
   # 第2层及以上必须使用新鲜的 D2C 对齐深度图。
   max_depth_age_ms: 1500
+  # Orbbec Bridge publishes RGB888 through POSIX shared memory for Runtime.
+  # HP60C automatically keeps using HTTP JPEG.
+  shared_rgb_enabled: true
+  shared_rgb_name: /visionops_orbbec336l_rgb
+  shared_rgb_fallback_http: true
 
 runtime_recovery:
   stale_frame_timeout_ms: 3000
@@ -225,7 +230,7 @@ box_grasp:
       contour_max_points: 64
       # 左右抓取点原本位于纸箱左右边中点。向纸箱中心内缩 18%，避免
       # segmentation 边缘抖动时抓取点落到箱体外。建议现场在 0.12～0.25 间调整。
-      grasp_inward_ratio: 0.02
+      grasp_inward_ratio: 0.08
     depth:
       enabled: true
       # 直接在 336L Bridge 内存中的 D2C 深度图上采样并反投影，避免整图 PNG 编解码。
