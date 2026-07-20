@@ -225,3 +225,37 @@ ls -lh /dev/shm/visionops_orbbec336l_rgb
 正常运行时 `shared_rgb_ready=true`、`shared_rgb_publish_count` 持续增长，且
 `shared_rgb_last_publish_age_ms` 应维持在一个相机周期附近。相机断线时 Runtime 会按
 配置自动回退到 HTTP JPEG，避免共享内存异常导致生产服务完全不可用。
+
+## D2C 深度共享内存
+
+Bridge 默认同时发布 `/visionops_orbbec336l_depth`。该对象使用两个 `uint16` 毫米深度
+缓冲区，协议定义在 `interfaces/cpp/visionops_shared_depth.hpp`。Header 固定 256 字节，
+包含 sequence、时间戳、D2C 图像尺寸以及已经考虑水平/垂直翻转的有效彩色相机内参。
+
+```bash
+VISIONOPS_ORBBEC336L_SHARED_DEPTH_ENABLED=true
+VISIONOPS_ORBBEC336L_SHARED_DEPTH_NAME=/visionops_orbbec336l_depth
+```
+
+状态检查：
+
+```bash
+curl -s http://127.0.0.1:18182/stream/status | jq '{
+  shared_depth_ready,
+  shared_depth_publish_count,
+  shared_depth_last_publish_age_ms,
+  shared_depth_publish_ms_average,
+  shared_depth_calibration_ready,
+  shared_depth_error
+}'
+ls -lh /dev/shm/visionops_orbbec336l_depth
+```
+
+`box_grasp_vision` 只在活动缓冲区上读取七个小 ROI，并在 sequence 改变时重试，不会
+复制、编码或传输整幅深度图。共享内存不可用时可按配置回退
+`/api/coordinate/sample_deproject`。
+
+Bridge 在发布共享深度前会把彩色内参缩放到实际 D2C 深度缓冲区尺寸，再应用可选的
+水平/垂直翻转，因此 Header 中 `fx/fy/cx/cy` 与共享深度像素坐标系一致。共享路径使用
+针孔反投影，不包含 SDK 可能执行的额外畸变校正；生产启用前应与
+`/api/coordinate/sample_deproject` 做中心和边缘点误差核对。

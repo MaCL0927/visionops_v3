@@ -60,6 +60,8 @@ append_env_default VISIONOPS_ORBBEC336L_RECONNECT_MAX_MS 30000
 append_env_default VISIONOPS_ORBBEC336L_RECONNECT_FAILURE_ALARM_SEC 15
 append_env_default VISIONOPS_ORBBEC336L_SHARED_RGB_ENABLED true
 append_env_default VISIONOPS_ORBBEC336L_SHARED_RGB_NAME /visionops_orbbec336l_rgb
+append_env_default VISIONOPS_ORBBEC336L_SHARED_DEPTH_ENABLED true
+append_env_default VISIONOPS_ORBBEC336L_SHARED_DEPTH_NAME /visionops_orbbec336l_depth
 
 # shellcheck disable=SC1090
 source "$ENV_FILE"

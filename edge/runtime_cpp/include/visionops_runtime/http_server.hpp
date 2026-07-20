@@ -34,7 +34,7 @@ class HttpServer {
   void close_listener();
   void start_workers();
   void stop_workers();
-  void worker_loop();
+  void worker_loop(int worker_index);
   bool enqueue_client(int client_fd, std::chrono::steady_clock::time_point accepted_at);
   void configure_client_socket(int client_fd) const;
   void handle_client(
@@ -51,6 +51,7 @@ class HttpServer {
       const std::string& message,
       bool recoverable) const;
   bool write_response(int client_fd, const HttpResponse& response) const;
+  std::string server_status_json() const;
 
   std::string host_;
   std::uint16_t port_;
@@ -64,11 +65,15 @@ class HttpServer {
   int listen_fd_{-1};
   int worker_count_{4};
   std::size_t queue_capacity_{64};
-  std::mutex queue_mutex_;
+  mutable std::mutex queue_mutex_;
   std::condition_variable queue_cv_;
   std::queue<QueuedClient> client_queue_;
   std::vector<std::thread> workers_;
   bool workers_stopping_{false};
+  std::atomic<int> active_workers_{0};
+  std::atomic<std::uint64_t> accepted_clients_{0};
+  std::atomic<std::uint64_t> rejected_clients_{0};
+  std::atomic<std::uint64_t> handled_clients_{0};
 };
 
 }  // namespace visionops::runtime

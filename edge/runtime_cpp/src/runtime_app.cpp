@@ -300,6 +300,11 @@ RuntimeApiResult RuntimeApp::update_roi(const std::string& request_body) {
 
 std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
   const auto now = now_timestamp_ms();
+  std::string http_server_status = "null";
+  {
+    std::lock_guard<std::mutex> lock(http_server_status_mutex_);
+    if (http_server_status_provider_) http_server_status = http_server_status_provider_();
+  }
   const auto frame_source = stream_worker_.status();
   const double inference_fps = snapshot.inference_fps;
   const double snapshot_fps =
@@ -323,6 +328,7 @@ std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
          << ",\"camera_connected\":"
          << json_bool(frame_source.opened && !frame_source.stale && frame_source.last_error.empty())
          << ",\"frame_source\":" << frame_source_json(frame_source)
+         << ",\"http_server\":" << http_server_status
          << ",\"roi\":" << roi_filter_.value_json(frame_source.width, frame_source.height)
          << ",\"preprocess\":{\"backend_requested\":\"" << json_escape(config_.preprocess_backend)
          << "\",\"backend_active\":\"" << json_escape(config_.preprocess_backend == "auto" && rga_backend_compiled() ? "rga" : config_.preprocess_backend)
@@ -952,5 +958,10 @@ std::string RuntimeApp::snapshot_frame_id() const {
 }
 
 void RuntimeApp::record_error() { state_.record_error(); }
+
+void RuntimeApp::set_http_server_status_provider(std::function<std::string()> provider) {
+  std::lock_guard<std::mutex> lock(http_server_status_mutex_);
+  http_server_status_provider_ = std::move(provider);
+}
 
 }  // namespace visionops::runtime

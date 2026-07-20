@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -39,6 +40,7 @@ class RuntimeApp {
   const AppConfig& config() const;
   std::string snapshot_frame_id() const;
   void record_error();
+  void set_http_server_status_provider(std::function<std::string()> provider);
 
  private:
   std::string status_json(const RuntimeSnapshot& snapshot) const;
@@ -81,6 +83,8 @@ class RuntimeApp {
   RoiFilterStore roi_filter_;
   mutable std::recursive_mutex model_mutex_;
   std::mutex inference_mutex_;
+  mutable std::mutex http_server_status_mutex_;
+  std::function<std::string()> http_server_status_provider_;
 };
 
 }  // namespace visionops::runtime

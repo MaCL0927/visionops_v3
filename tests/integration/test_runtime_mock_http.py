@@ -172,6 +172,10 @@ def test_runtime_mock_state_and_inference_flow(runtime_server: str) -> None:
     assert current["counters"]["frames_inferred"] == 2
     assert current["last_frame_id"] == second_result["frame_id"]
     assert current["last_result_id"] == second_result["result_id"]
+    assert current["http_server"]["worker_count"] >= 1
+    assert current["http_server"]["queue_capacity"] >= 4
+    assert current["http_server"]["queue_size"] >= 0
+    assert current["http_server"]["active_workers"] >= 1
 
     status_code, stopped = _request_json(
         f"{runtime_server}/api/runtime/stop_preview", method="POST"

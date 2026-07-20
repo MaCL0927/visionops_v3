@@ -52,6 +52,7 @@
 #include "libobsensor/ObSensor.hpp"
 #include "libobsensor/hpp/Utils.hpp"
 #include "interfaces/cpp/visionops_shared_rgb.hpp"
+#include "interfaces/cpp/visionops_shared_depth.hpp"
 
 namespace {
 
@@ -186,7 +187,9 @@ public:
           flip_horizontal_(getenv_bool("VISIONOPS_ORBBEC336L_FLIP_HORIZONTAL", false)),
           serial_(getenv_str("VISIONOPS_ORBBEC336L_SERIAL", "")),
           shared_rgb_enabled_(getenv_bool("VISIONOPS_ORBBEC336L_SHARED_RGB_ENABLED", true)),
-          shared_rgb_name_(getenv_str("VISIONOPS_ORBBEC336L_SHARED_RGB_NAME", "/visionops_orbbec336l_rgb")) {}
+          shared_rgb_name_(getenv_str("VISIONOPS_ORBBEC336L_SHARED_RGB_NAME", "/visionops_orbbec336l_rgb")),
+          shared_depth_enabled_(getenv_bool("VISIONOPS_ORBBEC336L_SHARED_DEPTH_ENABLED", true)),
+          shared_depth_name_(getenv_str("VISIONOPS_ORBBEC336L_SHARED_DEPTH_NAME", "/visionops_orbbec336l_depth")) {}
 
     bool start_camera() {
         start_ms_ = now_ms();
@@ -212,6 +215,7 @@ public:
         if (jpeg_thread_.joinable()) jpeg_thread_.join();
         if (camera_thread_.joinable()) camera_thread_.join();
         close_shared_rgb();
+        close_shared_depth();
         camera_started_ = false;
     }
 
@@ -432,6 +436,179 @@ private:
         shared_rgb_header_ = nullptr;
         if (shared_rgb_fd_ >= 0) ::close(shared_rgb_fd_);
         shared_rgb_fd_ = -1;
+    }
+
+
+    bool ensure_shared_depth(int width, int height) {
+        if (!shared_depth_enabled_) return false;
+        if (width <= 0 || height <= 0 || shared_depth_name_.empty() || shared_depth_name_.front() != '/') {
+            return false;
+        }
+        const std::size_t stride = static_cast<std::size_t>(width) * sizeof(std::uint16_t);
+        const std::size_t frame_capacity = stride * static_cast<std::size_t>(height);
+        const std::size_t total_size = visionops::ipc::shared_depth_total_size(frame_capacity);
+        std::lock_guard<std::mutex> lk(shared_depth_mtx_);
+        if (shared_depth_mapping_ != MAP_FAILED && shared_depth_mapping_ != nullptr &&
+            shared_depth_mapping_size_ == total_size && shared_depth_width_ == width &&
+            shared_depth_height_ == height) {
+            return true;
+        }
+        if (shared_depth_mapping_ != MAP_FAILED && shared_depth_mapping_ != nullptr) {
+            ::munmap(shared_depth_mapping_, shared_depth_mapping_size_);
+        }
+        shared_depth_mapping_ = MAP_FAILED;
+        shared_depth_mapping_size_ = 0;
+        shared_depth_header_ = nullptr;
+        if (shared_depth_fd_ >= 0) ::close(shared_depth_fd_);
+        shared_depth_fd_ = ::shm_open(shared_depth_name_.c_str(), O_CREAT | O_RDWR, 0660);
+        if (shared_depth_fd_ < 0) {
+            shared_depth_error_ = std::string("shm_open failed: ") + std::strerror(errno);
+            return false;
+        }
+        ::fchmod(shared_depth_fd_, 0660);
+        if (::ftruncate(shared_depth_fd_, static_cast<off_t>(total_size)) != 0) {
+            shared_depth_error_ = std::string("ftruncate failed: ") + std::strerror(errno);
+            ::close(shared_depth_fd_);
+            shared_depth_fd_ = -1;
+            return false;
+        }
+        void* mapping = ::mmap(nullptr, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, shared_depth_fd_, 0);
+        if (mapping == MAP_FAILED) {
+            shared_depth_error_ = std::string("mmap failed: ") + std::strerror(errno);
+            ::close(shared_depth_fd_);
+            shared_depth_fd_ = -1;
+            return false;
+        }
+        shared_depth_mapping_ = mapping;
+        shared_depth_mapping_size_ = total_size;
+        shared_depth_header_ = static_cast<visionops::ipc::SharedDepthHeader*>(mapping);
+        std::memset(mapping, 0, total_size);
+        shared_depth_header_->magic = visionops::ipc::kSharedDepthMagic;
+        shared_depth_header_->version = visionops::ipc::kSharedDepthVersion;
+        shared_depth_header_->header_size = sizeof(visionops::ipc::SharedDepthHeader);
+        shared_depth_header_->total_size = total_size;
+        shared_depth_header_->frame_capacity = frame_capacity;
+        shared_depth_header_->frame_bytes = frame_capacity;
+        shared_depth_header_->width = static_cast<std::uint32_t>(width);
+        shared_depth_header_->height = static_cast<std::uint32_t>(height);
+        shared_depth_header_->stride_bytes = static_cast<std::uint32_t>(stride);
+        shared_depth_header_->pixel_format = visionops::ipc::kSharedDepthPixelFormatUint16Mm;
+        shared_depth_header_->buffer_count = visionops::ipc::kSharedDepthBufferCount;
+        shared_depth_header_->writer_pid = static_cast<std::uint64_t>(::getpid());
+        shared_depth_header_->aligned_to_color = 1;
+        shared_depth_header_->flip_horizontal = flip_horizontal_ ? 1u : 0u;
+        shared_depth_header_->flip_vertical = flip_vertical_ ? 1u : 0u;
+        visionops::ipc::depth_atomic_store_u32(
+            &shared_depth_header_->state, visionops::ipc::kSharedDepthStateOffline);
+        visionops::ipc::depth_atomic_store_u64(&shared_depth_header_->sequence, 0);
+        shared_depth_width_ = width;
+        shared_depth_height_ = height;
+        shared_depth_error_.clear();
+        return true;
+    }
+
+    void publish_shared_depth(const cv::Mat& depth_mm, std::uint64_t timestamp_epoch_ms) {
+        if (!shared_depth_enabled_ || depth_mm.empty() || depth_mm.type() != CV_16UC1) return;
+        const auto started = std::chrono::steady_clock::now();
+        if (!ensure_shared_depth(depth_mm.cols, depth_mm.rows)) return;
+
+        double fx = 0.0, fy = 0.0, cx = 0.0, cy = 0.0;
+        int intrinsic_width = 0;
+        int intrinsic_height = 0;
+        bool calibration_ready = false;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            fx = color_fx_;
+            fy = color_fy_;
+            cx = color_cx_;
+            cy = color_cy_;
+            intrinsic_width = color_intrinsic_width_;
+            intrinsic_height = color_intrinsic_height_;
+            calibration_ready = calibration_ready_ && fx > 0.0 && fy > 0.0 &&
+                intrinsic_width > 0 && intrinsic_height > 0;
+        }
+        // ALIGN_D2C_SW normally produces a depth image at the color resolution,
+        // but scale the color intrinsics defensively when SDK profile choices
+        // differ.  The shared-memory consumer therefore receives intrinsics in
+        // the exact pixel coordinate system of this published depth buffer.
+        if (calibration_ready &&
+            (intrinsic_width != depth_mm.cols || intrinsic_height != depth_mm.rows)) {
+            const double scale_x = static_cast<double>(depth_mm.cols) /
+                static_cast<double>(intrinsic_width);
+            const double scale_y = static_cast<double>(depth_mm.rows) /
+                static_cast<double>(intrinsic_height);
+            fx *= scale_x;
+            cx *= scale_x;
+            fy *= scale_y;
+            cy *= scale_y;
+        }
+        if (flip_horizontal_ && depth_mm.cols > 0) cx = static_cast<double>(depth_mm.cols - 1) - cx;
+        if (flip_vertical_ && depth_mm.rows > 0) cy = static_cast<double>(depth_mm.rows - 1) - cy;
+
+        std::lock_guard<std::mutex> lk(shared_depth_mtx_);
+        if (shared_depth_header_ == nullptr || shared_depth_mapping_ == MAP_FAILED) return;
+        const std::uint64_t previous = visionops::ipc::depth_atomic_load_u64(&shared_depth_header_->sequence);
+        const std::uint32_t target = static_cast<std::uint32_t>(
+            (previous + 1) % visionops::ipc::kSharedDepthBufferCount);
+        auto* destination = visionops::ipc::shared_depth_buffer(
+            shared_depth_mapping_, static_cast<std::size_t>(shared_depth_header_->frame_capacity), target);
+        const std::size_t row_bytes = static_cast<std::size_t>(depth_mm.cols) * sizeof(std::uint16_t);
+        if (depth_mm.isContinuous() && depth_mm.step == row_bytes) {
+            std::memcpy(destination, depth_mm.data, row_bytes * static_cast<std::size_t>(depth_mm.rows));
+        } else {
+            for (int row = 0; row < depth_mm.rows; ++row) {
+                std::memcpy(destination + static_cast<std::size_t>(row) * row_bytes,
+                            depth_mm.ptr(row), row_bytes);
+            }
+        }
+        shared_depth_header_->frame_bytes = row_bytes * static_cast<std::size_t>(depth_mm.rows);
+        shared_depth_header_->width = static_cast<std::uint32_t>(depth_mm.cols);
+        shared_depth_header_->height = static_cast<std::uint32_t>(depth_mm.rows);
+        shared_depth_header_->stride_bytes = static_cast<std::uint32_t>(row_bytes);
+        shared_depth_header_->fx = fx;
+        shared_depth_header_->fy = fy;
+        shared_depth_header_->cx = cx;
+        shared_depth_header_->cy = cy;
+        shared_depth_header_->calibration_ready = calibration_ready ? 1u : 0u;
+        visionops::ipc::depth_atomic_store_u32(
+            &shared_depth_header_->state,
+            calibration_ready ? visionops::ipc::kSharedDepthStateRunning
+                              : visionops::ipc::kSharedDepthStateStale);
+        visionops::ipc::depth_atomic_store_u32(&shared_depth_header_->active_buffer, target);
+        visionops::ipc::depth_atomic_store_u64(&shared_depth_header_->timestamp_epoch_ms, timestamp_epoch_ms);
+        visionops::ipc::depth_atomic_store_u64(&shared_depth_header_->publish_count, previous + 1);
+        visionops::ipc::depth_atomic_store_u64(&shared_depth_header_->sequence, previous + 1);
+        const double elapsed = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        shared_depth_publish_ms_latest_ = elapsed;
+        shared_depth_publish_ms_average_ = shared_depth_publish_count_ == 0
+            ? elapsed
+            : shared_depth_publish_ms_average_ * 0.90 + elapsed * 0.10;
+        ++shared_depth_publish_count_;
+        shared_depth_last_publish_ms_ = now_ms();
+    }
+
+    void mark_shared_depth_state(std::uint32_t state) {
+        std::lock_guard<std::mutex> lk(shared_depth_mtx_);
+        if (shared_depth_header_ != nullptr && shared_depth_mapping_ != MAP_FAILED) {
+            visionops::ipc::depth_atomic_store_u32(&shared_depth_header_->state, state);
+        }
+    }
+
+    void close_shared_depth() {
+        std::lock_guard<std::mutex> lk(shared_depth_mtx_);
+        if (shared_depth_header_ != nullptr && shared_depth_mapping_ != MAP_FAILED) {
+            visionops::ipc::depth_atomic_store_u32(
+                &shared_depth_header_->state, visionops::ipc::kSharedDepthStateOffline);
+        }
+        if (shared_depth_mapping_ != MAP_FAILED && shared_depth_mapping_ != nullptr) {
+            ::munmap(shared_depth_mapping_, shared_depth_mapping_size_);
+        }
+        shared_depth_mapping_ = MAP_FAILED;
+        shared_depth_mapping_size_ = 0;
+        shared_depth_header_ = nullptr;
+        if (shared_depth_fd_ >= 0) ::close(shared_depth_fd_);
+        shared_depth_fd_ = -1;
     }
 
     std::shared_ptr<ob::VideoStreamProfile> enable_color_stream(
@@ -671,6 +848,18 @@ private:
             depth_profile_ = depth_profile;
             calibration_param_ = calibration;
             calibration_ready_ = true;
+            try {
+                const auto intrinsic = color_profile->getIntrinsic();
+                color_fx_ = intrinsic.fx;
+                color_fy_ = intrinsic.fy;
+                color_cx_ = intrinsic.cx;
+                color_cy_ = intrinsic.cy;
+                color_intrinsic_width_ = intrinsic.width;
+                color_intrinsic_height_ = intrinsic.height;
+            } catch (...) {
+                color_fx_ = color_fy_ = color_cx_ = color_cy_ = 0.0;
+                color_intrinsic_width_ = color_intrinsic_height_ = 0;
+            }
             camera_started_ = true;
             pipeline_started_ms_ = now_ms();
             invalidate_frames_locked();
@@ -727,7 +916,9 @@ private:
         if (c) bgr = color_frame_to_bgr(c);
         if (d) depth_mm = depth_frame_to_mm(d);
         const auto now = now_ms();
-        if (!bgr.empty()) publish_shared_rgb(c, bgr, static_cast<std::uint64_t>(epoch_now_ms()));
+        const auto epoch = static_cast<std::uint64_t>(epoch_now_ms());
+        if (!bgr.empty()) publish_shared_rgb(c, bgr, epoch);
+        if (!depth_mm.empty()) publish_shared_depth(depth_mm, epoch);
         bool became_running = false;
         {
             std::lock_guard<std::mutex> lk(mtx_);
@@ -1589,6 +1780,7 @@ private:
 
     std::string status_json() {
         std::lock_guard<std::mutex> shared_lk(shared_rgb_mtx_);
+        std::lock_guard<std::mutex> shared_depth_lk(shared_depth_mtx_);
         std::lock_guard<std::mutex> lk(mtx_);
         const int64_t now = now_ms();
         const int64_t state_age_ms = state_since_ms_ > 0 ? now - state_since_ms_ : 0;
@@ -1650,6 +1842,17 @@ private:
            << "\"shared_rgb_publish_ms_average\":" << std::fixed << std::setprecision(3) << shared_rgb_publish_ms_average_ << ","
            << "\"shared_rgb_publish_mode\":\"" << json_escape(shared_rgb_publish_mode_) << "\","
            << "\"shared_rgb_error\":\"" << json_escape(shared_rgb_error_) << "\","
+           << "\"shared_depth_enabled\":" << (shared_depth_enabled_ ? "true" : "false") << ","
+           << "\"shared_depth_name\":\"" << json_escape(shared_depth_name_) << "\","
+           << "\"shared_depth_ready\":" << (shared_depth_header_ != nullptr ? "true" : "false") << ","
+           << "\"shared_depth_publish_count\":" << shared_depth_publish_count_ << ","
+           << "\"shared_depth_last_publish_age_ms\":"
+           << (shared_depth_last_publish_ms_ > 0 ? now - shared_depth_last_publish_ms_ : -1) << ","
+           << "\"shared_depth_publish_ms_latest\":" << std::fixed << std::setprecision(3) << shared_depth_publish_ms_latest_ << ","
+           << "\"shared_depth_publish_ms_average\":" << std::fixed << std::setprecision(3) << shared_depth_publish_ms_average_ << ","
+           << "\"shared_depth_calibration_ready\":"
+           << (shared_depth_header_ != nullptr && shared_depth_header_->calibration_ready != 0 ? "true" : "false") << ","
+           << "\"shared_depth_error\":\"" << json_escape(shared_depth_error_) << "\","
            << "\"jpeg_thread_alive\":" << (jpeg_thread_alive_ ? "true" : "false") << ","
            << "\"last_jpeg_age_ms\":" << jpeg_age_ms << ","
            << "\"color_width\":" << color_w_ << ","
@@ -1989,11 +2192,19 @@ private:
     std::string serial_;
     bool shared_rgb_enabled_;
     std::string shared_rgb_name_;
+    bool shared_depth_enabled_;
+    std::string shared_depth_name_;
 
     std::shared_ptr<ob::Context> ctx_;
     std::shared_ptr<ob::Pipeline> pipeline_;
     OBCalibrationParam calibration_param_{};
     bool calibration_ready_ = false;
+    double color_fx_ = 0.0;
+    double color_fy_ = 0.0;
+    double color_cx_ = 0.0;
+    double color_cy_ = 0.0;
+    int color_intrinsic_width_ = 0;
+    int color_intrinsic_height_ = 0;
     std::shared_ptr<ob::VideoStreamProfile> color_profile_;
     std::shared_ptr<ob::VideoStreamProfile> depth_profile_;
     std::thread camera_thread_;
@@ -2066,6 +2277,19 @@ private:
     double shared_rgb_publish_ms_average_ = 0.0;
     std::string shared_rgb_publish_mode_{"uninitialized"};
     std::string shared_rgb_error_;
+
+    std::mutex shared_depth_mtx_;
+    int shared_depth_fd_ = -1;
+    void* shared_depth_mapping_ = MAP_FAILED;
+    std::size_t shared_depth_mapping_size_ = 0;
+    visionops::ipc::SharedDepthHeader* shared_depth_header_ = nullptr;
+    int shared_depth_width_ = 0;
+    int shared_depth_height_ = 0;
+    uint64_t shared_depth_publish_count_ = 0;
+    int64_t shared_depth_last_publish_ms_ = 0;
+    double shared_depth_publish_ms_latest_ = 0.0;
+    double shared_depth_publish_ms_average_ = 0.0;
+    std::string shared_depth_error_;
 
     int server_fd_ = -1;
 };

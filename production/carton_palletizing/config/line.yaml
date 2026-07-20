@@ -19,6 +19,11 @@ camera_bridge:
   shared_rgb_enabled: true
   shared_rgb_name: /visionops_orbbec336l_rgb
   shared_rgb_fallback_http: true
+  # D2C-aligned uint16 millimetre depth for the box-grasp App. The App samples
+  # only its seven ROI points directly from this double buffer.
+  shared_depth_enabled: true
+  shared_depth_name: /visionops_orbbec336l_depth
+  shared_depth_fallback_http: true
 
 runtime_recovery:
   stale_frame_timeout_ms: 3000
@@ -175,6 +180,11 @@ box_grasp:
     result_queue_size: 1
     max_result_age_ms: 500
 
+  ipc:
+    # Localhost Runtime/Bridge requests use a small socket client instead of urllib.
+    raw_http_enabled: true
+    raw_http_fallback_urllib: true
+
   collector:
     listen_host: 0.0.0.0
     listen_port: 18095
@@ -230,7 +240,7 @@ box_grasp:
       contour_max_points: 64
       # 左右抓取点原本位于纸箱左右边中点。向纸箱中心内缩 18%，避免
       # segmentation 边缘抖动时抓取点落到箱体外。建议现场在 0.12～0.25 间调整。
-      grasp_inward_ratio: 0.18
+      grasp_inward_ratio: 0.08
     depth:
       enabled: true
       # 直接在 336L Bridge 内存中的 D2C 深度图上采样并反投影，避免整图 PNG 编解码。
@@ -245,7 +255,7 @@ box_grasp:
       edge_inward_ratio: 0.08
       # 左右抓取点已经整体内移，再把深度采样位置额外向中心内缩 5%。
       # 反投影仍使用实际抓取点坐标，因此机器人收到的像素/相机坐标保持一致。
-      grasp_extra_inward_ratio: 0.05
+      grasp_extra_inward_ratio: 0
 
   debug:
     save_every_trigger: false

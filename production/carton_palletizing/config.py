@@ -38,6 +38,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "shared_rgb_enabled": True,
         "shared_rgb_name": "/visionops_orbbec336l_rgb",
         "shared_rgb_fallback_http": True,
+        "shared_depth_enabled": True,
+        "shared_depth_name": "/visionops_orbbec336l_depth",
+        "shared_depth_fallback_http": True,
     },
     "runtime_recovery": {
         "stale_frame_timeout_ms": 3000,
@@ -193,6 +196,10 @@ DEFAULT_CONFIG["box_grasp"] = {
         "enabled": True,
         "result_queue_size": 1,
         "max_result_age_ms": 500,
+    },
+    "ipc": {
+        "raw_http_enabled": True,
+        "raw_http_fallback_urllib": True,
     },
     "collector": {
         "listen_host": "0.0.0.0",
@@ -454,6 +461,12 @@ def _validate_box_grasp(config: Dict[str, Any]) -> None:
     if pipeline["max_result_age_ms"] <= 0:
         raise ValueError("box_grasp.pipeline.max_result_age_ms 必须大于0")
 
+    ipc = profile.get("ipc")
+    if not isinstance(ipc, dict):
+        raise ValueError("box_grasp.ipc 必须是对象")
+    ipc["raw_http_enabled"] = bool(ipc.get("raw_http_enabled", True))
+    ipc["raw_http_fallback_urllib"] = bool(ipc.get("raw_http_fallback_urllib", True))
+
     collector = profile["collector"]
     collector["listen_port"] = _port(collector["listen_port"], "box_grasp.collector.listen_port")
     collector["models_root"] = _path(collector["models_root"])
@@ -561,6 +574,13 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     config["camera_bridge"]["max_depth_age_ms"] = int(config["camera_bridge"].get("max_depth_age_ms", 1500))
     if config["camera_bridge"]["max_depth_age_ms"] <= 0:
         raise ValueError("camera_bridge.max_depth_age_ms 必须大于 0")
+    for key, default in (("shared_rgb_name", "/visionops_orbbec336l_rgb"), ("shared_depth_name", "/visionops_orbbec336l_depth")):
+        value = str(config["camera_bridge"].get(key) or default).strip()
+        if not value.startswith("/"):
+            raise ValueError("camera_bridge.{} 必须以 / 开头".format(key))
+        config["camera_bridge"][key] = value
+    for key in ("shared_rgb_enabled", "shared_rgb_fallback_http", "shared_depth_enabled", "shared_depth_fallback_http"):
+        config["camera_bridge"][key] = bool(config["camera_bridge"].get(key, True))
     config["runtime"]["url"] = _url(config["runtime"]["url"], "runtime.url")
     config["runtime"]["model_dir"] = _path(config["runtime"]["model_dir"])
     config["runtime"]["roi_config_path"] = _path(config["runtime"]["roi_config_path"])

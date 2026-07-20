@@ -4,6 +4,7 @@
 #include <netdb.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -124,11 +125,14 @@ HttpServer::HttpServer(
       stop_requested_(stop_requested),
       worker_count_(positive_env_int("VISIONOPS_RUNTIME_HTTP_WORKERS", 4, 1, 32)),
       queue_capacity_(static_cast<std::size_t>(
-          positive_env_int("VISIONOPS_RUNTIME_HTTP_QUEUE", 64, 4, 1024))) {}
+          positive_env_int("VISIONOPS_RUNTIME_HTTP_QUEUE", 64, 4, 1024))) {
+  app_.set_http_server_status_provider([this]() { return server_status_json(); });
+}
 
 HttpServer::~HttpServer() {
   close_listener();
   stop_workers();
+  app_.set_http_server_status_provider({});
 }
 
 bool HttpServer::open_listener() {
@@ -181,9 +185,10 @@ int HttpServer::run() {
     return 1;
   }
   start_workers();
-  std::cout << "VisionOps Runtime Mock 正在监听 " << host_ << ':' << port_
+  std::cerr << "VisionOps Runtime 正在监听 " << host_ << ':' << port_
             << "，task=" << app_.config().mock_task_type
-            << "，http_workers=" << worker_count_ << '\n';
+            << "，http_workers=" << worker_count_
+            << "，http_queue=" << queue_capacity_ << std::endl;
 
   while (!stop_requested_.load()) {
     pollfd descriptor{};
@@ -212,8 +217,10 @@ int HttpServer::run() {
       continue;
     }
     configure_client_socket(client_fd);
+    accepted_clients_.fetch_add(1, std::memory_order_relaxed);
     const auto accepted_at = std::chrono::steady_clock::now();
     if (!enqueue_client(client_fd, accepted_at)) {
+      rejected_clients_.fetch_add(1, std::memory_order_relaxed);
       auto response = error_response(
           503,
           "Service Unavailable",
@@ -227,7 +234,7 @@ int HttpServer::run() {
   }
 
   stop_workers();
-  std::cout << "VisionOps Runtime Mock 已停止\n";
+  std::cerr << "VisionOps Runtime 已停止" << std::endl;
   return 0;
 }
 
@@ -237,7 +244,7 @@ void HttpServer::start_workers() {
   workers_stopping_ = false;
   workers_.reserve(static_cast<std::size_t>(worker_count_));
   for (int index = 0; index < worker_count_; ++index) {
-    workers_.emplace_back(&HttpServer::worker_loop, this);
+    workers_.emplace_back(&HttpServer::worker_loop, this, index);
   }
 }
 
@@ -275,7 +282,11 @@ bool HttpServer::enqueue_client(
   return true;
 }
 
-void HttpServer::worker_loop() {
+void HttpServer::worker_loop(int worker_index) {
+#if defined(__linux__)
+  const std::string thread_name = "vo-http-" + std::to_string(worker_index);
+  pthread_setname_np(pthread_self(), thread_name.substr(0, 15).c_str());
+#endif
   while (true) {
     QueuedClient client;
     {
@@ -287,9 +298,30 @@ void HttpServer::worker_loop() {
       client = client_queue_.front();
       client_queue_.pop();
     }
+    active_workers_.fetch_add(1, std::memory_order_relaxed);
     handle_client(client.fd, client.accepted_at);
+    active_workers_.fetch_sub(1, std::memory_order_relaxed);
+    handled_clients_.fetch_add(1, std::memory_order_relaxed);
     close(client.fd);
   }
+}
+
+std::string HttpServer::server_status_json() const {
+  std::size_t queue_size = 0;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    queue_size = client_queue_.size();
+  }
+  std::ostringstream stream;
+  stream << "{\"worker_count\":" << worker_count_
+         << ",\"queue_capacity\":" << queue_capacity_
+         << ",\"queue_size\":" << queue_size
+         << ",\"active_workers\":" << active_workers_.load(std::memory_order_relaxed)
+         << ",\"accepted_clients\":" << accepted_clients_.load(std::memory_order_relaxed)
+         << ",\"rejected_clients\":" << rejected_clients_.load(std::memory_order_relaxed)
+         << ",\"handled_clients\":" << handled_clients_.load(std::memory_order_relaxed)
+         << '}';
+  return stream.str();
 }
 
 void HttpServer::configure_client_socket(int client_fd) const {

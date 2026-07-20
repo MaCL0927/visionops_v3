@@ -24,6 +24,7 @@ import numpy as np  # type: ignore
 
 from production.carton_palletizing.config import DEFAULT_CONFIG_PATH, load_config
 from production.carton_palletizing.tasks.box_grasp_vision.algorithm import BoxGraspAlgorithm
+from production.carton_palletizing.tasks.box_grasp_vision.local_ipc import RawLocalHttpClient, SharedDepthReader
 from production.carton_palletizing.tasks.box_grasp_vision.websocket_server import WebSocketJsonServer, WebSocketSession
 
 MAX_HTTP_BODY = 1024 * 1024
@@ -73,6 +74,9 @@ class HttpBytesResult:
     headers_wait_ms: float
     body_read_ms: float
     total_ms: float
+    connect_ms: float = 0.0
+    send_ms: float = 0.0
+    transport: str = "urllib"
 
     def header_float(self, name: str) -> float:
         raw = self.headers.get(name.lower())
@@ -83,11 +87,74 @@ class HttpBytesResult:
 
 
 class JsonHttpClient:
-    def __init__(self, timeout_s: float = 5.0, max_response_bytes: int = MAX_RESPONSE_BYTES) -> None:
+    def __init__(
+        self,
+        timeout_s: float = 5.0,
+        max_response_bytes: int = MAX_RESPONSE_BYTES,
+        raw_local_enabled: bool = True,
+        fallback_urllib: bool = True,
+    ) -> None:
         self.timeout_s = float(timeout_s)
         self.max_response_bytes = int(max_response_bytes)
+        self.raw_local_enabled = bool(raw_local_enabled)
+        self.fallback_urllib = bool(fallback_urllib)
+        self.raw_client = RawLocalHttpClient(self.timeout_s, self.max_response_bytes)
+        self.stats_lock = threading.Lock()
+        self.raw_request_count = 0
+        self.raw_failure_count = 0
+        self.urllib_request_count = 0
+        self.last_transport = "none"
+        self.last_raw_error = ""
+
+    def status(self) -> Dict[str, Any]:
+        with self.stats_lock:
+            return {
+                "raw_local_enabled": self.raw_local_enabled,
+                "fallback_urllib": self.fallback_urllib,
+                "raw_request_count": self.raw_request_count,
+                "raw_failure_count": self.raw_failure_count,
+                "urllib_request_count": self.urllib_request_count,
+                "last_transport": self.last_transport,
+                "last_raw_error": self.last_raw_error,
+            }
+
+    def _record_transport(self, transport: str, raw_error: str = "") -> None:
+        with self.stats_lock:
+            self.last_transport = transport
+            if transport == "raw_socket":
+                self.raw_request_count += 1
+                self.last_raw_error = ""
+            elif transport == "urllib":
+                self.urllib_request_count += 1
+                if raw_error:
+                    self.last_raw_error = raw_error
+            elif transport == "raw_error":
+                self.raw_failure_count += 1
+                self.last_raw_error = raw_error
 
     def request_bytes_timed(self, method: str, url: str, body: Optional[bytes] = None) -> HttpBytesResult:
+        if self.raw_local_enabled and self.raw_client.supports(url):
+            try:
+                response = self.raw_client.request(method, url, body)
+                if response.status_code >= 400:
+                    detail = response.body[:1000].decode("utf-8", errors="replace")
+                    raise UpstreamError("{} {} HTTP {}: {}".format(method, url, response.status_code, detail))
+                self._record_transport("raw_socket")
+                return HttpBytesResult(
+                    body=response.body,
+                    status_code=response.status_code,
+                    headers=response.headers,
+                    headers_wait_ms=response.headers_wait_ms,
+                    body_read_ms=response.body_read_ms,
+                    total_ms=response.total_ms,
+                    connect_ms=response.connect_ms,
+                    send_ms=response.send_ms,
+                    transport=response.transport,
+                )
+            except (OSError, ValueError, ConnectionError, TimeoutError) as error:
+                self._record_transport("raw_error", str(error))
+                if not self.fallback_urllib:
+                    raise UpstreamError("{} {} raw HTTP failed: {}".format(method, url, error)) from error
         headers = {"Accept": "application/json,image/jpeg,image/png,*/*", "User-Agent": "visionops-box-grasp/1.0"}
         if body is not None:
             headers["Content-Type"] = "application/json"
@@ -107,6 +174,7 @@ class JsonHttpClient:
             raise UpstreamError("{} {} failed: {}".format(method, url, getattr(error, "reason", error))) from error
         if len(raw) > self.max_response_bytes:
             raise UpstreamError("upstream response exceeds size limit")
+        self._record_transport("urllib")
         return HttpBytesResult(
             body=raw,
             status_code=status_code,
@@ -114,6 +182,7 @@ class JsonHttpClient:
             headers_wait_ms=(headers_received - started) * 1000.0,
             body_read_ms=(finished - headers_received) * 1000.0,
             total_ms=(finished - started) * 1000.0,
+            transport="urllib",
         )
 
     def request_bytes(self, method: str, url: str, body: Optional[bytes] = None) -> bytes:
@@ -138,9 +207,13 @@ class JsonHttpClient:
 
 
 class RuntimeClient:
-    def __init__(self, base_url: str, timeout_s: float) -> None:
+    def __init__(self, base_url: str, timeout_s: float, ipc_settings: Mapping[str, Any]) -> None:
         self.base_url = str(base_url).rstrip("/")
-        self.http = JsonHttpClient(timeout_s)
+        self.http = JsonHttpClient(
+            timeout_s,
+            raw_local_enabled=bool(ipc_settings.get("raw_http_enabled", True)),
+            fallback_urllib=bool(ipc_settings.get("raw_http_fallback_urllib", True)),
+        )
 
     @staticmethod
     def decode_inference(raw: bytes) -> Dict[str, Any]:
@@ -166,9 +239,20 @@ class RuntimeClient:
     def snapshot(self) -> bytes:
         return self.http.request_bytes("GET", self.base_url + "/api/runtime/snapshot.jpg")
 
+    def transport_status(self) -> Dict[str, Any]:
+        status = self.http.status()
+        status["base_url"] = self.base_url
+        return status
+
 
 class CameraBridgeClient:
-    def __init__(self, settings: Mapping[str, Any], timeout_s: float, max_depth_age_ms: int) -> None:
+    def __init__(
+        self,
+        settings: Mapping[str, Any],
+        timeout_s: float,
+        max_depth_age_ms: int,
+        ipc_settings: Mapping[str, Any],
+    ) -> None:
         self.base_url = str(settings.get("base_url") or "http://127.0.0.1:18182").rstrip("/")
         self.health_url = self.base_url + str(settings.get("health_path") or "/health")
         self.depth_url = self.base_url + str(settings.get("depth_path") or "/stream/depth.png")
@@ -176,8 +260,30 @@ class CameraBridgeClient:
         self.sample_deproject_url = self.base_url + str(
             settings.get("sample_deproject_path") or "/api/coordinate/sample_deproject"
         )
-        self.http = JsonHttpClient(timeout_s)
+        self.http = JsonHttpClient(
+            timeout_s,
+            raw_local_enabled=bool(ipc_settings.get("raw_http_enabled", True)),
+            fallback_urllib=bool(ipc_settings.get("raw_http_fallback_urllib", True)),
+        )
         self.max_depth_age_ms = max(0, int(max_depth_age_ms))
+        self.shared_depth_enabled = bool(settings.get("shared_depth_enabled", True)) and str(
+            settings.get("camera_model") or "orbbec336l"
+        ).lower() == "orbbec336l"
+        self.shared_depth_fallback_http = bool(settings.get("shared_depth_fallback_http", True))
+        self.shared_depth = SharedDepthReader(
+            str(settings.get("shared_depth_name") or "/visionops_orbbec336l_depth"),
+            self.max_depth_age_ms,
+        ) if self.shared_depth_enabled else None
+
+    def transport_status(self) -> Dict[str, Any]:
+        status = {
+            "http": self.http.status(),
+            "base_url": self.base_url,
+            "shared_depth_enabled": self.shared_depth is not None,
+            "shared_depth_fallback_http": self.shared_depth_fallback_http,
+            "shared_depth": self.shared_depth.status() if self.shared_depth is not None else None,
+        }
+        return status
 
     def health(self) -> Dict[str, Any]:
         try:
@@ -256,6 +362,34 @@ class CameraBridgeClient:
         preserves the previous box-edge behaviour without transferring a full
         16-bit depth PNG through HTTP for every inference.
         """
+        if self.shared_depth is not None:
+            try:
+                samples, response = self.shared_depth.sample_deproject(
+                    points,
+                    image_width,
+                    image_height,
+                    radius_px,
+                    percentile,
+                    min_valid_pixels,
+                    min_depth_mm,
+                    max_depth_mm,
+                )
+                response["_client_timing"] = {
+                    "roundtrip_ms": float(response.get("sample_ms") or 0.0),
+                    "connect_ms": 0.0,
+                    "send_ms": 0.0,
+                    "headers_wait_ms": 0.0,
+                    "body_read_ms": 0.0,
+                    "json_decode_ms": 0.0,
+                    "response_bytes": 0,
+                    "transport": "posix_shared_memory",
+                }
+                return samples, response
+            except (OSError, ValueError, RuntimeError) as error:
+                self.shared_depth.last_error = str(error)
+                if not self.shared_depth_fallback_http:
+                    raise CameraUnavailableError("shared depth unavailable: {}".format(error)) from error
+
         document = {
             "points": [list(point[:4]) for point in points],
             "image_width": int(image_width),
@@ -275,10 +409,13 @@ class CameraBridgeClient:
             decode_ms = (time.perf_counter() - decode_started) * 1000.0
             response["_client_timing"] = {
                 "roundtrip_ms": timed_response.total_ms,
+                "connect_ms": timed_response.connect_ms,
+                "send_ms": timed_response.send_ms,
                 "headers_wait_ms": timed_response.headers_wait_ms,
                 "body_read_ms": timed_response.body_read_ms,
                 "json_decode_ms": decode_ms,
                 "response_bytes": len(timed_response.body),
+                "transport": timed_response.transport,
             }
         except UpstreamError as error:
             raise CameraUnavailableError("camera depth sample/deproject unavailable: {}".format(error)) from error
@@ -326,8 +463,11 @@ class InferencePacket:
     runtime_result: Optional[Dict[str, Any]] = None
     runtime_lock_wait_ms: float = 0.0
     runtime_http_ms: float = 0.0
+    runtime_connect_ms: float = 0.0
+    runtime_send_ms: float = 0.0
     runtime_headers_wait_ms: float = 0.0
     runtime_body_read_ms: float = 0.0
+    runtime_transport: str = "unknown"
     runtime_json_decode_ms: float = 0.0
     runtime_response_bytes: int = 0
     runtime_server_queue_ms: float = 0.0
@@ -356,6 +496,8 @@ class ServiceState:
         self.last_app_timing = {}  # type: Dict[str, Any]
         self.counters = defaultdict(int)  # type: Dict[str, int]
         self.inference_times = deque(maxlen=100)  # type: deque
+        self.latency_samples = deque(maxlen=100)  # type: deque
+        self.timing_samples = defaultdict(lambda: deque(maxlen=100))
 
     def next_frame_id(self) -> int:
         with self.lock:
@@ -411,6 +553,10 @@ class ServiceState:
             self.last_latency_ms = float(latency_ms)
             self.last_app_timing = dict(app_timing or {})
             self.inference_times.append(time.monotonic())
+            self.latency_samples.append(float(latency_ms))
+            for key, value in (app_timing or {}).items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    self.timing_samples[str(key)].append(float(value))
             self.counters["inference_success"] += 1
 
     def failure(self, decision: Mapping[str, Any], robot_message: Mapping[str, Any], error: Exception, latency_ms: float) -> None:
@@ -419,6 +565,7 @@ class ServiceState:
             self.latest_decision = dict(decision)
             self.latest_robot_message = dict(robot_message)
             self.last_latency_ms = float(latency_ms)
+            self.latency_samples.append(float(latency_ms))
             self.last_error = {"code": type(error).__name__, "message": str(error), "timestamp_ms": _timestamp_ms()}
             self.counters["inference_failure"] += 1
 
@@ -430,9 +577,26 @@ class ServiceState:
         elapsed = times[-1] - times[0]
         return round((len(times) - 1) / elapsed, 3) if elapsed > 0 else 0.0
 
+    @staticmethod
+    def _percentile(values: Sequence[float], percentile: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(float(value) for value in values)
+        index = min(len(ordered) - 1, max(0, int(np.ceil(len(ordered) * percentile) - 1)))
+        return round(ordered[index], 3)
+
     def snapshot(self, websocket: Optional[WebSocketJsonServer] = None) -> Dict[str, Any]:
         ws = self.config["box_grasp"]["websocket"]
         with self.lock:
+            latency_values = list(self.latency_samples)
+            timing_stats = {
+                key: {
+                    "p50": self._percentile(list(values), 0.50),
+                    "p95": self._percentile(list(values), 0.95),
+                }
+                for key, values in self.timing_samples.items()
+                if values
+            }
             return {
                 "schema_version": "1.0",
                 "message_type": "app_status",
@@ -451,7 +615,14 @@ class ServiceState:
                 "detection_fps": self.fps(),
                 "configured_detection_fps": float(ws.get("detection_hz", 5.0)),
                 "last_latency_ms": round(self.last_latency_ms, 3),
+                "latency_ms": {
+                    "latest": round(self.last_latency_ms, 3),
+                    "p50": self._percentile(latency_values, 0.50),
+                    "p95": self._percentile(latency_values, 0.95),
+                    "samples": len(latency_values),
+                },
                 "last_app_timing": deepcopy(self.last_app_timing),
+                "app_timing_stats": timing_stats,
                 "websocket": {
                     "listen_host": ws["listen_host"],
                     "listen_port": ws["listen_port"],
@@ -473,10 +644,16 @@ class BoxGraspVisionService:
         self.config = config
         self.settings = config["box_grasp"]
         timeout_s = float(self.settings["app"]["request_timeout_ms"]) / 1000.0
-        self.runtime = RuntimeClient(str(self.settings["runtime"]["url"]), timeout_s)
+        ipc_settings = self.settings.get("ipc") if isinstance(self.settings.get("ipc"), Mapping) else {}
+        self.runtime = RuntimeClient(str(self.settings["runtime"]["url"]), timeout_s, ipc_settings)
         depth_settings = self.settings["algorithm"]["depth"]
         self.algorithm = BoxGraspAlgorithm(self.settings["algorithm"])
-        self.bridge = CameraBridgeClient(config["camera_bridge"], timeout_s, int(depth_settings.get("max_age_ms", 1500)))
+        self.bridge = CameraBridgeClient(
+            config["camera_bridge"],
+            timeout_s,
+            int(depth_settings.get("max_age_ms", 1500)),
+            ipc_settings,
+        )
         self.inference_settings_path = Path(
             str(self.settings["app"].get(
                 "inference_settings_path",
@@ -582,6 +759,12 @@ class BoxGraspVisionService:
             "detection_fps": self.detection_hz(),
             "continuous_enabled": self.state.continuous_enabled,
             "timestamp_ms": _timestamp_ms(),
+        }
+
+    def ipc_status(self) -> Dict[str, Any]:
+        return {
+            "runtime": self.runtime.transport_status(),
+            "camera_bridge": self.bridge.transport_status(),
         }
 
     def pipeline_status(self) -> Dict[str, Any]:
@@ -812,8 +995,11 @@ class BoxGraspVisionService:
                 response = self.runtime.infer_once_raw()
             packet.runtime_raw = response.body
             packet.runtime_http_ms = response.total_ms
+            packet.runtime_connect_ms = response.connect_ms
+            packet.runtime_send_ms = response.send_ms
             packet.runtime_headers_wait_ms = response.headers_wait_ms
             packet.runtime_body_read_ms = response.body_read_ms
+            packet.runtime_transport = response.transport
             packet.runtime_response_bytes = len(response.body)
             packet.runtime_server_queue_ms = response.header_float("x-visionops-http-queue-ms")
             packet.runtime_server_route_ms = response.header_float("x-visionops-http-route-ms")
@@ -882,18 +1068,21 @@ class BoxGraspVisionService:
                 positions.append(list(sample.get("position_camera") or [0.0, 0.0, 0.0]))
             output.append((depth_info, positions, {
                 "ok": True,
-                "mode": "sample_deproject",
+                "mode": str(response.get("mode") or "sample_deproject"),
                 "depth_age_ms": response.get("depth_age_ms"),
                 "depth_sequence": response.get("depth_sequence"),
             }))
         client_timing = response.get("_client_timing") if isinstance(response.get("_client_timing"), Mapping) else {}
         bridge_debug = {
-            "mode": "sample_deproject",
+            "mode": str(response.get("mode") or "sample_deproject"),
             "depth_age_ms": response.get("depth_age_ms"),
             "depth_sequence": response.get("depth_sequence"),
             "sample_ms": response.get("sample_ms"),
             "point_count": len(flat_points),
             "roundtrip_ms": client_timing.get("roundtrip_ms"),
+            "connect_ms": client_timing.get("connect_ms"),
+            "send_ms": client_timing.get("send_ms"),
+            "transport": client_timing.get("transport"),
             "headers_wait_ms": client_timing.get("headers_wait_ms"),
             "body_read_ms": client_timing.get("body_read_ms"),
             "json_decode_ms": client_timing.get("json_decode_ms"),
@@ -937,6 +1126,9 @@ class BoxGraspVisionService:
             "runtime_http_ms": round(packet.runtime_http_ms, 3),
             "runtime_roundtrip_ms": round(packet.runtime_http_ms, 3),
             "runtime_lock_wait_ms": round(packet.runtime_lock_wait_ms, 3),
+            "runtime_connect_ms": round(packet.runtime_connect_ms, 3),
+            "runtime_send_ms": round(packet.runtime_send_ms, 3),
+            "runtime_transport": packet.runtime_transport,
             "runtime_headers_wait_ms": round(packet.runtime_headers_wait_ms, 3),
             "runtime_body_read_ms": round(packet.runtime_body_read_ms, 3),
             "runtime_response_bytes": int(packet.runtime_response_bytes),
@@ -978,6 +1170,9 @@ class BoxGraspVisionService:
             timing["depth_sample_deproject_ms"] = round((time.perf_counter() - depth_started) * 1000.0, 3)
             if isinstance(bridge_debug, Mapping):
                 timing["depth_bridge_internal_ms"] = round(float(bridge_debug.get("sample_ms") or 0.0), 3)
+                timing["depth_transport"] = str(bridge_debug.get("transport") or bridge_debug.get("mode") or "unknown")
+                timing["depth_connect_ms"] = round(float(bridge_debug.get("connect_ms") or 0.0), 3)
+                timing["depth_send_ms"] = round(float(bridge_debug.get("send_ms") or 0.0), 3)
                 timing["depth_http_roundtrip_ms"] = round(float(bridge_debug.get("roundtrip_ms") or 0.0), 3)
                 timing["depth_http_headers_wait_ms"] = round(float(bridge_debug.get("headers_wait_ms") or 0.0), 3)
                 timing["depth_http_body_read_ms"] = round(float(bridge_debug.get("body_read_ms") or 0.0), 3)
@@ -1329,6 +1524,7 @@ class StatusHandler(BaseHTTPRequestHandler):
         elif path in {"/api/app/status", "/api/gateway/status", "/api/ws/status"}:
             snapshot["external_status"] = self.service._status_message()
             snapshot["pipeline"] = self.service.pipeline_status()
+            snapshot["ipc"] = self.service.ipc_status()
             self._send(200, snapshot)
         elif path == "/api/ws/clients":
             self._send(200, {"status": "ok", "clients": self.service.websocket.client_snapshot()})

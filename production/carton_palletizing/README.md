@@ -239,3 +239,53 @@ segmentation 大输出带来的动态分配、复制和时延抖动。
 兼容策略：共享内存异常时可回退 `/stream/snapshot.jpg`；旧 RKNN driver 不支持预分配
 float 输出时自动回退动态 `rknn_outputs_get/release`。详细验证方式见
 `tasks/box_grasp_vision/README.md`。
+
+### Box grasp 优化6：本地 Raw HTTP 与深度共享内存
+
+`box_grasp_vision` 对 localhost Runtime/Bridge 请求默认使用轻量 socket HTTP client，
+直接按 `Content-Length` 读取响应，失败时自动回退 urllib。App 状态会分别记录
+`runtime_connect_ms`、`runtime_send_ms`、`runtime_headers_wait_ms`、
+`runtime_body_read_ms` 和 `runtime_transport`。
+
+```yaml
+box_grasp:
+  ipc:
+    raw_http_enabled: true
+    raw_http_fallback_urllib: true
+```
+
+Orbbec 场景下，深度路径优先使用 `/visionops_orbbec336l_depth` POSIX 共享内存。
+App 在双缓冲活动帧上直接采样 7 个 ROI，并用 Header 中的有效内参进行针孔反投影；
+共享内存失效、过期或校准未就绪时自动回退 Bridge 的
+`/api/coordinate/sample_deproject`。HP60C 不启用此路径。
+
+```yaml
+camera_bridge:
+  shared_depth_enabled: true
+  shared_depth_name: /visionops_orbbec336l_depth
+  shared_depth_fallback_http: true
+```
+
+`GET /api/app/status` 新增最近 100 个结果的 `latency_ms.p50/p95` 和
+`app_timing_stats.<field>.p50/p95`，避免仅凭单帧抖动判断优化效果。
+
+可观测性检查：
+
+```bash
+curl -s http://127.0.0.1:19211/api/app/status | jq '{
+  latency_ms,
+  app_timing_stats,
+  ipc,
+  last_app_timing
+}'
+```
+
+正常生产路径中，`ipc.runtime.last_transport=raw_socket`，有目标时
+`last_app_timing.depth_transport=posix_shared_memory`。`ipc.camera_bridge.shared_depth`
+同时给出 mmap 状态、重试计数和最近错误；若回退到 HTTP，可以从
+`ipc.camera_bridge.http.last_transport` 和 `last_raw_error` 继续定位。
+
+共享深度路径使用有效内参的针孔公式做本地反投影，目的是删除逐帧 HTTP 往返。首次
+真机部署必须抽取画面中心和四周若干点，与 Bridge SDK
+`/api/coordinate/sample_deproject` 的结果进行误差对比；如果镜头畸变或边缘误差不满足
+机器人精度要求，可暂时设置 `shared_depth_enabled: false` 回退 SDK 反投影。

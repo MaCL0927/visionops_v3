@@ -455,3 +455,21 @@ This transport only replaces the internal Bridge→Runtime frame path. Existing 
 JSON response schemas remain unchanged. `GET /api/runtime/status` reports
 `frame_source.transport=posix_shared_memory`; inference results report `timing.decode_ms=0` when the
 raw path is active. If configured, Runtime may fall back to the existing HTTP JPEG snapshot path.
+
+## Runtime HTTP Server 状态
+
+`GET /api/runtime/status` 可以包含 `http_server` 对象，用于确认线程池是否生效：
+
+```json
+{
+  "http_server": {
+    "worker_count": 4,
+    "queue_capacity": 64,
+    "queue_size": 0,
+    "active_workers": 1,
+    "accepted_clients": 123,
+    "rejected_clients": 0,
+    "handled_clients": 122
+  }
+}
+```

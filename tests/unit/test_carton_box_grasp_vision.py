@@ -218,6 +218,14 @@ def test_service_builds_collector_visualization_and_robot_message(monkeypatch):
     assert decision["app_timing"]["runtime_server_route_ms"] == 5.0
     assert decision["app_timing"]["runtime_json_decode_ms"] >= 0
     assert decision["visualization_result"]["box_grasp"]["app_timing"] == decision["app_timing"]
+    status = service.state.snapshot(service.websocket)
+    assert status["latency_ms"]["samples"] == 1
+    assert status["latency_ms"]["p50"] == status["latency_ms"]["p95"]
+    assert "runtime_http_ms" in status["app_timing_stats"]
+    assert status["app_timing_stats"]["runtime_http_ms"]["p50"] >= 0.0
+    ipc = service.ipc_status()
+    assert ipc["runtime"]["raw_local_enabled"] is True
+    assert ipc["camera_bridge"]["shared_depth_enabled"] is True
     assert len(captured["points"]) == 7
     assert all(len(point) == 4 for point in captured["points"])
     # The first pair samples inward from the corner but deprojects the original corner.

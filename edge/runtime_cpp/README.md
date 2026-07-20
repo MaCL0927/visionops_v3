@@ -538,3 +538,34 @@ output_buffers_preallocated=true
 如果第二项为 `false`，说明当前板端 RKNN SDK/driver 不接受该预分配模式，程序已经走
 兼容回退。此优化尚未使用 `rknn_set_io_mem`/DMA 零拷贝；那属于后续更高风险、需要
 按具体 RKNN SDK 版本验证的阶段。
+
+## HTTP 线程池可观测性
+
+Runtime 启动日志使用无缓冲的 stderr，并打印实际 worker/queue 配置。Linux worker
+线程名为 `vo-http-0`、`vo-http-1` 等。`GET /api/runtime/status` 的 `http_server`
+字段包含：
+
+```text
+worker_count
+queue_capacity
+queue_size
+active_workers
+accepted_clients
+rejected_clients
+handled_clients
+```
+
+示例：
+
+```bash
+curl -s http://127.0.0.1:28085/api/runtime/status | jq '.http_server'
+PID=$(systemctl show visionops-v3-carton-box-grasp-runtime.service -p MainPID --value)
+ps -T -p "$PID" -o pid,tid,stat,comm,wchan:32
+```
+
+启动日志使用 `stderr + std::endl` 强制刷新，因此 systemd 下可直接确认实际配置：
+
+```bash
+journalctl -u visionops-v3-carton-box-grasp-runtime.service -b --no-pager |
+  grep -E 'http_workers|http_queue'
+```
