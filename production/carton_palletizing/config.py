@@ -33,6 +33,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "health_path": "/health",
         "mjpeg_path": "/stream.mjpeg",
         "deproject_path": "/api/coordinate/deproject",
+        "sample_deproject_path": "/api/coordinate/sample_deproject",
         "max_depth_age_ms": 1500,
     },
     "runtime_recovery": {
@@ -185,6 +186,11 @@ DEFAULT_CONFIG["box_grasp"] = {
         "request_timeout_ms": 5000,
         "inference_settings_path": "/opt/visionops_v3/config/box_grasp_inference_settings.json",
     },
+    "pipeline": {
+        "enabled": True,
+        "result_queue_size": 1,
+        "max_result_age_ms": 500,
+    },
     "collector": {
         "listen_host": "0.0.0.0",
         "listen_port": 18095,
@@ -233,6 +239,7 @@ DEFAULT_CONFIG["box_grasp"] = {
         },
         "depth": {
             "enabled": True,
+            "use_sample_deproject": True,
             "roi_radius_px": 4,
             "percentile": 50.0,
             "min_valid_pixels": 3,
@@ -433,6 +440,17 @@ def _validate_box_grasp(config: Dict[str, Any]) -> None:
         app.get("inference_settings_path", "/opt/visionops_v3/config/box_grasp_inference_settings.json")
     )
 
+    pipeline = profile.get("pipeline")
+    if not isinstance(pipeline, dict):
+        raise ValueError("box_grasp.pipeline 必须是对象")
+    pipeline["enabled"] = bool(pipeline.get("enabled", True))
+    pipeline["result_queue_size"] = int(pipeline.get("result_queue_size", 1))
+    pipeline["max_result_age_ms"] = int(pipeline.get("max_result_age_ms", 500))
+    if not 1 <= pipeline["result_queue_size"] <= 4:
+        raise ValueError("box_grasp.pipeline.result_queue_size 必须位于1..4")
+    if pipeline["max_result_age_ms"] <= 0:
+        raise ValueError("box_grasp.pipeline.max_result_age_ms 必须大于0")
+
     collector = profile["collector"]
     collector["listen_port"] = _port(collector["listen_port"], "box_grasp.collector.listen_port")
     collector["models_root"] = _path(collector["models_root"])
@@ -502,6 +520,7 @@ def _validate_box_grasp(config: Dict[str, Any]) -> None:
 
     depth = algorithm["depth"]
     depth["enabled"] = bool(depth.get("enabled", True))
+    depth["use_sample_deproject"] = bool(depth.get("use_sample_deproject", True))
     for key, default in (("roi_radius_px", 4), ("min_valid_pixels", 3), ("min_depth_mm", 100), ("max_depth_mm", 5000), ("max_age_ms", 1500)):
         depth[key] = int(depth.get(key, default))
     depth["percentile"] = float(depth.get("percentile", 50.0))
@@ -533,7 +552,7 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
 
     apply_active_camera_to_config(config)
     config["camera_bridge"]["base_url"] = _url(config["camera_bridge"]["base_url"], "camera_bridge.base_url")
-    for key, default in (("snapshot_path", "/stream/snapshot.jpg"), ("depth_path", "/stream/depth.png"), ("health_path", "/health"), ("mjpeg_path", "/stream.mjpeg"), ("deproject_path", "/api/coordinate/deproject")):
+    for key, default in (("snapshot_path", "/stream/snapshot.jpg"), ("depth_path", "/stream/depth.png"), ("health_path", "/health"), ("mjpeg_path", "/stream.mjpeg"), ("deproject_path", "/api/coordinate/deproject"), ("sample_deproject_path", "/api/coordinate/sample_deproject")):
         value = str(config["camera_bridge"].get(key) or default).strip()
         config["camera_bridge"][key] = value if value.startswith("/") else "/" + value
     config["camera_bridge"]["max_depth_age_ms"] = int(config["camera_bridge"].get("max_depth_age_ms", 1500))

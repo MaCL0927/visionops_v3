@@ -107,16 +107,34 @@ def test_service_builds_collector_visualization_and_robot_message(monkeypatch):
     service = BoxGraspVisionService(config)
     polygon = [[235, 221], [426, 214], [457, 329], [222, 336]]
     payload = runtime_result(polygon)
-    depth = np.full((480, 640), 930, dtype=np.uint16)
-
-    monkeypatch.setattr(service.bridge, "require_ready", lambda need_depth: {"camera_connected": True})
     monkeypatch.setattr(service.runtime, "infer_once", lambda: payload)
-    monkeypatch.setattr(service.bridge, "depth", lambda health: (depth, b"depth", health))
+    captured = {}
+
+    def sample_deproject(points, *args):
+        captured["points"] = points
+        captured["args"] = args
+        return (
+            [
+                {
+                    "depth_valid": True,
+                    "depth_mm": 930,
+                    "sample_px": [int(round(point[0])), int(round(point[1]))],
+                    "valid_pixels": 81,
+                    "position_camera": [float(index), float(index + 1), 930.0],
+                    "project_valid": True,
+                }
+                for index, point in enumerate(points)
+            ],
+            {"ok": True, "depth_age_ms": 12, "depth_sequence": 8, "sample_ms": 0.3},
+        )
+
     monkeypatch.setattr(
         service.bridge,
-        "deproject",
-        lambda points: ([[float(index), float(index + 1), float(point[2])] for index, point in enumerate(points)], {"ok": True}),
+        "sample_deproject",
+        sample_deproject,
     )
+    monkeypatch.setattr(service.bridge, "depth", lambda *_args: (_ for _ in ()).throw(AssertionError("legacy depth PNG must not be used")))
+    monkeypatch.setattr(service.bridge, "deproject", lambda *_args: (_ for _ in ()).throw(AssertionError("legacy deproject must not be used")))
     monkeypatch.setattr(service, "_save_debug_async", lambda document, depth_bytes: None)
 
     decision = service.evaluate_once("request-1")
@@ -150,6 +168,26 @@ def test_service_builds_collector_visualization_and_robot_message(monkeypatch):
     visual_item = decision["visualization_result"]["box_grasp"]["items"][0]
     assert visual_item["grasp_points_px"]["left_mid"]
     assert visual_item["contour_px"]
+    assert decision["app_timing"]["depth_sample_deproject_ms"] >= 0
+    assert decision["visualization_result"]["box_grasp"]["app_timing"] == decision["app_timing"]
+    assert len(captured["points"]) == 7
+    assert all(len(point) == 4 for point in captured["points"])
+    # The first pair samples inward from the corner but deprojects the original corner.
+    assert captured["points"][0][0:2] != captured["points"][0][2:4]
+
+
+def test_box_grasp_pipeline_defaults_to_latest_result_queue():
+    from production.carton_palletizing.tasks.box_grasp_vision.service import BoxGraspVisionService
+
+    config = load_config()
+    service = BoxGraspVisionService(config)
+    status = service.pipeline_status()
+
+    assert status["enabled"] is True
+    assert status["result_queue_capacity"] == 1
+    assert status["max_result_age_ms"] == 500
+    assert config["camera_bridge"]["sample_deproject_path"] == "/api/coordinate/sample_deproject"
+    assert config["box_grasp"]["algorithm"]["depth"]["use_sample_deproject"] is True
 
 
 def test_background_inference_fps_can_be_updated_and_persisted(tmp_path):

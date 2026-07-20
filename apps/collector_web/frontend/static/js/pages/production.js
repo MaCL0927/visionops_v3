@@ -88,7 +88,12 @@ function updateLiveSummary(result, elapsedMs = null) {
   updateState({ latestResult: result });
   const task = result?.task_type || "--";
   const count = countResults(result);
-  const total = result?.timing?.total_ms ?? result?.timing_detail?.total_ms;
+  // Business-app production tasks may add CPU geometry/depth work after the
+  // Runtime result. Prefer the complete App latency when available instead of
+  // showing only the RKNN Runtime's internal timing.
+  const total = result?.box_grasp?.app_timing?.total_ms
+    ?? result?.timing?.total_ms
+    ?? result?.timing_detail?.total_ms;
   currentModel.textContent = modelDisplay(result);
   resultBrief.textContent = placementSummary(result) || `${task} / ${count} 个结果`;
   timingTotal.textContent = formatMs(total);

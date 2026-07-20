@@ -26,6 +26,21 @@ def test_bridge_source_contains_freshness_reconnect_state_machine() -> None:
         assert token in source
 
 
+def test_bridge_contains_in_memory_depth_sample_deproject_endpoint() -> None:
+    source = (
+        PROJECT_ROOT
+        / "edge/camera_bridge/orbbec336l_bridge/visionops_orbbec336l_bridge.cpp"
+    ).read_text(encoding="utf-8")
+    for token in (
+        "/api/coordinate/sample_deproject",
+        "sample_deproject_json",
+        "depth = latest_depth_mm_",
+        "sample_deproject_ms_average",
+        "max_depth_age_ms",
+    ):
+        assert token in source
+
+
 def test_bridge_watchdog_units_and_script_are_installed_by_profile() -> None:
     installer = (
         PROJECT_ROOT / "production/carton_line/deploy/install_services.sh"

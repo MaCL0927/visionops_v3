@@ -8,6 +8,8 @@
 //   GET  /stream/depth_meta
 //   GET  /stream/camera_info
 //   POST /api/coordinate/deproject  {"points":[[u,v,depth_mm], ...]}
+//   POST /api/coordinate/sample_deproject
+//        {"points":[[sample_u,sample_v,project_u,project_v], ...], ...}
 //   GET  /stream/profiles     SDK-supported color/depth profiles
 //   GET  /stream.mjpeg, /stream/mjpeg, /stream.mjpg
 //   POST /stream/start, /stream/stop  compatibility no-op endpoints
@@ -16,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <cerrno>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <condition_variable>
@@ -811,6 +814,158 @@ private:
         float depth_mm = 0.0f;
     };
 
+    struct SampleDeprojectInput {
+        float sample_u = 0.0f;
+        float sample_v = 0.0f;
+        float project_u = 0.0f;
+        float project_v = 0.0f;
+    };
+
+    struct SampleDeprojectRequest {
+        std::vector<SampleDeprojectInput> points;
+        int image_width = 0;
+        int image_height = 0;
+        int radius_px = 4;
+        double percentile = 50.0;
+        int min_valid_pixels = 3;
+        int min_depth_mm = 100;
+        int max_depth_mm = 5000;
+        int max_depth_age_ms = 1500;
+    };
+
+    static bool json_number_field(
+        const std::string &body,
+        const std::string &name,
+        double &value) {
+        const auto key = body.find('"' + name + '"');
+        if (key == std::string::npos) return false;
+        const auto colon = body.find(':', key + name.size() + 2);
+        if (colon == std::string::npos) return false;
+        const char *cursor = body.c_str() + colon + 1;
+        const char *limit = body.c_str() + body.size();
+        while (cursor < limit && std::isspace(static_cast<unsigned char>(*cursor))) ++cursor;
+        char *next = nullptr;
+        errno = 0;
+        const double parsed = std::strtod(cursor, &next);
+        if (next == cursor || errno == ERANGE || !std::isfinite(parsed)) return false;
+        value = parsed;
+        return true;
+    }
+
+    static bool parse_number_array(
+        const std::string &body,
+        const std::string &name,
+        std::vector<double> &values,
+        std::string &error) {
+        const auto key = body.find('"' + name + '"');
+        if (key == std::string::npos) {
+            error = "missing " + name;
+            return false;
+        }
+        const auto begin = body.find('[', key);
+        if (begin == std::string::npos) {
+            error = name + " must be array";
+            return false;
+        }
+        int nesting = 0;
+        size_t end = std::string::npos;
+        for (size_t i = begin; i < body.size(); ++i) {
+            if (body[i] == '[') ++nesting;
+            else if (body[i] == ']') {
+                --nesting;
+                if (nesting == 0) {
+                    end = i;
+                    break;
+                }
+            }
+        }
+        if (end == std::string::npos) {
+            error = "unterminated " + name + " array";
+            return false;
+        }
+        const char *cursor = body.c_str() + begin + 1;
+        const char *limit = body.c_str() + end;
+        while (cursor < limit) {
+            while (cursor < limit &&
+                   !((*cursor >= '0' && *cursor <= '9') || *cursor == '-' ||
+                     *cursor == '+' || *cursor == '.')) {
+                ++cursor;
+            }
+            if (cursor >= limit) break;
+            char *next = nullptr;
+            errno = 0;
+            const double parsed = std::strtod(cursor, &next);
+            if (next == cursor || errno == ERANGE || !std::isfinite(parsed)) {
+                error = "invalid number in " + name;
+                return false;
+            }
+            values.push_back(parsed);
+            cursor = next;
+        }
+        return true;
+    }
+
+    static bool parse_sample_deproject_request(
+        const std::string &body,
+        SampleDeprojectRequest &request,
+        std::string &error) {
+        std::vector<double> values;
+        if (!parse_number_array(body, "points", values, error)) return false;
+        if (values.empty() || values.size() % 4 != 0) {
+            error = "each point must contain sample_u,sample_v,project_u,project_v";
+            return false;
+        }
+        if (values.size() / 4 > 512) {
+            error = "too many points";
+            return false;
+        }
+        for (size_t i = 0; i < values.size(); i += 4) {
+            request.points.push_back(SampleDeprojectInput{
+                static_cast<float>(values[i]),
+                static_cast<float>(values[i + 1]),
+                static_cast<float>(values[i + 2]),
+                static_cast<float>(values[i + 3]),
+            });
+        }
+
+        double number = 0.0;
+        if (!json_number_field(body, "image_width", number)) {
+            error = "missing image_width";
+            return false;
+        }
+        request.image_width = static_cast<int>(std::lround(number));
+        if (!json_number_field(body, "image_height", number)) {
+            error = "missing image_height";
+            return false;
+        }
+        request.image_height = static_cast<int>(std::lround(number));
+        if (json_number_field(body, "radius_px", number)) request.radius_px = static_cast<int>(std::lround(number));
+        if (json_number_field(body, "percentile", number)) request.percentile = number;
+        if (json_number_field(body, "min_valid_pixels", number)) request.min_valid_pixels = static_cast<int>(std::lround(number));
+        if (json_number_field(body, "min_depth_mm", number)) request.min_depth_mm = static_cast<int>(std::lround(number));
+        if (json_number_field(body, "max_depth_mm", number)) request.max_depth_mm = static_cast<int>(std::lround(number));
+        if (json_number_field(body, "max_depth_age_ms", number)) request.max_depth_age_ms = static_cast<int>(std::lround(number));
+
+        if (request.image_width <= 0 || request.image_height <= 0) {
+            error = "image_width/image_height must be positive";
+            return false;
+        }
+        if (request.radius_px < 0 || request.radius_px > 64) {
+            error = "radius_px must be in 0..64";
+            return false;
+        }
+        if (request.percentile < 0.0 || request.percentile > 100.0) {
+            error = "percentile must be in 0..100";
+            return false;
+        }
+        if (request.min_valid_pixels <= 0 || request.min_depth_mm < 0 ||
+            request.max_depth_mm <= request.min_depth_mm || request.max_depth_age_ms <= 0) {
+            error = "invalid depth sampling limits";
+            return false;
+        }
+        return true;
+    }
+
     static bool parse_deproject_points(const std::string &body, std::vector<DeprojectInput> &points, std::string &error) {
         const auto key = body.find("\"points\"");
         if (key == std::string::npos) {
@@ -972,6 +1127,181 @@ private:
         }
     }
 
+    static int map_pixel(float value, int source_size, int target_size) {
+        if (target_size <= 1) return 0;
+        if (source_size <= 1) {
+            return std::max(0, std::min(target_size - 1, static_cast<int>(std::lround(value))));
+        }
+        const double mapped = static_cast<double>(value) *
+            static_cast<double>(target_size - 1) / static_cast<double>(source_size - 1);
+        return std::max(0, std::min(target_size - 1, static_cast<int>(std::lround(mapped))));
+    }
+
+    static float map_coordinate(float value, int source_size, int target_size) {
+        if (target_size <= 1) return 0.0f;
+        if (source_size <= 1) {
+            return static_cast<float>(std::max(0, std::min(target_size - 1, static_cast<int>(std::lround(value)))));
+        }
+        const double mapped = static_cast<double>(value) *
+            static_cast<double>(target_size - 1) / static_cast<double>(source_size - 1);
+        return static_cast<float>(std::max(0.0, std::min(static_cast<double>(target_size - 1), mapped)));
+    }
+
+    static int percentile_depth(std::vector<uint16_t> values, double percentile) {
+        if (values.empty()) return 0;
+        std::sort(values.begin(), values.end());
+        if (values.size() == 1) return static_cast<int>(values.front());
+        const double position = (percentile / 100.0) * static_cast<double>(values.size() - 1);
+        const size_t lower = static_cast<size_t>(std::floor(position));
+        const size_t upper = static_cast<size_t>(std::ceil(position));
+        const double fraction = position - static_cast<double>(lower);
+        const double interpolated =
+            static_cast<double>(values[lower]) * (1.0 - fraction) +
+            static_cast<double>(values[upper]) * fraction;
+        return static_cast<int>(std::lround(interpolated));
+    }
+
+    std::string sample_deproject_json(const std::string &body, int &status_code) {
+        const auto request_started = std::chrono::steady_clock::now();
+        SampleDeprojectRequest request;
+        std::string parse_error;
+        if (!parse_sample_deproject_request(body, request, parse_error)) {
+            status_code = 400;
+            return std::string("{\"ok\":false,\"error\":\"") + json_escape(parse_error) + "\"}";
+        }
+
+        cv::Mat depth;
+        OBCalibrationParam calibration_param{};
+        bool calibration_ready = false;
+        bool camera_connected = false;
+        int color_width = 0;
+        int color_height = 0;
+        int64_t depth_age_ms = -1;
+        uint64_t depth_sequence = 0;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            const int64_t current = now_ms();
+            camera_connected = camera_connected_locked(current);
+            calibration_param = calibration_param_;
+            calibration_ready = calibration_ready_;
+            color_width = color_w_ > 0 ? color_w_ : color_width_;
+            color_height = color_h_ > 0 ? color_h_ : color_height_;
+            depth_age_ms = last_depth_ms_ > 0 ? current - last_depth_ms_ : -1;
+            depth_sequence = depth_frame_count_;
+            if (camera_connected && calibration_ready && !latest_depth_mm_.empty() &&
+                depth_age_ms >= 0 && depth_age_ms <= request.max_depth_age_ms) {
+                // cv::Mat header copy is reference-counted.  The acquisition
+                // thread publishes a new Mat instead of mutating this buffer, so
+                // the old depth data remains valid without a 640x480 clone.
+                depth = latest_depth_mm_;
+            }
+        }
+        if (!camera_connected) {
+            status_code = 503;
+            return "{\"ok\":false,\"error\":\"camera frame stale or reconnecting\"}";
+        }
+        if (!calibration_ready || depth.empty()) {
+            status_code = 503;
+            return "{\"ok\":false,\"error\":\"fresh aligned depth/calibration unavailable\"}";
+        }
+        if (depth_age_ms < 0 || depth_age_ms > request.max_depth_age_ms) {
+            status_code = 503;
+            return std::string("{\"ok\":false,\"error\":\"depth frame stale: ") +
+                std::to_string(depth_age_ms) + "ms\"}";
+        }
+
+        try {
+            std::ostringstream os;
+            os << "{\"ok\":true,\"coordinate_frame\":\"color_camera\",\"unit\":\"mm\""
+               << ",\"depth_age_ms\":" << depth_age_ms
+               << ",\"depth_sequence\":" << depth_sequence
+               << ",\"depth_width\":" << depth.cols
+               << ",\"depth_height\":" << depth.rows
+               << ",\"points\":[";
+
+            for (size_t index = 0; index < request.points.size(); ++index) {
+                if (index) os << ',';
+                const auto &input = request.points[index];
+                const int sample_x = map_pixel(input.sample_u, request.image_width, depth.cols);
+                const int sample_y = map_pixel(input.sample_v, request.image_height, depth.rows);
+                const int x1 = std::max(0, sample_x - request.radius_px);
+                const int x2 = std::min(depth.cols - 1, sample_x + request.radius_px);
+                const int y1 = std::max(0, sample_y - request.radius_px);
+                const int y2 = std::min(depth.rows - 1, sample_y + request.radius_px);
+
+                std::vector<uint16_t> valid_depths;
+                valid_depths.reserve(static_cast<size_t>((x2 - x1 + 1) * (y2 - y1 + 1)));
+                for (int y = y1; y <= y2; ++y) {
+                    const auto *row = depth.ptr<uint16_t>(y);
+                    for (int x = x1; x <= x2; ++x) {
+                        const uint16_t value = row[x];
+                        if (value >= request.min_depth_mm && value <= request.max_depth_mm) {
+                            valid_depths.push_back(value);
+                        }
+                    }
+                }
+
+                const int valid_pixel_count = static_cast<int>(valid_depths.size());
+                const bool depth_valid = valid_pixel_count >= request.min_valid_pixels;
+                const int depth_mm = depth_valid
+                    ? percentile_depth(std::move(valid_depths), request.percentile)
+                    : 0;
+
+                float project_u = map_coordinate(input.project_u, request.image_width, color_width);
+                float project_v = map_coordinate(input.project_v, request.image_height, color_height);
+                if (flip_horizontal_ && color_width > 0) {
+                    project_u = static_cast<float>(color_width - 1) - project_u;
+                }
+                if (flip_vertical_ && color_height > 0) {
+                    project_v = static_cast<float>(color_height - 1) - project_v;
+                }
+
+                OBPoint3f point3d{};
+                bool project_valid = false;
+                if (depth_valid && project_u >= 0.0f && project_v >= 0.0f &&
+                    project_u < color_width && project_v < color_height) {
+                    OBPoint2f pixel{project_u, project_v};
+                    project_valid = ob::CoordinateTransformHelper::calibration2dTo3d(
+                        calibration_param,
+                        pixel,
+                        static_cast<float>(depth_mm),
+                        OB_SENSOR_COLOR,
+                        OB_SENSOR_COLOR,
+                        &point3d);
+                    project_valid = project_valid && std::isfinite(point3d.x) &&
+                        std::isfinite(point3d.y) && std::isfinite(point3d.z);
+                }
+
+                os << "{\"valid\":" << (project_valid ? "true" : "false")
+                   << ",\"depth_valid\":" << (depth_valid ? "true" : "false")
+                   << ",\"depth_mm\":" << depth_mm
+                   << ",\"sample_px\":[" << sample_x << ',' << sample_y << ']'
+                   << ",\"valid_pixels\":" << valid_pixel_count
+                   << ",\"position_camera\":[";
+                if (project_valid) {
+                    os << point3d.x << ',' << point3d.y << ',' << point3d.z;
+                } else {
+                    os << "0,0,0";
+                }
+                os << "]}";
+            }
+            const double elapsed_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - request_started).count();
+            os << "],\"sample_ms\":" << std::fixed << std::setprecision(3) << elapsed_ms << '}';
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                ++sample_deproject_count_;
+                sample_deproject_last_ms_ = elapsed_ms;
+                sample_deproject_total_ms_ += elapsed_ms;
+            }
+            status_code = 200;
+            return os.str();
+        } catch (const std::exception &e) {
+            status_code = 500;
+            return std::string("{\"ok\":false,\"error\":\"") + json_escape(e.what()) + "\"}";
+        }
+    }
+
     bool read_http_request(int fd, std::string &method, std::string &path, std::string &body) {
         std::string request;
         char buffer[4096];
@@ -1097,6 +1427,10 @@ private:
            << "\"mjpeg_fps_measured\":" << std::fixed << std::setprecision(3) << measured_mjpeg_fps_ << ","
            << "\"jpeg_encode_ms_latest\":" << std::fixed << std::setprecision(3) << jpeg_encode_ms_latest_ << ","
            << "\"jpeg_encode_ms_average\":" << std::fixed << std::setprecision(3) << jpeg_encode_ms_average_ << ","
+           << "\"sample_deproject_count\":" << sample_deproject_count_ << ","
+           << "\"sample_deproject_ms_latest\":" << std::fixed << std::setprecision(3) << sample_deproject_last_ms_ << ","
+           << "\"sample_deproject_ms_average\":" << std::fixed << std::setprecision(3)
+           << (sample_deproject_count_ > 0 ? sample_deproject_total_ms_ / static_cast<double>(sample_deproject_count_) : 0.0) << ","
            << "\"jpeg_thread_alive\":" << (jpeg_thread_alive_ ? "true" : "false") << ","
            << "\"last_jpeg_age_ms\":" << jpeg_age_ms << ","
            << "\"color_width\":" << color_w_ << ","
@@ -1395,6 +1729,10 @@ private:
             int code = 200;
             auto response = deproject_json(body, code);
             send_text(fd, code, "application/json", response);
+        } else if (method == "POST" && path == "/api/coordinate/sample_deproject") {
+            int code = 200;
+            auto response = sample_deproject_json(body, code);
+            send_text(fd, code, "application/json", response);
         } else if (path == "/stream/profiles" || path == "/profiles") {
             send_text(fd, 200, "application/json", profiles_json());
         } else if (path == "/stream.mjpeg" || path == "/stream/mjpeg" || path == "/stream.mjpg") {
@@ -1464,6 +1802,9 @@ private:
     double measured_mjpeg_fps_ = 0.0;
     double jpeg_encode_ms_latest_ = 0.0;
     double jpeg_encode_ms_average_ = 0.0;
+    uint64_t sample_deproject_count_ = 0;
+    double sample_deproject_last_ms_ = 0.0;
+    double sample_deproject_total_ms_ = 0.0;
     CameraState camera_state_ = CameraState::Starting;
     int64_t state_since_ms_ = 0;
     int64_t state_since_epoch_ms_ = 0;

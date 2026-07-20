@@ -214,3 +214,9 @@ python3 -m pytest tests/unit tests/integration
 - 压缩包及一次性调试文件。
 
 实际设备配置放在 `/etc/visionops_v3/`，仓库只保留 `*.env.example` 和可审查的 YAML 模板。
+
+### Box Grasp FPS 优化
+
+`box_grasp_vision` 已采用 Runtime 推理与 CPU 几何/深度处理双线程流水线，并通过
+Orbbec Bridge 的 `/api/coordinate/sample_deproject` 在内存中完成 7 点深度采样与
+反投影，避免逐帧传输和解码整幅 Depth PNG。诊断字段见任务 README。

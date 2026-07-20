@@ -125,6 +125,9 @@ class CameraBridgeClient:
         self.health_url = self.base_url + str(settings.get("health_path") or "/health")
         self.depth_url = self.base_url + str(settings.get("depth_path") or "/stream/depth.png")
         self.deproject_url = self.base_url + str(settings.get("deproject_path") or "/api/coordinate/deproject")
+        self.sample_deproject_url = self.base_url + str(
+            settings.get("sample_deproject_path") or "/api/coordinate/sample_deproject"
+        )
         self.http = JsonHttpClient(timeout_s)
         self.max_depth_age_ms = max(0, int(max_depth_age_ms))
 
@@ -186,11 +189,86 @@ class CameraBridgeClient:
                 output.append([0.0, 0.0, 0.0])
         return output, response
 
+    def sample_deproject(
+        self,
+        points: Sequence[Sequence[float]],
+        image_width: int,
+        image_height: int,
+        radius_px: int,
+        percentile: float,
+        min_valid_pixels: int,
+        min_depth_mm: int,
+        max_depth_mm: int,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Sample D2C depth and deproject points in one Bridge request.
+
+        Each point is ``[sample_u, sample_v, project_u, project_v]``.  Depth is
+        sampled around the inward-shifted sample coordinate, while the resulting
+        depth value is projected at the original geometric coordinate.  This
+        preserves the previous box-edge behaviour without transferring a full
+        16-bit depth PNG through HTTP for every inference.
+        """
+        document = {
+            "points": [list(point[:4]) for point in points],
+            "image_width": int(image_width),
+            "image_height": int(image_height),
+            "radius_px": int(radius_px),
+            "percentile": float(percentile),
+            "min_valid_pixels": int(min_valid_pixels),
+            "min_depth_mm": int(min_depth_mm),
+            "max_depth_mm": int(max_depth_mm),
+            "max_depth_age_ms": int(self.max_depth_age_ms),
+        }
+        try:
+            response = self.http.request_json("POST", self.sample_deproject_url, document)
+        except UpstreamError as error:
+            raise CameraUnavailableError("camera depth sample/deproject unavailable: {}".format(error)) from error
+        if response.get("ok") is not True:
+            raise CameraUnavailableError(
+                "camera depth sample/deproject failed: {}".format(response.get("error") or "unknown")
+            )
+        raw_points = response.get("points")
+        if not isinstance(raw_points, list) or len(raw_points) != len(points):
+            raise UpstreamError("camera depth sample/deproject result count mismatch")
+        output = []  # type: List[Dict[str, Any]]
+        for raw in raw_points:
+            item = raw if isinstance(raw, Mapping) else {}
+            position = item.get("position_camera") if isinstance(item.get("position_camera"), list) else [0, 0, 0]
+            if len(position) < 3:
+                position = [0, 0, 0]
+            try:
+                parsed_position = [float(position[0]), float(position[1]), float(position[2])]
+            except (TypeError, ValueError, OverflowError):
+                parsed_position = [0.0, 0.0, 0.0]
+            output.append({
+                "depth_valid": bool(item.get("depth_valid")),
+                "depth_mm": int(item.get("depth_mm") or 0),
+                "sample_px": list(item.get("sample_px") or [0, 0]),
+                "valid_pixels": int(item.get("valid_pixels") or 0),
+                "position_camera": parsed_position,
+                "project_valid": bool(item.get("valid")),
+            })
+        return output, response
+
 
 @dataclass(frozen=True)
 class TriggerRequest:
     session: WebSocketSession
     request_id: object
+
+
+@dataclass
+class InferencePacket:
+    frame_id: int
+    request_id: object
+    started_at: float
+    started_monotonic: float
+    runtime_result: Optional[Dict[str, Any]] = None
+    runtime_http_ms: float = 0.0
+    runtime_internal_ms: float = 0.0
+    error: Optional[Exception] = None
+    trigger: Optional[TriggerRequest] = None
+    continuous: bool = False
 
 
 class ServiceState:
@@ -200,12 +278,15 @@ class ServiceState:
         self.started_at = time.monotonic()
         self.frame_id = 0
         self.busy = False
+        self.inference_busy = False
+        self.postprocess_busy = False
         self.continuous_enabled = bool(config["box_grasp"]["websocket"].get("auto_start", True))
         self.latest_decision = None  # type: Optional[Dict[str, Any]]
         self.latest_robot_message = None  # type: Optional[Dict[str, Any]]
         self.latest_runtime_result = None  # type: Optional[Dict[str, Any]]
         self.last_error = None  # type: Optional[Dict[str, Any]]
         self.last_latency_ms = 0.0
+        self.last_app_timing = {}  # type: Dict[str, Any]
         self.counters = defaultdict(int)  # type: Dict[str, int]
         self.inference_times = deque(maxlen=100)  # type: deque
 
@@ -223,22 +304,53 @@ class ServiceState:
             self.busy = True
             self.counters["inference_requests"] += 1
 
-    def success(self, decision: Mapping[str, Any], robot_message: Mapping[str, Any], runtime_result: Mapping[str, Any], latency_ms: float) -> None:
+    def begin_inference(self) -> None:
         with self.lock:
-            self.busy = False
-            self.latest_decision = deepcopy(dict(decision))
-            self.latest_robot_message = deepcopy(dict(robot_message))
-            self.latest_runtime_result = deepcopy(dict(runtime_result))
+            self.inference_busy = True
+            self.busy = True
+            self.counters["inference_requests"] += 1
+
+    def end_inference(self) -> None:
+        with self.lock:
+            self.inference_busy = False
+            self.busy = self.postprocess_busy
+
+    def begin_postprocess(self) -> None:
+        with self.lock:
+            self.postprocess_busy = True
+            self.busy = True
+
+    def end_postprocess(self) -> None:
+        with self.lock:
+            self.postprocess_busy = False
+            self.busy = self.inference_busy
+
+    def success(
+        self,
+        decision: Mapping[str, Any],
+        robot_message: Mapping[str, Any],
+        runtime_result: Mapping[str, Any],
+        latency_ms: float,
+        app_timing: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        with self.lock:
+            self.busy = self.inference_busy or self.postprocess_busy
+            # Results are immutable after publication.  Keep references here and
+            # deepcopy only when an HTTP/WebSocket snapshot is requested.
+            self.latest_decision = dict(decision)
+            self.latest_robot_message = dict(robot_message)
+            self.latest_runtime_result = dict(runtime_result)
             self.last_error = None
             self.last_latency_ms = float(latency_ms)
+            self.last_app_timing = dict(app_timing or {})
             self.inference_times.append(time.monotonic())
             self.counters["inference_success"] += 1
 
     def failure(self, decision: Mapping[str, Any], robot_message: Mapping[str, Any], error: Exception, latency_ms: float) -> None:
         with self.lock:
-            self.busy = False
-            self.latest_decision = deepcopy(dict(decision))
-            self.latest_robot_message = deepcopy(dict(robot_message))
+            self.busy = self.inference_busy or self.postprocess_busy
+            self.latest_decision = dict(decision)
+            self.latest_robot_message = dict(robot_message)
             self.last_latency_ms = float(latency_ms)
             self.last_error = {"code": type(error).__name__, "message": str(error), "timestamp_ms": _timestamp_ms()}
             self.counters["inference_failure"] += 1
@@ -266,10 +378,13 @@ class ServiceState:
                 "timestamp_ms": _timestamp_ms(),
                 "uptime_s": round(time.monotonic() - self.started_at, 3),
                 "busy": self.busy,
+                "inference_busy": self.inference_busy,
+                "postprocess_busy": self.postprocess_busy,
                 "continuous_enabled": self.continuous_enabled,
                 "detection_fps": self.fps(),
                 "configured_detection_fps": float(ws.get("detection_hz", 5.0)),
                 "last_latency_ms": round(self.last_latency_ms, 3),
+                "last_app_timing": deepcopy(self.last_app_timing),
                 "websocket": {
                     "listen_host": ws["listen_host"],
                     "listen_port": ws["listen_port"],
@@ -304,13 +419,23 @@ class BoxGraspVisionService:
         self._load_detection_hz_override()
         self.state = ServiceState(config)
         self.execution_lock = threading.Lock()
+        self.runtime_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.wakeup = threading.Event()
         self.detection_hz_lock = threading.Lock()
         self.manual_request_id = 0
         self.trigger_queue = queue.Queue(maxsize=int(self.settings["websocket"].get("trigger_queue_size", 32)))
+        pipeline_settings = self.settings.get("pipeline") if isinstance(self.settings.get("pipeline"), Mapping) else {}
+        self.pipeline_enabled = bool(pipeline_settings.get("enabled", True))
+        self.pipeline_max_result_age_ms = max(1, int(pipeline_settings.get("max_result_age_ms", 500)))
+        self.result_queue = queue.Queue(maxsize=max(1, int(pipeline_settings.get("result_queue_size", 1))))
         self.worker_thread = None  # type: Optional[threading.Thread]
+        self.postprocess_thread = None  # type: Optional[threading.Thread]
         self.status_thread = None  # type: Optional[threading.Thread]
+        self.status_cache_lock = threading.Lock()
+        self.cached_model_name = ""
+        self.cached_camera_connected = False
+        self.cached_upstream_status_at = 0.0
         self.debug_lock = threading.Lock()
         debug = self.settings.get("debug") if isinstance(self.settings.get("debug"), Mapping) else {}
         self.debug_enabled = bool(debug.get("save_every_trigger", False))
@@ -392,11 +517,23 @@ class BoxGraspVisionService:
             "timestamp_ms": _timestamp_ms(),
         }
 
+    def pipeline_status(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.pipeline_enabled,
+            "result_queue_size": self.result_queue.qsize(),
+            "result_queue_capacity": self.result_queue.maxsize,
+            "max_result_age_ms": self.pipeline_max_result_age_ms,
+            "inference_thread_alive": bool(self.worker_thread and self.worker_thread.is_alive()),
+            "postprocess_thread_alive": bool(self.postprocess_thread and self.postprocess_thread.is_alive()),
+        }
+
     def start(self) -> None:
         self.websocket.start()
-        self.worker_thread = threading.Thread(target=self._worker_loop, name="box-grasp-inference", daemon=True)
+        self.worker_thread = threading.Thread(target=self._inference_loop, name="box-grasp-inference", daemon=True)
+        self.postprocess_thread = threading.Thread(target=self._postprocess_loop, name="box-grasp-postprocess", daemon=True)
         self.status_thread = threading.Thread(target=self._status_loop, name="box-grasp-status", daemon=True)
         self.worker_thread.start()
+        self.postprocess_thread.start()
         self.status_thread.start()
 
     def stop(self) -> None:
@@ -405,6 +542,8 @@ class BoxGraspVisionService:
         self.websocket.stop()
         if self.worker_thread is not None:
             self.worker_thread.join(timeout=5.0)
+        if self.postprocess_thread is not None:
+            self.postprocess_thread.join(timeout=5.0)
         if self.status_thread is not None:
             self.status_thread.join(timeout=3.0)
 
@@ -422,7 +561,7 @@ class BoxGraspVisionService:
     def _on_ws_connect(self, session: WebSocketSession) -> None:
         self.state.counters["connections"] += 1
         try:
-            session.send_json(self._status_message())
+            session.send_json(self._status_message(refresh=True))
         except OSError:
             session.close(1006, "initial status send failed")
         self.wakeup.set()
@@ -563,138 +702,364 @@ class BoxGraspVisionService:
         }
         return decision, robot
 
-    def evaluate_once(self, request_id: object = None) -> Dict[str, Any]:
-        frame_id = self.state.next_frame_id()
-        started_at = time.time()
-        started_monotonic = time.monotonic()
-        self.state.begin()
-        with self.execution_lock:
+    @staticmethod
+    def _runtime_internal_ms(runtime_result: Mapping[str, Any]) -> float:
+        timing = runtime_result.get("timing") if isinstance(runtime_result.get("timing"), Mapping) else {}
+        try:
+            return float(timing.get("total_ms") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+    @staticmethod
+    def _point_xy(value: object) -> Tuple[float, float]:
+        if not isinstance(value, (list, tuple)) or len(value) < 2:
+            return 0.0, 0.0
+        try:
+            return float(value[0]), float(value[1])
+        except (TypeError, ValueError, OverflowError):
+            return 0.0, 0.0
+
+    def _run_inference_stage(
+        self,
+        request_id: object = None,
+        trigger: Optional[TriggerRequest] = None,
+        continuous: bool = False,
+    ) -> InferencePacket:
+        packet = InferencePacket(
+            frame_id=self.state.next_frame_id(),
+            request_id=request_id,
+            started_at=time.time(),
+            started_monotonic=time.monotonic(),
+            trigger=trigger,
+            continuous=continuous,
+        )
+        self.state.begin_inference()
+        runtime_started = time.perf_counter()
+        try:
+            # The C++ Runtime owns one RKNN context.  Serialize only the Runtime
+            # call; CPU geometry/depth work for frame N may run in parallel with
+            # NPU inference for frame N+1.
+            with self.runtime_lock:
+                packet.runtime_result = self.runtime.infer_once()
+            packet.runtime_http_ms = (time.perf_counter() - runtime_started) * 1000.0
+            packet.runtime_internal_ms = self._runtime_internal_ms(packet.runtime_result)
+            self._validate_runtime(packet.runtime_result)
+        except Exception as error:
+            packet.runtime_http_ms = (time.perf_counter() - runtime_started) * 1000.0
+            packet.error = error
+        finally:
+            self.state.end_inference()
+        return packet
+
+    def _legacy_depth_for_items(
+        self,
+        items: Sequence[Mapping[str, Any]],
+        image_width: int,
+        image_height: int,
+    ) -> Tuple[List[Tuple[Dict[str, Any], List[List[float]], Dict[str, Any]]], bytes, Dict[str, Any]]:
+        depth, depth_bytes, depth_health = self.bridge.depth(None)
+        output = []
+        for item in items:
+            depth_info = self.algorithm.sample_item_depth(item, depth, image_width, image_height)
+            deproject_input = self.algorithm.build_deproject_input(item, depth_info)
+            positions, deproject_debug = self.bridge.deproject(deproject_input)
+            output.append((depth_info, positions, deproject_debug))
+        return output, depth_bytes, {"health": depth_health, "mode": "depth_png_legacy"}
+
+    def _fast_depth_for_items(
+        self,
+        items: Sequence[Mapping[str, Any]],
+        image_width: int,
+        image_height: int,
+    ) -> Tuple[List[Tuple[Dict[str, Any], List[List[float]], Dict[str, Any]]], bytes, Dict[str, Any]]:
+        flat_points = []  # type: List[List[float]]
+        for item in items:
+            geometry_points = item.get("points") if isinstance(item.get("points"), Mapping) else {}
+            sample_points = item.get("depth_sample_points") if isinstance(item.get("depth_sample_points"), Mapping) else {}
+            for name in self.algorithm.POINT_ORDER:
+                sample_u, sample_v = self._point_xy(sample_points.get(name))
+                project_u, project_v = self._point_xy(geometry_points.get(name))
+                flat_points.append([sample_u, sample_v, project_u, project_v])
+
+        samples, response = self.bridge.sample_deproject(
+            flat_points,
+            image_width,
+            image_height,
+            self.algorithm.depth_radius_px,
+            self.algorithm.depth_percentile,
+            self.algorithm.depth_min_valid_pixels,
+            self.algorithm.min_depth_mm,
+            self.algorithm.max_depth_mm,
+        )
+        output = []  # type: List[Tuple[Dict[str, Any], List[List[float]], Dict[str, Any]]]
+        point_count = len(self.algorithm.POINT_ORDER)
+        for item_index, item in enumerate(items):
+            begin = item_index * point_count
+            subset = samples[begin : begin + point_count]
+            depth_info = {}  # type: Dict[str, Any]
+            positions = []  # type: List[List[float]]
+            for name, sample in zip(self.algorithm.POINT_ORDER, subset):
+                depth_info[name] = {
+                    "depth_valid": bool(sample.get("depth_valid")),
+                    "depth_mm": int(sample.get("depth_mm") or 0),
+                    "sample_px": list(sample.get("sample_px") or [0, 0]),
+                    "valid_pixels": int(sample.get("valid_pixels") or 0),
+                }
+                positions.append(list(sample.get("position_camera") or [0.0, 0.0, 0.0]))
+            output.append((depth_info, positions, {
+                "ok": True,
+                "mode": "sample_deproject",
+                "depth_age_ms": response.get("depth_age_ms"),
+                "depth_sequence": response.get("depth_sequence"),
+            }))
+        bridge_debug = {
+            "mode": "sample_deproject",
+            "depth_age_ms": response.get("depth_age_ms"),
+            "depth_sequence": response.get("depth_sequence"),
+            "sample_ms": response.get("sample_ms"),
+            "point_count": len(flat_points),
+        }
+        return output, b"", bridge_debug
+
+    def _depth_for_items(
+        self,
+        items: Sequence[Mapping[str, Any]],
+        image_width: int,
+        image_height: int,
+    ) -> Tuple[List[Tuple[Dict[str, Any], List[List[float]], Dict[str, Any]]], bytes, Dict[str, Any]]:
+        if not items or not self.algorithm.depth_enabled:
+            return [], b"", {"mode": "disabled_or_no_target"}
+        depth_settings = self.settings["algorithm"]["depth"]
+        if bool(depth_settings.get("use_sample_deproject", True)):
+            return self._fast_depth_for_items(items, image_width, image_height)
+        return self._legacy_depth_for_items(items, image_width, image_height)
+
+    def _camera_error_if_disconnected(self, error: Exception) -> Exception:
+        if isinstance(error, CameraUnavailableError):
+            return error
+        try:
+            health = self.bridge.health()
+            connected = health.get("camera_connected") is not False and health.get("camera_started") is not False
+            if not connected:
+                return CameraUnavailableError("camera bridge reports camera disconnected")
+        except CameraUnavailableError as camera_error:
+            return camera_error
+        except Exception:
+            pass
+        return error
+
+    def _complete_packet(self, packet: InferencePacket) -> Dict[str, Any]:
+        self.state.begin_postprocess()
+        postprocess_started = time.perf_counter()
+        timing = {
+            "runtime_http_ms": round(packet.runtime_http_ms, 3),
+            "runtime_internal_ms": round(packet.runtime_internal_ms, 3),
+            "runtime_transport_overhead_ms": round(max(0.0, packet.runtime_http_ms - packet.runtime_internal_ms), 3),
+        }  # type: Dict[str, Any]
+        try:
+            if packet.error is not None:
+                raise self._camera_error_if_disconnected(packet.error)
+            runtime_result = packet.runtime_result or {}
+
+            classify_started = time.perf_counter()
+            classified = self.algorithm.classify(runtime_result)
+            timing["classify_ms"] = round((time.perf_counter() - classify_started) * 1000.0, 3)
+
+            depth_started = time.perf_counter()
+            sampled_items, depth_bytes, bridge_debug = self._depth_for_items(
+                classified.items,
+                classified.image_width,
+                classified.image_height,
+            )
+            timing["depth_sample_deproject_ms"] = round((time.perf_counter() - depth_started) * 1000.0, 3)
+
+            build_started = time.perf_counter()
+            external_items = []  # type: List[Dict[str, Any]]
+            sampled_debug = []  # type: List[Dict[str, Any]]
+            for index, item in enumerate(classified.items):
+                if index < len(sampled_items):
+                    depth_info, positions, deproject_debug = sampled_items[index]
+                else:
+                    depth_info = {
+                        name: {"depth_valid": False, "depth_mm": 0, "sample_px": [0, 0], "valid_pixels": 0}
+                        for name in self.algorithm.POINT_ORDER
+                    }
+                    positions = [[0.0, 0.0, 0.0] for _ in self.algorithm.POINT_ORDER]
+                    deproject_debug = {"ok": False, "reason": "depth_disabled_or_no_target"}
+                external_items.append(self.algorithm.build_external_item(index, item, depth_info, positions))
+                sampled_debug.append({"source_id": item.get("source_id"), "depth": depth_info, "deproject": deproject_debug})
+
             try:
-                need_depth = bool(self.algorithm.depth_enabled)
-                camera_health = self.bridge.require_ready(need_depth)
-                runtime_result = self.runtime.infer_once()
-                self._validate_runtime(runtime_result)
-                classified = self.algorithm.classify(runtime_result)
-                depth_bytes = b""
-                depth = None
-                bridge_debug = {}  # type: Dict[str, Any]
-                if classified.items and need_depth:
-                    depth, depth_bytes, depth_health = self.bridge.depth(camera_health)
-                    bridge_debug["health"] = depth_health
+                capture_timestamp_ms = int(runtime_result.get("capture_timestamp_ms") or 0)
+            except (TypeError, ValueError, OverflowError):
+                capture_timestamp_ms = 0
+            timestamp = capture_timestamp_ms / 1000.0 if capture_timestamp_ms > 0 else packet.started_at
+            protocol_items = [
+                grasp_point
+                for item in external_items
+                for grasp_point in self._build_grasp_point_items(item)
+            ]
+            robot = {
+                "type": "detection",
+                "frame_id": packet.frame_id,
+                "timestamp": timestamp,
+                "items": protocol_items,
+                "fault_code": FAULT_NONE,
+                "fault_type": FAULT_TYPE_NONE,
+            }
+            if packet.request_id is not None:
+                robot["request_id"] = packet.request_id
 
-                external_items = []  # type: List[Dict[str, Any]]
-                sampled_debug = []  # type: List[Dict[str, Any]]
-                for index, item in enumerate(classified.items):
-                    if depth is not None:
-                        depth_info = self.algorithm.sample_item_depth(item, depth, classified.image_width, classified.image_height)
-                        deproject_input = self.algorithm.build_deproject_input(item, depth_info)
-                        positions, deproject_debug = self.bridge.deproject(deproject_input)
-                    else:
-                        depth_info = {name: {"depth_valid": False, "depth_mm": 0, "sample_px": [0, 0], "valid_pixels": 0} for name in self.algorithm.POINT_ORDER}
-                        positions = [[0.0, 0.0, 0.0] for _ in self.algorithm.POINT_ORDER]
-                        deproject_debug = {"ok": False, "reason": "depth_disabled_or_no_target"}
-                    external_items.append(self.algorithm.build_external_item(index, item, depth_info, positions))
-                    sampled_debug.append({"source_id": item.get("source_id"), "depth": depth_info, "deproject": deproject_debug})
+            # A shallow top-level copy is sufficient: the Runtime result is not
+            # mutated after publication and only a new box_grasp object is added.
+            visualization = dict(runtime_result)
+            visualization["box_grasp"] = {
+                "items": external_items,
+                "point_order": list(self.algorithm.POINT_ORDER),
+                "ignored": classified.ignored,
+            }
+            decision = {
+                "schema_version": "1.0",
+                "message_type": "app_decision",
+                "status": "ok",
+                "app_id": "box_grasp_vision",
+                "task": "segmentation_box_grasp",
+                "device_id": self.settings["device_id"],
+                "component": self.settings["component"],
+                "timestamp_ms": _timestamp_ms(),
+                "frame_id": runtime_result.get("frame_id"),
+                "result_id": runtime_result.get("result_id"),
+                "robot_message": robot,
+                "visualization_result": visualization,
+            }
+            timing["result_build_ms"] = round((time.perf_counter() - build_started) * 1000.0, 3)
+            timing["postprocess_stage_ms"] = round((time.perf_counter() - postprocess_started) * 1000.0, 3)
+            timing["pipeline_age_ms"] = round((time.monotonic() - packet.started_monotonic) * 1000.0, 3)
+            timing["total_ms"] = timing["pipeline_age_ms"]
+            decision["app_timing"] = timing
+            visualization["box_grasp"]["app_timing"] = timing
 
-                latency_ms = (time.monotonic() - started_monotonic) * 1000.0
-                try:
-                    capture_timestamp_ms = int(runtime_result.get("capture_timestamp_ms") or 0)
-                except (TypeError, ValueError, OverflowError):
-                    capture_timestamp_ms = 0
-                timestamp = capture_timestamp_ms / 1000.0 if capture_timestamp_ms > 0 else started_at
-                protocol_items = [
-                    grasp_point
-                    for item in external_items
-                    for grasp_point in self._build_grasp_point_items(item)
-                ]
-                robot = {
-                    "type": "detection",
-                    "frame_id": frame_id,
-                    "timestamp": timestamp,
-                    "items": protocol_items,
-                    "fault_code": FAULT_NONE,
-                    "fault_type": FAULT_TYPE_NONE,
-                }
-                if request_id is not None:
-                    robot["request_id"] = request_id
-                visualization = deepcopy(runtime_result)
-                visualization["box_grasp"] = {
-                    "items": external_items,
-                    "point_order": list(self.algorithm.POINT_ORDER),
-                    "ignored": classified.ignored,
-                }
-                decision = {
-                    "schema_version": "1.0",
-                    "message_type": "app_decision",
-                    "status": "ok",
-                    "app_id": "box_grasp_vision",
-                    "task": "segmentation_box_grasp",
-                    "device_id": self.settings["device_id"],
-                    "component": self.settings["component"],
-                    "timestamp_ms": _timestamp_ms(),
-                    "frame_id": runtime_result.get("frame_id"),
-                    "result_id": runtime_result.get("result_id"),
-                    "robot_message": robot,
-                    "visualization_result": visualization,
-                }
-                self.state.success(decision, robot, runtime_result, latency_ms)
-                self._save_debug_async({
-                    "decision": decision,
-                    "runtime_result": runtime_result,
-                    "camera_health": camera_health,
-                    "sampled": sampled_debug,
-                    "ignored": classified.ignored,
-                    "bridge": bridge_debug,
-                }, depth_bytes)
-                return decision
-            except Exception as error:
-                latency_ms = (time.monotonic() - started_monotonic) * 1000.0
-                decision, robot = self._error_result(frame_id, request_id, error, started_at)
-                self.state.failure(decision, robot, error, latency_ms)
-                self._save_debug_async({"decision": decision, "error": str(error)}, b"")
-                return decision
+            latency_ms = float(timing["total_ms"])
+            self.state.success(decision, robot, runtime_result, latency_ms, timing)
+            self._save_debug_async({
+                "decision": decision,
+                "runtime_result": runtime_result,
+                "sampled": sampled_debug,
+                "ignored": classified.ignored,
+                "bridge": bridge_debug,
+            }, depth_bytes)
+            return decision
+        except Exception as raw_error:
+            error = self._camera_error_if_disconnected(raw_error)
+            latency_ms = (time.monotonic() - packet.started_monotonic) * 1000.0
+            timing["postprocess_stage_ms"] = round((time.perf_counter() - postprocess_started) * 1000.0, 3)
+            timing["total_ms"] = round(latency_ms, 3)
+            decision, robot = self._error_result(packet.frame_id, packet.request_id, error, packet.started_at)
+            decision["app_timing"] = timing
+            self.state.failure(decision, robot, error, latency_ms)
+            self._save_debug_async({"decision": decision, "error": str(error), "app_timing": timing}, b"")
+            return decision
+        finally:
+            self.state.end_postprocess()
 
-    def _worker_loop(self) -> None:
+    def evaluate_once(self, request_id: object = None) -> Dict[str, Any]:
+        # Manual/API triggers remain synchronous, but they only serialize against
+        # other manual requests.  Runtime access itself is protected separately,
+        # so the production pipeline remains correct with one RKNN context.
+        with self.execution_lock:
+            packet = self._run_inference_stage(request_id=request_id, continuous=False)
+            return self._complete_packet(packet)
+
+    def _dispatch_packet(self, packet: InferencePacket, decision: Mapping[str, Any]) -> None:
+        robot = decision.get("robot_message") if isinstance(decision.get("robot_message"), Mapping) else {}
+        if packet.trigger is not None:
+            try:
+                packet.trigger.session.send_json(robot)
+            except OSError:
+                pass
+        elif packet.continuous and self.websocket.client_count() > 0:
+            self.websocket.broadcast_json(robot)
+
+    def _enqueue_packet(self, packet: InferencePacket) -> None:
+        if packet.trigger is not None:
+            try:
+                self.result_queue.put(packet, timeout=max(0.1, float(self.settings["app"]["request_timeout_ms"]) / 1000.0))
+            except queue.Full:
+                self.state.counters["pipeline_trigger_drop"] += 1
+            return
+        try:
+            self.result_queue.put_nowait(packet)
+            return
+        except queue.Full:
+            pass
+        try:
+            previous = self.result_queue.get_nowait()
+        except queue.Empty:
+            previous = None
+        if previous is not None and previous.trigger is not None:
+            # Never discard an explicit robot trigger to make room for a
+            # continuous frame.  Restore it and drop the new continuous result.
+            try:
+                self.result_queue.put_nowait(previous)
+            except queue.Full:
+                pass
+            self.state.counters["pipeline_results_dropped"] += 1
+            return
+        self.state.counters["pipeline_results_dropped"] += 1
+        try:
+            self.result_queue.put_nowait(packet)
+        except queue.Full:
+            self.state.counters["pipeline_results_dropped"] += 1
+
+    def _inference_loop(self) -> None:
         next_continuous = time.monotonic()
         while not self.stop_event.is_set():
             try:
                 trigger = self.trigger_queue.get_nowait()
             except queue.Empty:
                 trigger = None
-            if trigger is not None:
-                decision = self.evaluate_once(trigger.request_id)
-                robot = decision.get("robot_message") if isinstance(decision.get("robot_message"), Mapping) else {}
-                try:
-                    trigger.session.send_json(robot)
-                except OSError:
-                    pass
-                continue
 
-            # This worker is the single production inference producer.  Browser
-            # pages and robot clients consume latest_decision instead of submitting
-            # competing evaluate_once requests.
             continuous = self.state.continuous_enabled
             now = time.monotonic()
-            if continuous and now >= next_continuous:
-                decision = self.evaluate_once(None)
-                robot = decision.get("robot_message") if isinstance(decision.get("robot_message"), Mapping) else {}
-                if self.websocket.client_count() > 0:
-                    self.websocket.broadcast_json(robot)
-                period_s = 1.0 / self.detection_hz()
-                next_continuous = max(next_continuous + period_s, time.monotonic())
+            due = continuous and now >= next_continuous
+            if trigger is not None or due:
+                packet = self._run_inference_stage(
+                    request_id=trigger.request_id if trigger is not None else None,
+                    trigger=trigger,
+                    continuous=trigger is None,
+                )
+                if self.pipeline_enabled:
+                    self._enqueue_packet(packet)
+                else:
+                    decision = self._complete_packet(packet)
+                    self._dispatch_packet(packet, decision)
+                if due:
+                    period_s = 1.0 / self.detection_hz()
+                    next_continuous = max(next_continuous + period_s, time.monotonic())
                 continue
 
-            timeout = max(0.01, min(0.2, next_continuous - now)) if continuous else 0.2
+            timeout = max(0.005, min(0.1, next_continuous - now)) if continuous else 0.1
             signaled = self.wakeup.wait(timeout)
             self.wakeup.clear()
             if not continuous:
                 next_continuous = time.monotonic()
             elif signaled:
-                # Apply a newly configured FPS without waiting for the old deadline.
                 next_continuous = min(next_continuous, time.monotonic())
 
-    def _status_message(self) -> Dict[str, Any]:
-        snapshot = self.state.snapshot(self.websocket)
+    def _postprocess_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                packet = self.result_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            age_ms = (time.monotonic() - packet.started_monotonic) * 1000.0
+            if packet.trigger is None and age_ms > self.pipeline_max_result_age_ms:
+                self.state.counters["pipeline_stale_results_dropped"] += 1
+                continue
+            decision = self._complete_packet(packet)
+            self._dispatch_packet(packet, decision)
+
+    def _refresh_upstream_status(self) -> None:
         model_name = ""
         camera_connected = False
         try:
@@ -708,6 +1073,23 @@ class BoxGraspVisionService:
             camera_connected = health.get("camera_connected") is not False and health.get("camera_started") is not False
         except Exception:
             camera_connected = False
+        with self.status_cache_lock:
+            self.cached_model_name = model_name
+            self.cached_camera_connected = camera_connected
+            self.cached_upstream_status_at = time.monotonic()
+
+    def _status_message(self, refresh: bool = False) -> Dict[str, Any]:
+        if refresh:
+            self._refresh_upstream_status()
+        snapshot = self.state.snapshot(self.websocket)
+        with self.status_cache_lock:
+            model_name = self.cached_model_name
+            camera_connected = self.cached_camera_connected
+            status_age_ms = (
+                max(0.0, (time.monotonic() - self.cached_upstream_status_at) * 1000.0)
+                if self.cached_upstream_status_at > 0
+                else -1.0
+            )
         fault_code, fault_type = self._external_fault(camera_connected)
         return {
             "type": "status",
@@ -722,11 +1104,14 @@ class BoxGraspVisionService:
             "continuous_enabled": snapshot["continuous_enabled"],
             "clients": snapshot["websocket"]["clients"],
             "video_url": snapshot["video"]["url"],
+            "upstream_status_age_ms": round(status_age_ms, 3),
         }
 
     def _status_loop(self) -> None:
         interval = max(0.5, float(self.settings["websocket"].get("status_interval_s", 2.0)))
+        self._refresh_upstream_status()
         while not self.stop_event.wait(interval):
+            self._refresh_upstream_status()
             if self.websocket.client_count() > 0:
                 self.websocket.broadcast_json(self._status_message())
 
@@ -832,6 +1217,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             self._send(200, {"schema_version": "1.0", "message_type": "app_health", "status": "ok", "health": snapshot["health"], "app_id": "box_grasp_vision", "timestamp_ms": _timestamp_ms()})
         elif path in {"/api/app/status", "/api/gateway/status", "/api/ws/status"}:
             snapshot["external_status"] = self.service._status_message()
+            snapshot["pipeline"] = self.service.pipeline_status()
             self._send(200, snapshot)
         elif path == "/api/ws/clients":
             self._send(200, {"status": "ok", "clients": self.service.websocket.client_snapshot()})

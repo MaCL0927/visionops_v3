@@ -11,6 +11,7 @@ camera_bridge:
   health_path: /health
   mjpeg_path: /stream.mjpeg
   deproject_path: /api/coordinate/deproject
+  sample_deproject_path: /api/coordinate/sample_deproject
   # 第2层及以上必须使用新鲜的 D2C 对齐深度图。
   max_depth_age_ms: 1500
 
@@ -163,6 +164,12 @@ box_grasp:
     request_timeout_ms: 5000
     inference_settings_path: /opt/visionops_v3/config/box_grasp_inference_settings.json
 
+  pipeline:
+    # Runtime 推理与上一帧 CPU 几何/深度处理并行；队列只保留最新结果，避免积压旧帧。
+    enabled: true
+    result_queue_size: 1
+    max_result_age_ms: 500
+
   collector:
     listen_host: 0.0.0.0
     listen_port: 18095
@@ -218,6 +225,8 @@ box_grasp:
       contour_max_points: 64
     depth:
       enabled: true
+      # 直接在 336L Bridge 内存中的 D2C 深度图上采样并反投影，避免整图 PNG 编解码。
+      use_sample_deproject: true
       roi_radius_px: 4
       percentile: 50
       min_valid_pixels: 3

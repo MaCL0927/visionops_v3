@@ -125,3 +125,65 @@ watch -n 1 'curl -s http://127.0.0.1:18182/stream/status | python3 -m json.tool'
 
 其中 `capture_fps_measured` 表示 SDK 实际采集吞吐，`mjpeg_fps_measured` 表示共享
 JPEG 缓存的实际生产吞吐。二者和浏览器解码 FPS 是三个不同指标。
+
+## 第二阶段：深度采样与反投影合并接口
+
+`box_grasp_vision` 只需要纸箱四角、中心和两个抓取点共 7 个位置的深度。
+为避免每次检测都执行整幅 16-bit Depth PNG 的复制、压缩、HTTP 传输和
+Python 解码，本版新增：
+
+```text
+POST /api/coordinate/sample_deproject
+```
+
+请求中的每个点使用：
+
+```text
+[sample_u, sample_v, project_u, project_v]
+```
+
+`sample_u/sample_v` 用于在 D2C 深度图的小 ROI 内采样深度，
+`project_u/project_v` 使用采样到的深度进行 SDK 三维反投影。这样角点可以向箱体
+中心内缩采样，避免读到背景，同时三维坐标仍对应原始角点或抓取点。
+
+示例：
+
+```bash
+curl -s -X POST http://127.0.0.1:18182/api/coordinate/sample_deproject \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "points":[[236,222,232,218],[414,246,420,248]],
+    "image_width":640,
+    "image_height":480,
+    "radius_px":4,
+    "percentile":50,
+    "min_valid_pixels":3,
+    "min_depth_mm":100,
+    "max_depth_mm":5000,
+    "max_depth_age_ms":1500
+  }' | python3 -m json.tool
+```
+
+Bridge 直接引用当前内存中的 `latest_depth_mm_`，只读取每个点附近的小 ROI，
+不会克隆或编码整幅深度图。响应包含：
+
+```text
+depth_age_ms
+depth_sequence
+sample_ms
+points[].depth_valid
+points[].depth_mm
+points[].sample_px
+points[].valid_pixels
+points[].position_camera
+```
+
+`/stream/status` 同时增加：
+
+```text
+sample_deproject_count
+sample_deproject_ms_latest
+sample_deproject_ms_average
+```
+
+`/stream/depth.png` 仍保留给多层堆垛、调试和需要整幅深度图的任务使用。
