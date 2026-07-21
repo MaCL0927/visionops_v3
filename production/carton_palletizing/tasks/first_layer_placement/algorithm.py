@@ -451,11 +451,122 @@ class MultiLayerPlacementAlgorithm:
             0.0, float(depth.get("occupied_stability_mm", 20.0))
         )
 
-        raw_slots = template.get("slots") if isinstance(template.get("slots"), list) else []
-        self.slot_templates = [deepcopy(dict(slot)) for slot in raw_slots if isinstance(slot, Mapping)]
+        self.layer_template_strategy = str(
+            template.get("layer_strategy") or template.get("strategy") or "single"
+        ).strip().lower()
+        self.template_sets = {}  # type: Dict[str, List[Dict[str, Any]]]
+        self.template_metadata = {}  # type: Dict[str, Dict[str, Any]]
+
+        raw_template_sets = template.get("templates")
+        if isinstance(raw_template_sets, Mapping):
+            for raw_key, raw_value in raw_template_sets.items():
+                key = str(raw_key).strip().lower()
+                if not key:
+                    continue
+                if isinstance(raw_value, Mapping):
+                    raw_slots = raw_value.get("slots")
+                    metadata = {
+                        str(meta_key): deepcopy(meta_value)
+                        for meta_key, meta_value in raw_value.items()
+                        if str(meta_key) != "slots"
+                    }
+                elif isinstance(raw_value, list):
+                    raw_slots = raw_value
+                    metadata = {}
+                else:
+                    continue
+                slots = [
+                    deepcopy(dict(slot))
+                    for slot in (raw_slots if isinstance(raw_slots, list) else [])
+                    if isinstance(slot, Mapping)
+                ]
+                if slots:
+                    self.template_sets[key] = slots
+                    self.template_metadata[key] = metadata
+
+        # Backward compatibility with the original single ``template.slots``
+        # schema.  A repository/config that has not yet adopted alternating
+        # layers therefore keeps exactly the previous behaviour.
+        legacy_slots = template.get("slots") if isinstance(template.get("slots"), list) else []
+        if not self.template_sets:
+            slots = [deepcopy(dict(slot)) for slot in legacy_slots if isinstance(slot, Mapping)]
+            self.template_sets["default"] = slots
+            self.template_metadata["default"] = {"template_id": "default"}
+            self.layer_template_strategy = "single"
+
+        self.default_template_key = str(template.get("default_template") or "").strip().lower()
+        if self.default_template_key not in self.template_sets:
+            self.default_template_key = next(iter(self.template_sets), "default")
+
+        first_templates = self._slot_templates_for_layer(1)
+        self.slot_templates = deepcopy(first_templates)
+        self.slot_ids = [str(slot["slot_id"]) for slot in first_templates]
+        expected_ids = set(self.slot_ids)
+        for key, slots in self.template_sets.items():
+            slot_ids = [str(slot["slot_id"]) for slot in slots]
+            if len(slot_ids) != len(set(slot_ids)):
+                raise ValueError("摆放模板 {!r} 存在重复 slot_id".format(key))
+            if set(slot_ids) != expected_ids:
+                raise ValueError(
+                    "奇偶层摆放模板必须使用相同 slot_id，模板 {!r}={}，基准={}".format(
+                        key, sorted(slot_ids), sorted(expected_ids)
+                    )
+                )
+
         self.slot_order = [str(item) for item in template.get("slot_order", [])]
+        if not self.slot_order:
+            self.slot_order = list(self.slot_ids)
+        if set(self.slot_order) != expected_ids:
+            raise ValueError(
+                "template.slot_order 必须完整包含所有 slot_id，当前={}，需要={}".format(
+                    self.slot_order, self.slot_ids
+                )
+            )
+
+        configured_geometry_source = str(
+            layering.get("next_layer_geometry")
+            or layering.get("geometry_source")
+            or ""
+        ).strip().lower()
+        if configured_geometry_source:
+            self.next_layer_geometry = configured_geometry_source
+        elif len(self.template_sets) > 1:
+            self.next_layer_geometry = "layer_template"
+        elif self.use_previous_detected_boxes:
+            self.next_layer_geometry = "previous_layer_detected_boxes"
+        else:
+            self.next_layer_geometry = "previous_layer_slots"
         self._lock = threading.RLock()
         self.reset()
+
+    def _template_key_for_layer(self, layer: Optional[int] = None) -> str:
+        layer_number = self.current_layer if layer is None else max(1, int(layer))
+        strategy = self.layer_template_strategy
+        if strategy in {"odd_even", "alternating", "alternate"}:
+            preferred = "odd" if layer_number % 2 == 1 else "even"
+            if preferred in self.template_sets:
+                return preferred
+        layer_key = str(layer_number)
+        if strategy in {"per_layer", "layer_number"} and layer_key in self.template_sets:
+            return layer_key
+        return self.default_template_key
+
+    def _slot_templates_for_layer(self, layer: Optional[int] = None) -> List[Dict[str, Any]]:
+        key = self._template_key_for_layer(layer)
+        return self.template_sets.get(key) or self.template_sets[self.default_template_key]
+
+    def _template_document(self, layer: Optional[int] = None) -> Dict[str, Any]:
+        layer_number = self.current_layer if layer is None else max(1, int(layer))
+        key = self._template_key_for_layer(layer_number)
+        metadata = self.template_metadata.get(key, {})
+        return {
+            "strategy": self.layer_template_strategy,
+            "key": key,
+            "template_id": str(metadata.get("template_id") or key),
+            "name": str(metadata.get("name") or key),
+            "layer": layer_number,
+            "geometry_source": self.next_layer_geometry,
+        }
 
     def _new_slot_state(self) -> Dict[str, Dict[str, Any]]:
         return {
@@ -467,7 +578,7 @@ class MultiLayerPlacementAlgorithm:
                 "last_detection_polygon": None,
                 "last_depth": None,
             }
-            for slot in self.slot_templates
+            for slot in self._slot_templates_for_layer(1)
         }
 
     def reset(self) -> None:
@@ -479,7 +590,7 @@ class MultiLayerPlacementAlgorithm:
             self.completed_layers = []  # type: List[int]
             self.slot_state = self._new_slot_state()
             self.current_slot_norm_polygons = None  # type: Optional[Dict[str, Polygon]]
-            self.current_slot_source = "tray_template"
+            self.current_slot_source = "layer_template:{}".format(self._template_key_for_layer(1))
             self.depth_baseline = None  # type: Optional[np.ndarray]
             self.depth_baseline_layer = 0
             self.baseline_candidates = []  # type: List[np.ndarray]
@@ -508,6 +619,58 @@ class MultiLayerPlacementAlgorithm:
         if (class_id is not None and class_id in self.box_ids) or (class_name and class_name in self.box_names):
             return "box"
         return None
+
+    def detection_candidates(
+        self,
+        runtime_result: Mapping[str, Any],
+        update_tray_reference: bool = False,
+    ) -> Dict[str, Any]:
+        """Return OBB tray/box candidates for trigger-only robot tasks.
+
+        ``held_box_pose`` must inspect the current OBB detections without
+        advancing the pallet occupancy state machine.  This helper reuses the
+        exact class/score/OBB acceptance rules used by the placement algorithm
+        and optionally refreshes only the locked tray reference.
+        """
+
+        with self._lock:
+            trays, boxes, rejected_non_obb = self._accepted_detections(runtime_result)
+            tray_source = None
+            if update_tray_reference:
+                tray_source = self._update_tray(trays)
+            elif self.tray_polygon is not None:
+                tray_source = "locked"
+            elif trays:
+                selected = max(trays, key=lambda item: (float(item["score"]), _polygon_area(item["polygon"])))
+                tray_source = "detected_unlocked"
+                tray_polygon = list(selected["polygon"])
+                tray_bbox = _polygon_bbox(tray_polygon)
+                return {
+                    "trays": deepcopy(trays),
+                    "boxes": deepcopy(boxes),
+                    "rejected_non_obb_count": rejected_non_obb,
+                    "tray_source": tray_source,
+                    "tray_polygon": deepcopy(tray_polygon),
+                    "tray_bbox": list(tray_bbox),
+                }
+            return {
+                "trays": deepcopy(trays),
+                "boxes": deepcopy(boxes),
+                "rejected_non_obb_count": rejected_non_obb,
+                "tray_source": tray_source,
+                "tray_polygon": deepcopy(self.tray_polygon),
+                "tray_bbox": list(self.tray_bbox) if self.tray_bbox is not None else None,
+            }
+
+    def tray_reference(self) -> Dict[str, Any]:
+        """Return a thread-safe copy of the currently locked tray geometry."""
+
+        with self._lock:
+            return {
+                "polygon": deepcopy(self.tray_polygon),
+                "bbox": list(self.tray_bbox) if self.tray_bbox is not None else None,
+                "layer": self.current_layer,
+            }
 
     def _accepted_detections(
         self, runtime_result: Mapping[str, Any]
@@ -594,8 +757,10 @@ class MultiLayerPlacementAlgorithm:
             }
 
         footprint_angle = _edge_angle_deg(footprint[0], footprint[1])
+        template_document = self._template_document()
+        active_templates = self._slot_templates_for_layer()
         slots = []  # type: List[Dict[str, Any]]
-        for template in self.slot_templates:
+        for template in active_templates:
             polygon = []  # type: Polygon
             for nx, ny in template["polygon_norm"]:
                 px, py = _bilinear_project(footprint, float(nx), float(ny))
@@ -614,7 +779,9 @@ class MultiLayerPlacementAlgorithm:
                     "polygon": polygon,
                     "bbox": box,
                     "center": _polygon_center(polygon),
-                    "source": "tray_template",
+                    "source": "layer_template:{}".format(template_document["key"]),
+                    "template_key": template_document["key"],
+                    "template_id": template_document["template_id"],
                 }
             )
         return slots, footprint, footprint_meta
@@ -623,12 +790,16 @@ class MultiLayerPlacementAlgorithm:
         self, image_width: int, image_height: int
     ) -> Tuple[List[Dict[str, Any]], Polygon, Dict[str, float]]:
         template_slots, footprint, footprint_meta = self._build_template_slots(image_width, image_height)
-        if self.current_layer <= 1 or not self.current_slot_norm_polygons:
+        if (
+            self.next_layer_geometry == "layer_template"
+            or self.current_layer <= 1
+            or not self.current_slot_norm_polygons
+        ):
             return template_slots, footprint, footprint_meta
 
         template_by_id = {str(item["slot_id"]): item for item in template_slots}
         slots = []  # type: List[Dict[str, Any]]
-        for slot_id in [str(slot["slot_id"]) for slot in self.slot_templates]:
+        for slot_id in [str(slot["slot_id"]) for slot in self._slot_templates_for_layer()]:
             normalized = self.current_slot_norm_polygons.get(slot_id)
             fallback = template_by_id[slot_id]
             if not normalized or len(normalized) < 3:
@@ -653,6 +824,8 @@ class MultiLayerPlacementAlgorithm:
                     "bbox": _polygon_bbox(polygon),
                     "center": _polygon_center(polygon),
                     "source": self.current_slot_source,
+                    "template_key": fallback.get("template_key"),
+                    "template_id": fallback.get("template_id"),
                 }
             )
         return slots, footprint, footprint_meta
@@ -978,9 +1151,22 @@ class MultiLayerPlacementAlgorithm:
         finished = self.current_layer
         if finished not in self.completed_layers:
             self.completed_layers.append(finished)
-        self.current_slot_norm_polygons = self._derive_next_layer_geometry(slots, image_width, image_height)
-        self.current_slot_source = "previous_layer_detected_boxes" if self.use_previous_detected_boxes else "previous_layer_slots"
-        self.current_layer += 1
+        next_layer = finished + 1
+        if self.next_layer_geometry == "layer_template":
+            self.current_slot_norm_polygons = None
+            self.current_slot_source = "layer_template:{}".format(
+                self._template_key_for_layer(next_layer)
+            )
+        else:
+            self.current_slot_norm_polygons = self._derive_next_layer_geometry(
+                slots, image_width, image_height
+            )
+            self.current_slot_source = (
+                "previous_layer_detected_boxes"
+                if self.next_layer_geometry == "previous_layer_detected_boxes"
+                else "previous_layer_slots"
+            )
+        self.current_layer = next_layer
         self.slot_state = self._new_slot_state()
         self.baseline_candidates = []
         self.baseline_settle_count = 0
@@ -1004,6 +1190,8 @@ class MultiLayerPlacementAlgorithm:
                     "slot_key": "L{}:{}".format(self.current_layer, slot_id),
                     "name": slot["name"],
                     "source": slot.get("source"),
+                    "template_key": slot.get("template_key"),
+                    "template_id": slot.get("template_id"),
                     "template_orientation_deg": slot["template_orientation_deg"],
                     "orientation_deg": round(float(slot["orientation_deg"]), 3),
                     "orientation_label": slot["orientation_label"],
@@ -1037,12 +1225,13 @@ class MultiLayerPlacementAlgorithm:
             "complete": False,
             "layer_complete": False,
             "stack_complete": False,
-            "slot_count": len(self.slot_templates),
+            "slot_count": len(self.slot_ids),
             "occupied_count": 0,
-            "empty_count": len(self.slot_templates),
+            "empty_count": len(self.slot_ids),
             "next_slot_id": None,
             "next_slot_key": None,
             "next_layer": None,
+            "template": self._template_document(),
             "tray": {"detected": False, "locked": False, "source": tray_source},
             "slots": [],
             "accepted_box_count": len(boxes),
@@ -1202,6 +1391,7 @@ class MultiLayerPlacementAlgorithm:
                     "L{}:{}".format(self.current_layer, next_slot_id) if next_slot_id else None
                 ),
                 "next_layer": next_layer,
+                "template": self._template_document(),
                 "tray": {
                     "detected": bool(trays),
                     "locked": self.tray_polygon is not None,

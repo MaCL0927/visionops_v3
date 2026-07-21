@@ -46,6 +46,109 @@ collector:
 
 task:
   task_id: multi_layer_placement
+
+  # 机器人通信：WebSocket 长连接 + trigger 被动触发；视频继续使用 336L MJPEG。
+  communication:
+    enabled: true
+    trigger_mode: trigger
+
+    trigger_tasks:
+      # M29.2：保留原字符串任务名，同时兼容机器人侧数字任务号。
+      # task_id 可发送 pallet_place_target、字符串 "1" 或数字 1；响应会原样回显。
+      place_target: pallet_place_target
+      place_target_aliases: [1, "1"]
+      # task_id 可发送 held_box_pose、字符串 "2" 或数字 2；响应会原样回显。
+      held_box: held_box_pose
+      held_box_aliases: [2, "2"]
+
+    remote_config:
+      # ROI 只能在 VisionOps Web 端设置，并由 Runtime 的 roi_config_path 持久化。
+      # 机器人 config 消息中的 detect_region 会被兼容接收但永久忽略，不能覆盖 Web ROI。
+      roi_control_source: visionops_web_runtime
+      # 保留协议中的动态置信度阈值能力；不需要时可改为 false。
+      allow_confidence_threshold: true
+
+    websocket:
+      # 不同任务部署在不同视觉盒 IP 上，端口和路径固定。
+      listen_host: 0.0.0.0
+      listen_port: 9001
+      path: /vision
+      token: ""
+      # trigger 模式通常只需要 detection/pong。关闭后不在连接建立时或后台周期推送 status；
+      # 如机器人侧需要状态心跳，再改为 true。
+      status_enabled: false
+      status_on_connect: false
+      status_interval_s: 1.0
+      read_timeout_s: 30.0
+      max_clients: 4
+      max_payload_bytes: 1048576
+      trigger_queue_size: 32
+
+    video:
+      # JSON 走 WebSocket；视频走独立 MJPEG，采用软同步。
+      type: mjpeg
+      public_url: http://192.168.20.201:18182/stream.mjpeg
+      sync: soft
+
+    trigger_sampling:
+      # M29 的 pallet_place_target 已改为单帧观测，不再推进层/槽位状态机。
+      # 以下字段仅为兼容旧配置保留，当前放置终点通信不再使用。
+      max_place_samples: 1
+      sample_interval_ms: 0.0
+
+    point_sampling:
+      # 摆放终点/手持箱中心都在 D2C 对齐深度图的小区域取中位数。
+      roi_radius_px: 6
+      percentile: 50.0
+      min_valid_pixels: 3
+      min_depth_mm: 100
+      max_depth_mm: 5000
+
+    surface_target_selection:
+      # M29 放置终点任务只返回实际检测目标：
+      #   - 没有纸箱时返回一个托盘；
+      #   - 有纸箱时只返回深度最近的最上层纸箱，最多4个。
+      max_items: 4
+      # 相邻深度差大于该值时视为进入下一层；从最近目标到当前目标的总跨度
+      # 还必须小于 max_top_layer_span_mm。现场可按箱高和相机倾角微调。
+      layer_gap_mm: 80.0
+      max_top_layer_span_mm: 140.0
+      # 只返回托盘/垛型区域中的纸箱，避免把周边备用箱误认为垛顶。
+      filter_to_tray_region: true
+      tray_expand_ratio: 0.08
+      min_tray_overlap_ratio: 0.05
+      # 程序刚启动、托盘已被纸箱完全遮住时，允许在没有托盘参考的情况下使用纸箱。
+      allow_boxes_without_tray_reference: true
+      # 输出顺序固定为图像从上到下、同一行从左到右。
+      sort_order: image_yx
+      depth:
+        roi_radius_px: 6
+        percentile: 50.0
+        min_valid_pixels: 3
+        min_depth_mm: 100
+        max_depth_mm: 5000
+
+    held_box_selection:
+      # 初期：nearest_depth，机器人手里的纸箱保证是画面中最高/离相机最近的箱子。
+      # 后期：只把这里改成 outside_tray，代码无需修改。
+      mode: nearest_depth
+
+      # nearest_depth 可选歧义保护。初期工艺已保证最高，因此默认不强制。
+      require_depth_advantage: false
+      min_depth_advantage_mm: 20.0
+
+      # outside_tray：纸箱中心必须在扩大的托盘区域外，且 OBB 与托盘重叠较小。
+      tray_expand_ratio: 0.05
+      max_tray_overlap_ratio: 0.20
+      outside_tray_prefer_nearest_depth: true
+
+      depth:
+        roi_radius_px: 6
+        percentile: 50.0
+        min_valid_pixels: 3
+        min_depth_mm: 100
+        max_depth_mm: 5000
+
   algorithm:
     classes:
       # 当前 OBB 模型类别固定：0=纸箱，1=托盘。class_name 仅作为兼容兜底。
@@ -94,9 +197,11 @@ task:
       # 每层完成后先等待若干检测周期，让机器人和运动纸箱离开 ROI。
       baseline_settle_frames: 5
       baseline_stability_mm: 15.0
-      # 优先使用上一层实际检测到的纸箱 OBB 作为下一层摆放掩膜；
-      # 某个位置缺少可靠 OBB 时自动退回标准 slot。
-      use_previous_detected_boxes: true
+      # 每层都使用配置中的标准奇偶层模板。这样第2层不会直接复用第1层四个纸箱框，
+      # 而是切换到错开的模板B；第3层回到模板A，以此类推。
+      next_layer_geometry: layer_template
+      # 仅当 next_layer_geometry 改回 previous_layer_detected_boxes 时生效。
+      use_previous_detected_boxes: false
 
     depth:
       min_depth_mm: 100
@@ -116,27 +221,55 @@ task:
       occupied_stability_mm: 20.0
 
     template:
+      # 奇数层使用模板A，偶数层使用模板B。两个模板使用相同 P1..P4 ID，
+      # 但横竖方向与覆盖区域互换，形成上下层交错咬合。
+      layer_strategy: odd_even
+      default_template: odd
       # 从左下角 P3 开始，按画面中的顺时针方向：左下 -> 左上 -> 右上 -> 右下。
       slot_order: [P3, P1, P2, P4]
-      # 下列坐标不是相对整个长方形托盘，而是相对 geometry 生成的居中正方形垛型区域。
-      # 0.65 / 0.35 对应纸箱长短边比例，四个矩形以横竖交错方式围成正方形。
-      slots:
-        - slot_id: P1
-          name: top_left_horizontal
-          orientation_deg: 0
-          polygon_norm: [[0.00, 0.00], [0.65, 0.00], [0.65, 0.35], [0.00, 0.35]]
-        - slot_id: P2
-          name: top_right_vertical
-          orientation_deg: 90
-          polygon_norm: [[0.65, 0.00], [1.00, 0.00], [1.00, 0.65], [0.65, 0.65]]
-        - slot_id: P3
-          name: bottom_left_vertical
-          orientation_deg: 90
-          polygon_norm: [[0.00, 0.35], [0.35, 0.35], [0.35, 1.00], [0.00, 1.00]]
-        - slot_id: P4
-          name: bottom_right_horizontal
-          orientation_deg: 0
-          polygon_norm: [[0.35, 0.65], [1.00, 0.65], [1.00, 1.00], [0.35, 1.00]]
+      # 坐标相对 geometry 生成的居中正方形垛型区域；0.65/0.35 为纸箱长短边比例。
+      templates:
+        odd:
+          template_id: A
+          name: odd_layer_interlock_A
+          slots:
+            - slot_id: P1
+              name: top_left_horizontal
+              orientation_deg: 0
+              polygon_norm: [[0.00, 0.00], [0.65, 0.00], [0.65, 0.35], [0.00, 0.35]]
+            - slot_id: P2
+              name: top_right_vertical
+              orientation_deg: 90
+              polygon_norm: [[0.65, 0.00], [1.00, 0.00], [1.00, 0.65], [0.65, 0.65]]
+            - slot_id: P3
+              name: bottom_left_vertical
+              orientation_deg: 90
+              polygon_norm: [[0.00, 0.35], [0.35, 0.35], [0.35, 1.00], [0.00, 1.00]]
+            - slot_id: P4
+              name: bottom_right_horizontal
+              orientation_deg: 0
+              polygon_norm: [[0.35, 0.65], [1.00, 0.65], [1.00, 1.00], [0.35, 1.00]]
+
+        even:
+          template_id: B
+          name: even_layer_interlock_B
+          slots:
+            - slot_id: P1
+              name: top_left_vertical
+              orientation_deg: 90
+              polygon_norm: [[0.00, 0.00], [0.35, 0.00], [0.35, 0.65], [0.00, 0.65]]
+            - slot_id: P2
+              name: top_right_horizontal
+              orientation_deg: 0
+              polygon_norm: [[0.35, 0.00], [1.00, 0.00], [1.00, 0.35], [0.35, 0.35]]
+            - slot_id: P3
+              name: bottom_left_horizontal
+              orientation_deg: 0
+              polygon_norm: [[0.00, 0.65], [0.65, 0.65], [0.65, 1.00], [0.00, 1.00]]
+            - slot_id: P4
+              name: bottom_right_vertical
+              orientation_deg: 90
+              polygon_norm: [[0.65, 0.35], [1.00, 0.35], [1.00, 1.00], [0.65, 1.00]]
 
 debug:
   allow_injected_runtime_result: false

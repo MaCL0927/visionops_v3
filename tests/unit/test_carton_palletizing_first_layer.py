@@ -171,3 +171,34 @@ def test_reset_clears_locked_tray_and_sticky_occupancy():
     assert placement["state"] == "WAIT_TRAY"
     assert placement["occupied_count"] == 0
     assert placement["slots"] == []
+
+
+def test_odd_even_layers_use_interleaved_templates():
+    tracker = algorithm()
+    first = tracker.evaluate(result([TRAY], 1))
+    first_slots = {slot["slot_id"]: slot for slot in first["slots"]}
+    assert first["template"]["key"] == "odd"
+    assert first["template"]["template_id"] == "A"
+    assert first_slots["P1"]["orientation_label"] == "横向"
+    assert first_slots["P3"]["orientation_label"] == "竖向"
+
+    # Entering a later layer does not require mutating code or copying the
+    # previous four box polygons.  The active template is selected by parity.
+    tracker.current_layer = 2
+    tracker.slot_state = tracker._new_slot_state()
+    tracker.current_slot_norm_polygons = None
+    second = tracker.evaluate(result([], 2))
+    second_slots = {slot["slot_id"]: slot for slot in second["slots"]}
+    assert second["template"]["key"] == "even"
+    assert second["template"]["template_id"] == "B"
+    assert second_slots["P1"]["orientation_label"] == "竖向"
+    assert second_slots["P3"]["orientation_label"] == "横向"
+    assert second_slots["P1"]["polygon"] != first_slots["P1"]["polygon"]
+
+    tracker.current_layer = 3
+    tracker.slot_state = tracker._new_slot_state()
+    third = tracker.evaluate(result([], 3))
+    third_slots = {slot["slot_id"]: slot for slot in third["slots"]}
+    assert third["template"]["key"] == "odd"
+    assert third["template"]["template_id"] == "A"
+    assert third_slots["P1"]["polygon"] == first_slots["P1"]["polygon"]

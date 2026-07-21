@@ -73,6 +73,58 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "task": {
         "task_id": "multi_layer_placement",
+        "communication": {
+            "enabled": True,
+            "trigger_mode": "trigger",
+            "trigger_tasks": {
+                "place_target": "pallet_place_target",
+                "held_box": "held_box_pose",
+            },
+            "websocket": {
+                "listen_host": "0.0.0.0",
+                "listen_port": 9001,
+                "path": "/vision",
+                "token": "",
+                "status_interval_s": 1.0,
+                "read_timeout_s": 30.0,
+                "max_clients": 4,
+                "max_payload_bytes": 1048576,
+                "trigger_queue_size": 32,
+            },
+            "video": {
+                "type": "mjpeg",
+                "public_url": "http://192.168.20.201:18182/stream.mjpeg",
+                "sync": "soft",
+            },
+            "trigger_sampling": {
+                "max_place_samples": 12,
+                "sample_interval_ms": 50.0,
+            },
+            "point_sampling": {
+                "roi_radius_px": 6,
+                "percentile": 50.0,
+                "min_valid_pixels": 3,
+                "min_depth_mm": 100,
+                "max_depth_mm": 5000,
+            },
+            "held_box_selection": {
+                # Initial phase: the held carton is guaranteed to be closest/highest.
+                # Later phase: switch only this value to outside_tray.
+                "mode": "nearest_depth",
+                "require_depth_advantage": False,
+                "min_depth_advantage_mm": 20.0,
+                "tray_expand_ratio": 0.05,
+                "max_tray_overlap_ratio": 0.20,
+                "outside_tray_prefer_nearest_depth": True,
+                "depth": {
+                    "roi_radius_px": 6,
+                    "percentile": 50.0,
+                    "min_valid_pixels": 3,
+                    "min_depth_mm": 100,
+                    "max_depth_mm": 5000,
+                },
+            },
+        },
         "algorithm": {
             "classes": {
                 # Current OBB model classes are fixed: 0=box, 1=tray.
@@ -425,6 +477,102 @@ def _validate_algorithm(config: Dict[str, Any]) -> None:
     template["slot_order"] = order
 
 
+def _validate_placement_communication(config: Dict[str, Any]) -> None:
+    task = config.get("task")
+    if not isinstance(task, dict):
+        raise ValueError("task 配置必须是对象")
+    communication = task.get("communication")
+    if not isinstance(communication, dict):
+        raise ValueError("task.communication 必须是对象")
+    communication["enabled"] = bool(communication.get("enabled", True))
+    communication["trigger_mode"] = str(communication.get("trigger_mode") or "trigger").strip().lower()
+    if communication["trigger_mode"] != "trigger":
+        raise ValueError("first_layer_placement 当前只支持 task.communication.trigger_mode=trigger")
+
+    trigger_tasks = communication.get("trigger_tasks")
+    if not isinstance(trigger_tasks, dict):
+        raise ValueError("task.communication.trigger_tasks 必须是对象")
+    for key, default in (("place_target", "pallet_place_target"), ("held_box", "held_box_pose")):
+        trigger_tasks[key] = str(trigger_tasks.get(key) or default).strip()
+        if not trigger_tasks[key]:
+            raise ValueError("task.communication.trigger_tasks.{} 不能为空".format(key))
+    if trigger_tasks["place_target"] == trigger_tasks["held_box"]:
+        raise ValueError("place_target 与 held_box 的 task_id 必须不同")
+
+    websocket = communication.get("websocket")
+    if not isinstance(websocket, dict):
+        raise ValueError("task.communication.websocket 必须是对象")
+    websocket["listen_port"] = _port(websocket.get("listen_port", 9001), "task.communication.websocket.listen_port")
+    websocket["path"] = str(websocket.get("path") or "/vision")
+    if not websocket["path"].startswith("/"):
+        websocket["path"] = "/" + websocket["path"]
+    websocket["status_interval_s"] = float(websocket.get("status_interval_s", 1.0))
+    websocket["read_timeout_s"] = float(websocket.get("read_timeout_s", 30.0))
+    if websocket["status_interval_s"] <= 0 or websocket["read_timeout_s"] <= 0:
+        raise ValueError("task.communication.websocket status/read timeout 必须大于0")
+    for key, default in (("max_clients", 4), ("max_payload_bytes", 1048576), ("trigger_queue_size", 32)):
+        websocket[key] = int(websocket.get(key, default))
+        if websocket[key] <= 0:
+            raise ValueError("task.communication.websocket.{} 必须大于0".format(key))
+
+    video = communication.get("video")
+    if not isinstance(video, dict):
+        raise ValueError("task.communication.video 必须是对象")
+    video["type"] = str(video.get("type") or "mjpeg").strip().lower()
+    if video["type"] != "mjpeg":
+        raise ValueError("task.communication.video.type 当前只支持 mjpeg")
+    video["public_url"] = _url(video.get("public_url"), "task.communication.video.public_url")
+
+    trigger_sampling = communication.get("trigger_sampling")
+    if not isinstance(trigger_sampling, dict):
+        raise ValueError("task.communication.trigger_sampling 必须是对象")
+    trigger_sampling["max_place_samples"] = int(trigger_sampling.get("max_place_samples", 12))
+    trigger_sampling["sample_interval_ms"] = float(trigger_sampling.get("sample_interval_ms", 50.0))
+    if trigger_sampling["max_place_samples"] <= 0 or trigger_sampling["sample_interval_ms"] < 0:
+        raise ValueError("task.communication.trigger_sampling 配置非法")
+
+    point_sampling = communication.get("point_sampling")
+    if not isinstance(point_sampling, dict):
+        raise ValueError("task.communication.point_sampling 必须是对象")
+    for key, default in (("roi_radius_px", 6), ("min_valid_pixels", 3), ("min_depth_mm", 100), ("max_depth_mm", 5000)):
+        point_sampling[key] = int(point_sampling.get(key, default))
+    point_sampling["percentile"] = float(point_sampling.get("percentile", 50.0))
+    if point_sampling["roi_radius_px"] < 0 or point_sampling["min_valid_pixels"] <= 0:
+        raise ValueError("task.communication.point_sampling ROI 配置非法")
+    if point_sampling["min_depth_mm"] < 0 or point_sampling["max_depth_mm"] <= point_sampling["min_depth_mm"]:
+        raise ValueError("task.communication.point_sampling 深度范围非法")
+    if not 0.0 <= point_sampling["percentile"] <= 100.0:
+        raise ValueError("task.communication.point_sampling.percentile 必须位于0..100")
+
+    selection = communication.get("held_box_selection")
+    if not isinstance(selection, dict):
+        raise ValueError("task.communication.held_box_selection 必须是对象")
+    selection["mode"] = str(selection.get("mode") or "nearest_depth").strip().lower()
+    if selection["mode"] not in {"nearest_depth", "outside_tray"}:
+        raise ValueError("held_box_selection.mode 必须为 nearest_depth 或 outside_tray")
+    selection["require_depth_advantage"] = bool(selection.get("require_depth_advantage", False))
+    selection["min_depth_advantage_mm"] = float(selection.get("min_depth_advantage_mm", 20.0))
+    selection["tray_expand_ratio"] = float(selection.get("tray_expand_ratio", 0.05))
+    selection["max_tray_overlap_ratio"] = float(selection.get("max_tray_overlap_ratio", 0.20))
+    selection["outside_tray_prefer_nearest_depth"] = bool(selection.get("outside_tray_prefer_nearest_depth", True))
+    if selection["min_depth_advantage_mm"] < 0 or selection["tray_expand_ratio"] < 0:
+        raise ValueError("held_box_selection depth advantage/tray expand 必须大于等于0")
+    if not 0.0 <= selection["max_tray_overlap_ratio"] <= 1.0:
+        raise ValueError("held_box_selection.max_tray_overlap_ratio 必须位于0..1")
+    depth = selection.get("depth")
+    if not isinstance(depth, dict):
+        raise ValueError("held_box_selection.depth 必须是对象")
+    for key, default in (("roi_radius_px", 6), ("min_valid_pixels", 3), ("min_depth_mm", 100), ("max_depth_mm", 5000)):
+        depth[key] = int(depth.get(key, default))
+    depth["percentile"] = float(depth.get("percentile", 50.0))
+    if depth["roi_radius_px"] < 0 or depth["min_valid_pixels"] <= 0:
+        raise ValueError("held_box_selection.depth ROI 配置非法")
+    if depth["min_depth_mm"] < 0 or depth["max_depth_mm"] <= depth["min_depth_mm"]:
+        raise ValueError("held_box_selection.depth 深度范围非法")
+    if not 0.0 <= depth["percentile"] <= 100.0:
+        raise ValueError("held_box_selection.depth.percentile 必须位于0..100")
+
+
 def _validate_box_grasp(config: Dict[str, Any]) -> None:
     profile = config.get("box_grasp")
     if not isinstance(profile, dict):
@@ -606,6 +754,7 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
         raise ValueError("纸箱多层摆放必须使用 collector.production_inference_source=app")
 
     _validate_algorithm(config)
+    _validate_placement_communication(config)
     _validate_box_grasp(config)
 
     box_runtime_port = urlparse(config["box_grasp"]["runtime"]["url"]).port or 80

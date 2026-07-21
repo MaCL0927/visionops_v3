@@ -10,7 +10,7 @@
 4. 第一层放满后采集多帧稳定的 D2C 对齐深度图，作为第二层基准；
 5. 第二层及以上逐 slot 计算 `上一层基准深度 - 当前深度`；高度差和覆盖率达到阈值后，确认该位置新增一箱并隐藏掩膜；
 6. 当前层放满后重新采集深度基准，自动进入下一层；
-7. 下一层优先使用上一层实际检测到的纸箱 OBB 作为摆放掩膜，缺少可靠 OBB 时退回标准 slot；
+7. 奇数层使用模板 A，偶数层使用横竖错开的模板 B；第 3 层重新使用 A，依次交替；
 8. `max_layers` 默认为 4，可改成任意正整数；设为 `0` 时支持持续增加层数，直到人工 reset。
 
 ## 模型和相机要求
@@ -49,6 +49,8 @@ http://127.0.0.1:18182/stream/depth.png
 
 主要配置位于 `production/carton_palletizing/config/line.yaml`：
 
+> ROI 仅由 VisionOps Web/Runtime 配置控制；机器人 `config.detect_region` 会被忽略，机器人不能修改 ROI。
+
 ```yaml
 task:
   algorithm:
@@ -58,7 +60,20 @@ task:
       baseline_capture_frames: 3
       baseline_settle_frames: 5
       baseline_stability_mm: 15.0
-      use_previous_detected_boxes: true
+      next_layer_geometry: layer_template
+      use_previous_detected_boxes: false
+
+    template:
+      layer_strategy: odd_even
+      default_template: odd
+      slot_order: [P3, P1, P2, P4]
+      templates:
+        odd:   # A：第1/3/5...层
+          template_id: A
+          slots: [...]
+        even:  # B：第2/4/6...层
+          template_id: B
+          slots: [...]
 
     depth:
       min_depth_mm: 100
@@ -114,7 +129,14 @@ cd /opt/visionops_v3
 |---|---|
 | RKNN Runtime | `127.0.0.1:28084` |
 | 多层堆垛业务应用 | `127.0.0.1:19210` |
+| Robot WebSocket | `0.0.0.0:9001/vision` |
 | Collector Web | `0.0.0.0:18094` |
+| 336L MJPEG | `:18182/stream.mjpeg` |
+
+机器人使用 trigger 模式：M29.2 中 `pallet_place_target`（兼容任务号 `1`）返回托盘或当前最上层 1～4 个纸箱的实测 OBB 位姿；`held_box_pose`（兼容任务号 `2`）返回手持纸箱 OBB 中心、相机坐标和角度。数字、数字字符串和原任务名均可触发，响应 `trigger_task_id` 原样回显。初期/后期只需切换 `task.communication.held_box_selection.mode=nearest_depth|outside_tray`，详细协议见 `tasks/first_layer_placement/PROTOCOL.md`。
+
+该 trigger 任务默认设置 `websocket.status_enabled: false`，不会在模拟机器人终端持续刷
+`status`。需要状态心跳时再启用；模拟客户端使用 `--show-status` 才显示状态消息。
 
 生产界面只显示当前层未占用的掩膜；绿色是当前建议位置，黄色是后续空位。层完成时显示深度基准采集进度，达到 `max_layers` 后显示“堆垛完成”。
 
@@ -141,7 +163,9 @@ cd /opt/visionops_v3
 sudo bash production/carton_palletizing/deploy/install_services.sh
 ```
 
-已有 `/etc/visionops_v3/carton_palletizing.yaml` 时，安装脚本不会覆盖它。需要手动合并新增加的 `camera_bridge.depth_path`、`layering` 和 `depth` 配置。
+已有 `/etc/visionops_v3/carton_palletizing.yaml` 时，安装脚本不会覆盖它。需要手动合并新的
+`layering.next_layer_geometry`、`template.templates.odd/even` 和
+`communication.websocket.status_enabled/status_on_connect` 配置。
 
 ---
 
