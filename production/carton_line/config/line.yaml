@@ -228,9 +228,18 @@ coordinates:
   partial_match_max_distance_px: 22.0
   partial_min_confidence: 0.10
   template_path: production/carton_line/tasks/carton_partition_check/assets/partition_template.json
+
+  # 103 coordinate task: split the 5x8 partition grid into four calibration zones.
+  # slot_id is row-major: row = slot_id // 8, col = slot_id % 8.
   dual_arm_enabled: true
+  four_zone_enabled: true
   left_columns: [0, 3]
   right_columns: [4, 7]
+  top_rows: [0, 2]
+  bottom_rows: [3, 4]
+
+  # Compatibility fallbacks. These are used when four_zone_enabled=false or a
+  # specific four-zone matrix is missing.
   single_affine:
     a00: 1.0
     a01: 0.0
@@ -239,19 +248,49 @@ coordinates:
     b0: 0.0
     b1: 0.0
   left_affine:
-    a00: 0.02143055
-    a01: -1.49495102
-    a10: -1.47967273
-    a11: -0.00292085
-    b0: 946.29821487
-    b1: 994.16131507
+    a00: -0.01064431
+    a01: -1.64328743
+    a10: -1.61966572
+    a11: -0.01330597
+    b0: 1067.07988187
+    b1: 1036.25691364
   right_affine:
-    a00: 0.00178128555
-    a01: -1.50294475
-    a10: -1.48032737
-    a11: 0.000000792093091
-    b0: 966.00553481
-    b1: 994.4879298
+    a00: 0.02913682
+    a01: -1.63969749
+    a10: -1.60610446
+    a11: 0.03048322
+    b0: 1045.30211621
+    b1: 1028.83855077
+
+  # Four production calibration matrices.
+  left_top_affine:
+    a00: -0.01064431
+    a01: -1.64328743
+    a10: -1.61966572
+    a11: -0.01330597
+    b0: 1067.07988187
+    b1: 1036.25691364
+  left_bottom_affine:
+    a00: -0.01696854
+    a01: -1.59555602
+    a10: -1.60265763
+    a11: -0.03371077
+    b0: 1065.33311694
+    b1: 1025.69439240
+  right_top_affine:
+    a00: 0.02913682
+    a01: -1.63969749
+    a10: -1.60610446
+    a11: 0.03048322
+    b0: 1045.30211621
+    b1: 1028.83855077
+  right_bottom_affine:
+    a00: 0.03447001
+    a01: -1.61140689
+    a10: -1.60557882
+    a11: -0.01744251
+    b0: 1041.30061684
+    b1: 1042.44335751
 
 debug:
   save_every_trigger: false

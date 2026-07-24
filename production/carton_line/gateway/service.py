@@ -320,8 +320,13 @@ class RobotProtocolService:
             "registers": self._register_rows(task),
         }
 
+    def gateway_snapshot(self) -> dict[str, Any]:
+        snapshot = self.state.snapshot()
+        snapshot["coordinate_mapping"] = self.coordinates.summary()
+        return snapshot
+
     def app_snapshot(self, task: str) -> dict[str, Any]:
-        gateway = self.state.snapshot()
+        gateway = self.gateway_snapshot()
         latest = gateway["latest_decisions"].get(task)
         app_id = "carton_tube_check" if task == "tube" else "carton_partition_check"
         return {
@@ -374,7 +379,7 @@ class GatewayRequestHandler(BaseHTTPRequestHandler):
                 "health": status["health"], "busy": status["busy"], "timestamp_ms": timestamp_ms(),
             })
         elif path == "/api/gateway/status":
-            self._json(200, service.state.snapshot())
+            self._json(200, service.gateway_snapshot())
         elif path == "/api/gateway/registers":
             self._json(200, {
                 "schema_version": "1.0", "message_type": "gateway_register_snapshot",
@@ -540,8 +545,35 @@ def main(argv: list[str] | None = None) -> int:
         f"HTTP={host}:{config['service']['listen_port']} "
         f"partition_app={host}:{config['service']['partition_app_port']} "
         f"tube_app={host}:{config['service']['tube_app_port']} "
-        f"Modbus={config['modbus']['host']}:{config['modbus']['port']}"
+        f"Modbus={config['modbus']['host']}:{config['modbus']['port']}",
+        flush=True,
     )
+    coordinate_summary = service.coordinates.summary()
+    print(
+        "Coordinate mapper: "
+        f"output_frame={coordinate_summary['output_frame']} "
+        f"register_order={coordinate_summary['register_order']} "
+        f"dual_arm={int(coordinate_summary['dual_arm_enabled'])} "
+        f"four_zone={int(coordinate_summary['four_zone_enabled'])} "
+        f"left_cols={coordinate_summary['left_columns']} "
+        f"right_cols={coordinate_summary['right_columns']} "
+        f"top_rows={coordinate_summary['top_rows']} "
+        f"bottom_rows={coordinate_summary['bottom_rows']}",
+        flush=True,
+    )
+    for transform_name in (
+        "left_top_affine", "left_bottom_affine",
+        "right_top_affine", "right_bottom_affine",
+    ):
+        affine = coordinate_summary["transforms"].get(transform_name)
+        if affine is not None:
+            print(
+                f"Coordinate {transform_name}: "
+                f"A=[[{affine['a00']:.8f},{affine['a01']:.8f}],"
+                f"[{affine['a10']:.8f},{affine['a11']:.8f}]] "
+                f"b=[{affine['b0']:.8f},{affine['b1']:.8f}]",
+                flush=True,
+            )
     try:
         servers[0].serve_forever(poll_interval=0.2)
     finally:

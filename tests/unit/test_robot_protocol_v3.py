@@ -95,3 +95,86 @@ def test_unified_line_config_rejects_duplicate_ports(tmp_path: Path) -> None:
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     with pytest.raises(ValueError, match="端口必须互不相同"):
         load_config(str(path))
+
+
+def test_coordinate_mapper_selects_four_zone_affines(tmp_path: Path) -> None:
+    template = {
+        "expected_rows": 5,
+        "expected_cols": 8,
+        "cells": [
+            {"slot_id": sid, "cx": sid % 8, "cy": sid // 8}
+            for sid in range(40)
+        ],
+    }
+    template_path = tmp_path / "template.json"
+    template_path.write_text(json.dumps(template), encoding="utf-8")
+
+    def affine(b0: int, b1: int) -> dict[str, float]:
+        return {"a00": 1.0, "a01": 0.0, "a10": 0.0, "a11": 1.0, "b0": b0, "b1": b1}
+
+    mapper = CoordinateMapper({
+        "template_path": str(template_path),
+        "output_frame": "robot",
+        "register_order": "row",
+        "partial_update_enabled": False,
+        "dual_arm_enabled": True,
+        "four_zone_enabled": True,
+        "left_columns": [0, 3],
+        "right_columns": [4, 7],
+        "top_rows": [0, 2],
+        "bottom_rows": [3, 4],
+        "left_affine": affine(1000, 1000),
+        "right_affine": affine(2000, 2000),
+        "left_top_affine": affine(10, 20),
+        "left_bottom_affine": affine(30, 40),
+        "right_top_affine": affine(50, 60),
+        "right_bottom_affine": affine(70, 80),
+    })
+    bank = ProtocolRegisterBank()
+    result = {"cells": [
+        {"slot_id": 0, "cx": 1, "cy": 2},    # left/top
+        {"slot_id": 24, "cx": 3, "cy": 4},  # left/bottom
+        {"slot_id": 4, "cx": 5, "cy": 6},   # right/top
+        {"slot_id": 28, "cx": 7, "cy": 8},  # right/bottom
+    ]}
+    assert mapper.write(bank, result, {"predictions": []}) == 4
+
+    by_slot = {int(cell["slot_id"]): cell for cell in result["cells"]}
+    assert (by_slot[0]["robot_cx"], by_slot[0]["robot_cy"]) == (11, 22)
+    assert by_slot[0]["coord_transform_key"] == "left_top_affine"
+    assert (by_slot[24]["robot_cx"], by_slot[24]["robot_cy"]) == (33, 44)
+    assert by_slot[24]["coord_transform_key"] == "left_bottom_affine"
+    assert (by_slot[4]["robot_cx"], by_slot[4]["robot_cy"]) == (55, 66)
+    assert by_slot[4]["coord_transform_key"] == "right_top_affine"
+    assert (by_slot[28]["robot_cx"], by_slot[28]["robot_cy"]) == (77, 88)
+    assert by_slot[28]["coord_transform_key"] == "right_bottom_affine"
+    assert result["coordinate_update"]["four_zone_enabled"] is True
+
+
+def test_coordinate_mapper_four_zone_missing_matrix_falls_back_to_arm_affine(tmp_path: Path) -> None:
+    template = {
+        "expected_rows": 5,
+        "expected_cols": 8,
+        "cells": [{"slot_id": 24, "cx": 3, "cy": 4}],
+    }
+    template_path = tmp_path / "template.json"
+    template_path.write_text(json.dumps(template), encoding="utf-8")
+    mapper = CoordinateMapper({
+        "template_path": str(template_path),
+        "output_frame": "robot",
+        "register_order": "row",
+        "partial_update_enabled": False,
+        "dual_arm_enabled": True,
+        "four_zone_enabled": True,
+        "left_columns": [0, 3],
+        "right_columns": [4, 7],
+        "top_rows": [0, 2],
+        "bottom_rows": [3, 4],
+        "left_affine": {"a00": 1, "a01": 0, "a10": 0, "a11": 1, "b0": 100, "b1": 200},
+    })
+    bank = ProtocolRegisterBank()
+    result = {"cells": [{"slot_id": 24, "cx": 3, "cy": 4}]}
+    mapper.write(bank, result, {"predictions": []})
+    cell = result["cells"][0]
+    assert (cell["robot_cx"], cell["robot_cy"]) == (103, 204)
+    assert cell["coord_transform_key"] == "left_affine"

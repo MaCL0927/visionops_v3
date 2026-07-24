@@ -102,6 +102,47 @@ cd /opt/visionops_v3
 ./production/carton_line/scripts/start_collector.sh pick
 ```
 
+### 103 四区域坐标转换
+
+`partition-tube` 的 103 坐标任务按视觉模板的 row-major `slot_id` 选择矩阵：
+
+```text
+row = slot_id // 8
+col = slot_id % 8
+
+left_top     : row 0~2, col 0~3
+left_bottom  : row 3~4, col 0~3
+right_top    : row 0~2, col 4~7
+right_bottom : row 3~4, col 4~7
+```
+
+配置位于 `/etc/visionops_v3/carton_line.yaml` 的 `coordinates`。主要开关和矩阵键：
+
+```yaml
+coordinates:
+  dual_arm_enabled: true
+  four_zone_enabled: true
+  left_columns: [0, 3]
+  right_columns: [4, 7]
+  top_rows: [0, 2]
+  bottom_rows: [3, 4]
+  left_top_affine: {a00: 1, a01: 0, a10: 0, a11: 1, b0: 0, b1: 0}
+  left_bottom_affine: {a00: 1, a01: 0, a10: 0, a11: 1, b0: 0, b1: 0}
+  right_top_affine: {a00: 1, a01: 0, a10: 0, a11: 1, b0: 0, b1: 0}
+  right_bottom_affine: {a00: 1, a01: 0, a10: 0, a11: 1, b0: 0, b1: 0}
+```
+
+如果关闭 `four_zone_enabled`，系统回退到 `left_affine/right_affine`；若四区域中的某一组缺失，也会回退到对应手臂矩阵。触发 103 后，`decision.details.cells` 会记录 `vision_row`、`vision_col`、`coord_arm`、`coord_vertical_zone` 和 `coord_transform_key`。
+
+更新已有安装配置：
+
+```bash
+cd /opt/visionops_v3
+sudo bash production/carton_line/deploy/install_services.sh --profile partition-tube
+sudo systemctl restart visionops-v3-robot-gateway.service
+sudo journalctl -u visionops-v3-robot-gateway.service -n 30 -o cat
+```
+
 ## 4. tube_pick_vision 最终契约
 
 - detection 模型：0=正常纸筒产品、1=大隔板、2=倒伏纸筒 `lying`；
