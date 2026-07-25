@@ -166,7 +166,7 @@ GET  /api/app/registers
 - Orbbec Bridge 设置会写入对应 bridge env 并触发服务重启。
 - 视觉盒子设置会写入 `/opt/visionops_v3/config/vision_box_settings.json`。
 - 算法阈值会写回当前模型目录下的 `model.yaml`。
-- 真实采集保存、采集包导出和上传仍是后续工作。
+- M32.1 已完成边缘端采集 ROI；服务端继承 ROI 元数据和 Runtime 输入 ROI 仍属于后续阶段。
 
 ## 验证
 
@@ -229,7 +229,9 @@ curl -s http://127.0.0.1:18091/api/settings/vision_box | python3 -m json.tool
 
 Collector Web 提供边缘端数据集采集、打包与上传接口：
 
-- `POST /api/dataset/images/capture`：保存当前 Runtime 快照到 `/opt/visionops_v3/data/images`。
+- `GET /api/dataset/capture_roi`：读取采集 ROI、当前采集图片数量和批次锁定状态。
+- `POST /api/dataset/capture_roi`：保存或关闭采集 ROI。
+- `POST /api/dataset/images/capture`：保存当前 Runtime 快照到 `/opt/visionops_v3/data/images`；启用采集 ROI 时，后端先裁剪再保存。
 - `GET /api/dataset/images?offset=0&limit=24`：分页读取图片。
 - `GET /api/dataset/images/<filename>/content`：预览图片。
 - `DELETE /api/dataset/images/<filename>`：删除图片。
@@ -237,6 +239,107 @@ Collector Web 提供边缘端数据集采集、打包与上传接口：
 - `POST /api/dataset/upload`：使用视觉盒子设置里的 SSH 配置打包并上传。
 
 使用 SSH 密码上传时，运行环境需要安装 `paramiko` 或系统 `sshpass`。
+
+### M32.1 采集 ROI
+
+采集上传页新增蓝色“采集 ROI”。它只影响采集链路，与模型验证页已有的黄色“结果 ROI”相互独立：
+
+```text
+采集 ROI：手动拍照、定时采图、本地下载和上传包中的图片会被实际裁剪
+结果 ROI：模型仍输入完整图，只在 Runtime 后处理阶段过滤检测结果
+```
+
+采集 ROI 默认保存到：
+
+```text
+/opt/visionops_v3/data/capture_roi.json
+```
+
+可以通过环境变量覆盖：
+
+```bash
+export VISIONOPS_CAPTURE_ROI_CONFIG_FILE=/custom/path/capture_roi.json
+```
+
+读取状态：
+
+```bash
+curl -s http://127.0.0.1:18091/api/dataset/capture_roi \
+  | python3 -m json.tool
+```
+
+启用 ROI 示例：
+
+```bash
+curl -s -X POST http://127.0.0.1:18091/api/dataset/capture_roi \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "enabled": true,
+    "source_resolution": {"width": 1280, "height": 720},
+    "normalized_xyxy": [0.25, 0.20, 0.75, 0.80]
+  }' | python3 -m json.tool
+```
+
+关闭 ROI：
+
+```bash
+curl -s -X POST http://127.0.0.1:18091/api/dataset/capture_roi \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "enabled": false,
+    "source_resolution": {"width": 1280, "height": 720}
+  }' | python3 -m json.tool
+```
+
+为避免同一个数据包混入不同裁剪区域，只要采集目录中仍有图片，系统就锁定当前 ROI。此时修改或关闭 ROI 会返回：
+
+```text
+HTTP 409 / CAPTURE_ROI_BATCH_LOCKED
+```
+
+Web 页面会让用户确认是否清空现有图片。API 调用方也可以明确提交：
+
+```json
+{
+  "enabled": true,
+  "source_resolution": {"width": 1280, "height": 720},
+  "normalized_xyxy": [0.20, 0.15, 0.80, 0.85],
+  "clear_existing_images": true
+}
+```
+
+该操作会删除当前采集目录内的全部图片，再应用新 ROI。
+
+启用 ROI 后，手动拍照与定时采图都调用同一个后端保存函数。后端只在采集时对 Runtime JPEG/PNG 快照执行一次解码、裁剪和重新编码，不改变生产推理链路。
+
+每个采集压缩包根目录会同时包含：
+
+```text
+manifest.json
+capture_manifest.json
+images/
+```
+
+`capture_manifest.json` 示例：
+
+```json
+{
+  "schema_version": "1.0",
+  "message_type": "capture_manifest",
+  "images_are_cropped": true,
+  "coordinate_space": "runtime_snapshot",
+  "capture_roi": {
+    "enabled": true,
+    "source_resolution": {"width": 1280, "height": 720},
+    "normalized_xyxy": [0.25, 0.20, 0.75, 0.80],
+    "pixel_xyxy": [320, 144, 960, 576],
+    "crop_resolution": {"width": 640, "height": 432}
+  },
+  "image_count": 100
+}
+```
+
+M32.1 只完成边缘端采集链路。服务端接收后继续传递 ROI 到训练任务和模型 `model.yaml`，以及 Runtime 使用 RGA 将 ROI 实际作为模型输入，属于后续阶段。
 
 ## 定时采图
 

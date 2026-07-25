@@ -90,10 +90,10 @@ def normalize_axis_angle(angle_deg: float) -> float:
 
 
 def normalize_direction_angle(angle_deg: float) -> float:
-    """Normalize a directed image-plane angle to [-180, 180)."""
+    """Normalize a directed image-plane angle to [0, 360)."""
 
-    value = (float(angle_deg) + 180.0) % 360.0 - 180.0
-    return 0.0 if abs(value) < 1e-9 else value
+    value = float(angle_deg) % 360.0
+    return 0.0 if abs(value) < 1e-9 or abs(value - 360.0) < 1e-9 else value
 
 
 def resolve_handle_direction_angle(

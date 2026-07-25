@@ -16,12 +16,21 @@ import re
 import shutil
 import subprocess
 import tarfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .config_loader import CollectorConfig
+from .capture_roi import (
+    CAPTURE_ROI_CONFIG_PATH,
+    capture_roi_signature,
+    load_capture_roi_config,
+    normalize_capture_roi,
+    resolve_capture_roi_for_image,
+    save_capture_roi_config,
+)
 from .response_utils import timestamp_ms
 from .runtime_client import RuntimeClient, RuntimeUnavailable
 from .vision_box_settings import DEFAULT_PROJECT_ROOT, load_vision_box_settings
@@ -33,6 +42,11 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 PACKAGE_ID_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
 DEFAULT_LIMIT = 24
 MAX_LIMIT = 100
+_DATASET_LOCK = threading.RLock()
+
+
+class CaptureRoiConflict(ValueError):
+    """已有采集图片时尝试切换采集 ROI。"""
 
 
 def _safe_id(value: str, fallback: str) -> str:
@@ -120,19 +134,97 @@ def get_image_file(filename: str) -> tuple[Path, str]:
 
 
 def delete_image(filename: str) -> dict[str, Any]:
-    path = _image_path(filename)
-    if not path.exists() or not path.is_file():
-        raise FileNotFoundError(filename)
-    path.unlink()
+    with _DATASET_LOCK:
+        path = _image_path(filename)
+        if not path.exists() or not path.is_file():
+            raise FileNotFoundError(filename)
+        path.unlink()
+        return {
+            "schema_version": "1.0",
+            "message_type": "dataset_image_delete_result",
+            "status": "ok",
+            "timestamp_ms": timestamp_ms(),
+            "deleted": True,
+            "filename": path.name,
+            "image_dir": str(IMAGE_DIR),
+        }
+
+
+def _dataset_images() -> list[Path]:
+    _ensure_dirs()
+    return [p for p in IMAGE_DIR.iterdir() if p.is_file() and p.suffix.lower() in ALLOWED_EXTENSIONS]
+
+
+def get_capture_roi_state() -> dict[str, Any]:
+    config = load_capture_roi_config()
+    images = _dataset_images()
     return {
         "schema_version": "1.0",
-        "message_type": "dataset_image_delete_result",
+        "message_type": "capture_roi_state",
         "status": "ok",
         "timestamp_ms": timestamp_ms(),
-        "deleted": True,
-        "filename": path.name,
-        "image_dir": str(IMAGE_DIR),
+        "capture_roi": config,
+        "image_count": len(images),
+        "batch_locked": bool(images),
+        "config_path": str(CAPTURE_ROI_CONFIG_PATH),
     }
+
+
+def update_capture_roi(payload: dict[str, Any] | None) -> dict[str, Any]:
+    raw = payload if isinstance(payload, dict) else {}
+    desired = normalize_capture_roi(raw)
+    with _DATASET_LOCK:
+        current = load_capture_roi_config()
+        images = _dataset_images()
+        changed = capture_roi_signature(desired) != capture_roi_signature(current)
+        clear_existing = raw.get("clear_existing_images") is True
+        if changed and images and not clear_existing:
+            raise CaptureRoiConflict(
+                f"当前采集目录已有 {len(images)} 张图片。为避免一个数据包混入多套 ROI，"
+                "请先清空采集图片，或确认清空后再应用新 ROI。"
+            )
+        deleted_count = 0
+        if changed and images and clear_existing:
+            for image in images:
+                image.unlink()
+                deleted_count += 1
+        saved = save_capture_roi_config(desired)
+        remaining = _dataset_images()
+        return {
+            "schema_version": "1.0",
+            "message_type": "capture_roi_update_result",
+            "status": "ok",
+            "timestamp_ms": timestamp_ms(),
+            "capture_roi": saved,
+            "image_count": len(remaining),
+            "batch_locked": bool(remaining),
+            "deleted_image_count": deleted_count,
+        }
+
+
+def _encode_cropped_snapshot(body: bytes, content_type: str, capture_roi: dict[str, Any]) -> tuple[bytes, str, dict[str, Any]]:
+    # cv2/numpy 由 RK3576 系统 apt 包提供，Collector venv 使用 --system-site-packages。
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+
+    encoded = np.frombuffer(body, dtype=np.uint8)
+    image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    if image is None or image.size == 0:
+        raise ValueError("Runtime 快照不是可解码的 JPEG/PNG 图像")
+    height, width = image.shape[:2]
+    effective_roi = resolve_capture_roi_for_image(capture_roi, width, height)
+    x1, y1, x2, y2 = effective_roi["pixel_xyxy"]
+    cropped = np.ascontiguousarray(image[y1:y2, x1:x2])
+    if cropped.size == 0:
+        raise ValueError("采集 ROI 裁剪结果为空")
+
+    use_png = content_type == "image/png"
+    extension = ".png" if use_png else ".jpg"
+    params = [cv2.IMWRITE_PNG_COMPRESSION, 3] if use_png else [cv2.IMWRITE_JPEG_QUALITY, 95]
+    ok, result = cv2.imencode(extension, cropped, params)
+    if not ok:
+        raise ValueError("采集 ROI 图片编码失败")
+    return result.tobytes(), extension, effective_roi
 
 
 def save_runtime_snapshot(runtime_client: RuntimeClient, prefix: str = "visionops") -> dict[str, Any]:
@@ -140,21 +232,29 @@ def save_runtime_snapshot(runtime_client: RuntimeClient, prefix: str = "visionop
     response = runtime_client.request("GET", f"/api/runtime/snapshot.jpg?t={timestamp_ms()}")
     if response.status_code != 200 or not response.body:
         raise RuntimeUnavailable(f"Runtime snapshot failed: HTTP {response.status_code}")
-    ext = ".jpg"
-    if response.content_type == "image/png":
-        ext = ".png"
-    filename = f"{prefix}_{_now_stamp()}{ext}"
-    path = IMAGE_DIR / filename
-    path.write_bytes(response.body)
-    return {
-        "schema_version": "1.0",
-        "message_type": "dataset_capture_result",
-        "status": "ok",
-        "timestamp_ms": timestamp_ms(),
-        "image": _image_record(path),
-        "image_dir": str(IMAGE_DIR),
-        "content_type": response.content_type,
-    }
+
+    with _DATASET_LOCK:
+        capture_roi = load_capture_roi_config()
+        ext = ".png" if response.content_type == "image/png" else ".jpg"
+        body = response.body
+        effective_roi = capture_roi
+        if capture_roi.get("enabled") is True:
+            body, ext, effective_roi = _encode_cropped_snapshot(body, response.content_type, capture_roi)
+
+        filename = f"{prefix}_{_now_stamp()}{ext}"
+        path = IMAGE_DIR / filename
+        path.write_bytes(body)
+        return {
+            "schema_version": "1.0",
+            "message_type": "dataset_capture_result",
+            "status": "ok",
+            "timestamp_ms": timestamp_ms(),
+            "image": _image_record(path),
+            "image_dir": str(IMAGE_DIR),
+            "content_type": "image/png" if ext == ".png" else "image/jpeg",
+            "images_are_cropped": bool(effective_roi.get("enabled")),
+            "capture_roi": effective_roi,
+        }
 
 
 def _package_record(path: Path) -> dict[str, Any]:
@@ -183,6 +283,12 @@ def list_packages(limit: int = 20) -> dict[str, Any]:
 
 
 def create_dataset_package(metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    # 打包期间暂停同进程内的定时/手动写图，确保图片集合和 capture_manifest 一致。
+    with _DATASET_LOCK:
+        return _create_dataset_package_locked(metadata)
+
+
+def _create_dataset_package_locked(metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     _ensure_dirs()
     images = [p for p in IMAGE_DIR.iterdir() if p.is_file() and p.suffix.lower() in ALLOWED_EXTENSIONS]
     images.sort(key=lambda p: p.name)
@@ -204,6 +310,16 @@ def create_dataset_package(metadata: dict[str, Any] | None = None) -> dict[str, 
         package_path = PACKAGE_DIR / package_name
         suffix += 1
 
+    capture_roi = load_capture_roi_config()
+    capture_manifest = {
+        "schema_version": "1.0",
+        "message_type": "capture_manifest",
+        "created_at": created_at,
+        "images_are_cropped": bool(capture_roi.get("enabled")),
+        "coordinate_space": "runtime_snapshot",
+        "capture_roi": capture_roi,
+        "image_count": len(images),
+    }
     manifest = {
         "device_id": device_id,
         "customer_id": customer_id,
@@ -212,14 +328,24 @@ def create_dataset_package(metadata: dict[str, Any] | None = None) -> dict[str, 
         "created_at": created_at,
         "counts": {"all": len(images)},
         "package_name": package_name,
+        "capture": {
+            "images_are_cropped": capture_manifest["images_are_cropped"],
+            "capture_roi": capture_roi,
+            "manifest_file": "capture_manifest.json",
+        },
     }
     with tarfile.open(package_path, "w:gz") as tar:
-        manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
         import io
-        info = tarfile.TarInfo("manifest.json")
-        info.size = len(manifest_bytes)
-        info.mtime = time.time()
-        tar.addfile(info, io.BytesIO(manifest_bytes))
+
+        for archive_name, document in (
+            ("manifest.json", manifest),
+            ("capture_manifest.json", capture_manifest),
+        ):
+            document_bytes = json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8")
+            info = tarfile.TarInfo(archive_name)
+            info.size = len(document_bytes)
+            info.mtime = time.time()
+            tar.addfile(info, io.BytesIO(document_bytes))
         for path in images:
             tar.add(path, arcname=f"images/{path.name}")
     return {
@@ -232,7 +358,9 @@ def create_dataset_package(metadata: dict[str, Any] | None = None) -> dict[str, 
         "image_dir": str(IMAGE_DIR),
         "package_dir": str(PACKAGE_DIR),
         "manifest": manifest,
+        "capture_manifest": capture_manifest,
     }
+
 
 def _validate_upload_config(config: dict[str, Any]) -> dict[str, Any]:
     upload = config.get("upload") if isinstance(config, dict) else {}
@@ -341,6 +469,7 @@ def create_and_upload_dataset(config: CollectorConfig, metadata: dict[str, Any] 
             "package": package_result["package"],
             "image_count": package_result["image_count"],
             "manifest": package_result.get("manifest"),
+            "capture_manifest": package_result.get("capture_manifest"),
             "upload": {
                 "server_ip": upload.get("server_ip"),
                 "ssh_user": upload.get("ssh_user"),
@@ -360,6 +489,7 @@ def create_and_upload_dataset(config: CollectorConfig, metadata: dict[str, Any] 
         "package": package_result["package"],
         "image_count": package_result["image_count"],
         "manifest": package_result.get("manifest"),
+        "capture_manifest": package_result.get("capture_manifest"),
         "upload": {
             "server_ip": upload.get("server_ip"),
             "ssh_user": upload.get("ssh_user"),

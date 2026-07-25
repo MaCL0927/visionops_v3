@@ -23,13 +23,16 @@ from .algorithm_settings import apply_algorithm_settings, get_algorithm_settings
 from .vision_box_settings import apply_vision_box_settings, get_vision_box_settings_payload, load_vision_box_settings
 from .timed_capture import TimedCaptureController
 from .dataset_manager import (
+    CaptureRoiConflict,
     create_and_upload_dataset,
     create_dataset_package,
     delete_image,
+    get_capture_roi_state,
     get_image_file,
     list_images,
     list_packages,
     save_runtime_snapshot,
+    update_capture_roi,
 )
 
 
@@ -120,6 +123,9 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/dataset/timed_capture":
             send_json(self, 200, self.server.timed_capture.status())
             return
+        if path == "/api/dataset/capture_roi":
+            self._send_capture_roi()
+            return
         if path == "/api/runtime/roi":
             self._proxy_runtime(path, expected_method="GET")
             return
@@ -160,6 +166,9 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/dataset/timed_capture":
             self._configure_timed_capture()
+            return
+        if path == "/api/dataset/capture_roi":
+            self._update_capture_roi()
             return
         if path == "/api/runtime/roi":
             self._proxy_runtime(path, expected_method="POST")
@@ -323,6 +332,34 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             return
         except OSError as error:
             self._send_collector_error(500, "DATASET_IMAGE_DELETE_FAILED", "删除采集图片失败", True, detail=str(error))
+            return
+        send_json(self, 200, payload)
+
+    def _send_capture_roi(self) -> None:
+        try:
+            payload = get_capture_roi_state()
+        except ValueError as error:
+            self._send_collector_error(500, "CAPTURE_ROI_CONFIG_INVALID", str(error), True)
+            return
+        send_json(self, 200, payload)
+
+    def _update_capture_roi(self) -> None:
+        payload_body = self._read_json_body()
+        if payload_body is None:
+            return
+        try:
+            payload = update_capture_roi(payload_body)
+        except CaptureRoiConflict as error:
+            self._send_collector_error(409, "CAPTURE_ROI_BATCH_LOCKED", str(error), True)
+            return
+        except ValueError as error:
+            self._send_collector_error(400, "CAPTURE_ROI_INVALID", str(error), True)
+            return
+        except PermissionError as error:
+            self._send_collector_error(403, "CAPTURE_ROI_PERMISSION_DENIED", "保存采集 ROI 权限不足", True, detail=str(error))
+            return
+        except OSError as error:
+            self._send_collector_error(500, "CAPTURE_ROI_SAVE_FAILED", "保存采集 ROI 失败", True, detail=str(error))
             return
         send_json(self, 200, payload)
 

@@ -60,8 +60,8 @@
             </aside>
             <section class="content-card">
               <section id="capture-shoot" class="subscreen active">
-                <div class="screen-head"><div><div class="kicker">采集上传 / 第 1 步</div><h1>拍照采集</h1><p>使用 Runtime 当前快照进行预览、下载或保存到边缘端数据集。</p></div><div class="head-actions"><button id="capture-refresh">刷新快照</button><button id="capture-shoot-btn" class="primary">拍照采集并保存</button><button id="capture-timed-btn">定时采图</button><button id="capture-download">本地下载</button></div></div>
-                <div class="camera-stage capture-stage"><img id="capture-image" class="stage-image" alt="采集快照"><div id="capture-empty" class="stage-empty">等待 Runtime snapshot</div><div class="camera-label"><b>实时预览 / 当前快照</b><span id="capture-message">尚未刷新</span></div></div>
+                <div class="screen-head"><div><div class="kicker">采集上传 / 第 1 步</div><h1>拍照采集</h1><p>使用 Runtime 当前快照进行预览；启用采集 ROI 后，手动采集、定时采图和本地下载只保存 ROI 内图像。</p></div><div class="head-actions"><button id="capture-refresh">刷新快照</button><button id="capture-roi-btn">采集 ROI</button><button id="capture-shoot-btn" class="primary">拍照采集并保存</button><button id="capture-timed-btn">定时采图</button><button id="capture-download">本地下载</button></div></div>
+                <div class="camera-stage capture-stage"><img id="capture-image" class="stage-image" alt="采集快照"><canvas id="capture-roi-overlay" aria-hidden="true"></canvas><div id="capture-empty" class="stage-empty">等待 Runtime snapshot</div><div class="camera-label"><b>实时预览 / 当前快照</b><span id="capture-message">尚未刷新</span></div></div>
               </section>
               <section id="capture-upload" class="subscreen">
                 <div class="screen-head"><div><div class="kicker">采集上传 / 第 2 步</div><h1>采集记录与上传</h1><p>分页读取边缘端已保存图片，避免图片过多导致 Web 卡顿。</p></div><div class="head-actions"><button id="capture-refresh-list">刷新列表</button><button id="capture-clear">删除当前页</button><button id="capture-upload-server" class="primary">上传服务器</button></div></div>
@@ -153,6 +153,32 @@
 
 
 
+
+    <div id="capture-roi-modal" class="modal-mask roi-modal-mask" aria-hidden="true">
+      <section class="roi-dialog" role="dialog" aria-modal="true" aria-labelledby="capture-roi-title">
+        <div class="dialog-head">
+          <div><h2 id="capture-roi-title">绘制采集 ROI</h2><p>拖动绘制蓝色矩形。启用后手动拍照、定时采图和本地下载只保存该区域；模型验证页的黄色“结果 ROI”不受影响。</p></div>
+          <button id="capture-roi-close" class="close-btn" aria-label="关闭">×</button>
+        </div>
+        <div class="roi-editor-body">
+          <div class="roi-editor-stage capture-roi-editor-stage">
+            <img id="capture-roi-image" alt="当前相机原始图像">
+            <canvas id="capture-roi-canvas"></canvas>
+            <div id="capture-roi-empty" class="stage-empty">正在读取当前相机图像</div>
+          </div>
+          <div class="roi-editor-info capture-roi-editor-info">
+            <b>当前采集 ROI</b>
+            <span id="capture-roi-coordinates">未设置，采集时保存完整画面</span>
+            <em>一个采集批次只允许一套 ROI。已有图片时修改 ROI，系统会要求先清空现有采集图片，防止数据包混入不同视野。</em>
+          </div>
+        </div>
+        <div class="dialog-actions">
+          <button id="capture-roi-disable" class="danger-soft">关闭采集 ROI</button>
+          <button id="capture-roi-cancel">取消</button>
+          <button id="capture-roi-save" class="primary">保存采集 ROI</button>
+        </div>
+      </section>
+    </div>
 
     <div id="capture-timed-modal" class="modal-mask capture-modal-mask" aria-hidden="true">
       <section class="capture-timed-dialog" role="dialog" aria-modal="true" aria-labelledby="capture-timed-title">

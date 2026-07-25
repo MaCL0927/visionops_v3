@@ -53,6 +53,7 @@ export const endpoints = {
   datasetImages: "/api/dataset/images",
   datasetCapture: "/api/dataset/images/capture",
   timedCapture: "/api/dataset/timed_capture",
+  captureRoi: "/api/dataset/capture_roi",
   datasetPackageCreate: "/api/dataset/packages/create",
   datasetPackages: "/api/dataset/packages",
   datasetUpload: "/api/dataset/upload",

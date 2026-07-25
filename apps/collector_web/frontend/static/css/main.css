@@ -342,3 +342,10 @@ button.danger-soft { background:#fff3f3; color:#9f1239; border-color:#fecdd3; }
   .roi-editor-info { top:10px; right:10px; width:min(310px,72vw); max-height:42%; padding:10px 12px; font-size:13px; }
   .roi-dialog .dialog-actions { padding:8px 10px; }
 }
+
+/* M32.1 capture ROI */
+.capture-stage #capture-roi-overlay { position:absolute; z-index:2; pointer-events:none; }
+.capture-stage .camera-label { z-index:3; }
+#capture-roi-btn.active { background:#e0f2fe; border-color:#0284c7; color:#075985; box-shadow:0 0 0 3px rgba(2,132,199,.14); }
+#capture-roi-modal { padding:6px; }
+.capture-roi-editor-info { border-color:rgba(125,211,252,.95); }
