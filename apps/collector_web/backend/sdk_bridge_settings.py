@@ -362,6 +362,7 @@ def _runtime_service_candidates() -> list[str]:
         "visionops-v3-runtime-tube.service",
         "visionops-v3-runtime-pick.service",
         "visionops-v3-carton-palletizing-runtime.service",
+        "visionops-v3-detergent-grasp-runtime.service",
     ])
 
 
@@ -371,6 +372,7 @@ def _camera_dependent_service_candidates() -> list[str]:
         "visionops-v3-robot-gateway.service",
         "visionops-v3-ws-pick.service",
         "visionops-v3-carton-palletizing-app.service",
+        "visionops-v3-detergent-grasp-app.service",
     ])
 
 

@@ -189,6 +189,15 @@ REQUIRED_EDGE_FILES=(
   "production/carton_line/scripts/start_gateway.sh"
   "production/carton_line/scripts/start_ws_pick.sh"
   "production/carton_line/deploy/install_services.sh"
+  "production/detergent_grasp/config/line.yaml"
+  "production/detergent_grasp/launcher.py"
+  "production/detergent_grasp/tasks/detergent_grasp_vision/algorithm.py"
+  "production/detergent_grasp/tasks/detergent_grasp_vision/service.py"
+  "production/detergent_grasp/tasks/detergent_grasp_vision/websocket_server.py"
+  "production/detergent_grasp/scripts/start_runtime.sh"
+  "production/detergent_grasp/scripts/start_app.sh"
+  "production/detergent_grasp/scripts/start_collector.sh"
+  "production/detergent_grasp/deploy/install_services.sh"
 )
 
 COMMON_EXCLUDES=(

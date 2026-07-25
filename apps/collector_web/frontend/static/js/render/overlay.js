@@ -261,6 +261,72 @@ function drawBoxGraspOverlay(ctx, grasp, sx, sy, canvasWidth) {
   }
 }
 
+
+function drawDetergentGraspOverlay(ctx, detergent, sx, sy, canvasWidth) {
+  const items = Array.isArray(detergent?.robot_items) ? detergent.robot_items : [];
+  for (const item of items) {
+    if (!item || item.target_type === "box") continue;
+    const center = point(item.object_center_px);
+    const grasp = point(item.grasp_point_px);
+    const angleDeg = Number(item.angle_deg);
+    if (!center || !Number.isFinite(angleDeg)) continue;
+
+    const polygon = Array.isArray(item.obb_points)
+      ? item.obb_points.map(point).filter(Boolean)
+      : [];
+    let arrowLength = 42;
+    if (polygon.length >= 4) {
+      const distances = polygon.map(([px, py]) => Math.hypot(px - center[0], py - center[1]));
+      arrowLength = Math.max(28, Math.max(...distances) * 0.78);
+    }
+
+    const angle = angleDeg * Math.PI / 180;
+    const startX = center[0] * sx;
+    const startY = center[1] * sy;
+    const endX = (center[0] + Math.cos(angle) * arrowLength) * sx;
+    const endY = (center[1] + Math.sin(angle) * arrowLength) * sy;
+    const headSize = Math.max(8, Math.round(canvasWidth / 110));
+
+    ctx.save();
+    ctx.strokeStyle = "#ef4444";
+    ctx.fillStyle = "#ef4444";
+    ctx.lineWidth = Math.max(3, Math.round(canvasWidth / 360));
+    ctx.beginPath();
+    ctx.moveTo(startX, startY);
+    ctx.lineTo(endX, endY);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(endX, endY);
+    ctx.lineTo(
+      endX - Math.cos(angle - Math.PI / 6) * headSize,
+      endY - Math.sin(angle - Math.PI / 6) * headSize,
+    );
+    ctx.lineTo(
+      endX - Math.cos(angle + Math.PI / 6) * headSize,
+      endY - Math.sin(angle + Math.PI / 6) * headSize,
+    );
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.fillStyle = "#facc15";
+    ctx.arc(startX, startY, Math.max(4, Math.round(canvasWidth / 190)), 0, Math.PI * 2);
+    ctx.fill();
+
+    if (grasp) {
+      ctx.beginPath();
+      ctx.fillStyle = "#22d3ee";
+      ctx.arc(grasp[0] * sx, grasp[1] * sy, Math.max(4, Math.round(canvasWidth / 190)), 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.font = `bold ${Math.max(13, Math.round(canvasWidth / 74))}px system-ui`;
+    const label = `${item.target_type || item.class_name || "bottle"} ${angleDeg.toFixed(1)}°`;
+    drawLabel(ctx, Math.min(startX, endX), Math.min(startY, endY), label, canvasWidth);
+    ctx.restore();
+  }
+}
+
 export function clearOverlay(canvas) { canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height); }
 
 export function drawInferenceOverlay(canvas, image, result) {
@@ -343,4 +409,6 @@ export function drawInferenceOverlay(canvas, image, result) {
       drawLabel(ctx, x, y, label, canvas.width);
     }
   }
+
+  drawDetergentGraspOverlay(ctx, result?.detergent_grasp, sx, sy, canvas.width);
 }

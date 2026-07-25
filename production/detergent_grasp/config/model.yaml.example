@@ -1,0 +1,27 @@
+schema_version: "1.0"
+model_id: rk3576-detergent-grasp-obb
+model_name: detergent_grasp_obb
+model_version: "1.0"
+task_type: obb
+target_platform: rk3576
+input_size: [640, 640]
+model:
+  name: detergent_grasp_obb
+  version: "1.0"
+  task: obb
+  format: rknn
+  target_platform: rk3576
+  input_size: [640, 640]
+classes:
+  - {id: 0, name: big}
+  - {id: 1, name: head}
+  - {id: 2, name: box}
+  - {id: 3, name: small}
+class_names: [big, head, box, small]
+postprocess:
+  conf_threshold: 0.50
+  iou_threshold: 0.45
+  max_det: 100
+runtime:
+  preprocess: letterbox
+  color: rgb

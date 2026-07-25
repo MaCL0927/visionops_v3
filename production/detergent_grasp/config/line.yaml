@@ -1,0 +1,103 @@
+schema_version: "1.0"
+task_id: detergent_grasp
+device_id: lb3576-detergent-grasp
+
+# 图像源仍由 Web“设置 → 相机设置”写入 config/active_camera.json。
+# 当前任务建议选择 hp60c；如果现场使用 336L RGB，也无需改业务代码。
+camera_bridge:
+  fps: 30
+  shared_rgb_enabled: true
+  shared_rgb_name: /visionops_orbbec336l_rgb
+  shared_rgb_fallback_http: true
+  stale_ms: 5000
+
+runtime_recovery:
+  stale_frame_timeout_ms: 3000
+  failure_threshold: 3
+  initial_backoff_ms: 200
+  max_backoff_ms: 2000
+
+runtime:
+  url: http://127.0.0.1:28087
+  model_dir: models/detergent_grasp/current
+  roi_config_path: data/runtime/roi_detergent_grasp.json
+  device_id: lb3576-detergent-grasp-runtime
+  component: rknn_runtime_detergent_grasp
+  accepted_task_types: [obb]
+  max_detections: 100
+
+app:
+  listen_host: 127.0.0.1
+  listen_port: 19212
+  request_timeout_ms: 5000
+  inference_settings_path: /opt/visionops_v3/config/detergent_grasp_inference_settings.json
+  default_production_inference_fps: 15.0
+
+collector:
+  listen_host: 0.0.0.0
+  listen_port: 18096
+  device_id: lb3576-detergent-grasp
+  component: collector_detergent_grasp
+  models_root: models/detergent_grasp
+  snapshot_refresh_interval_ms: 200
+  status_refresh_interval_ms: 2000
+  production_inference_source: app
+
+websocket:
+  listen_host: 0.0.0.0
+  listen_port: 9001
+  path: /vision
+  token: ""
+  auto_start: true
+  status_interval_s: 2.0
+  read_timeout_s: 30.0
+  max_clients: 4
+  max_payload_bytes: 1048576
+  trigger_queue_size: 32
+  trigger_task_ids: [detergent_grasp, detergent_pick, "1", 1]
+
+video:
+  type: mjpeg
+  # load_config 会保留这个主机地址，并按 active_camera 自动替换端口和路径。
+  public_url: http://192.168.20.20:18181/stream.mjpeg
+  sync: soft
+
+algorithm:
+  image:
+    width: 640
+    height: 480
+    require_fixed_size: true
+  require_obb: true
+  classes:
+    # 当前模型约定：0=big, 1=head, 2=box, 3=small。
+    # 实际类别名优先于 class_id；重新训练后若类别顺序变化，优先改这里。
+    big_bottle_ids: [0]
+    big_bottle_names: [big, large, big_bottle, large_bottle]
+    small_bottle_ids: [3]
+    small_bottle_names: [small, small_bottle]
+    grasp_point_ids: [1]
+    grasp_point_names: [head, grasp, grasp_point, pick_point]
+    box_ids: [2]
+    box_names: [box, carton, destination_box]
+    big_bottle_min_confidence: 0.50
+    small_bottle_min_confidence: 0.50
+    grasp_point_min_confidence: 0.50
+    box_min_confidence: 0.50
+  association:
+    # head 中心优先落在扩大的瓶体 OBB 内；否则允许按归一化中心距离匹配。
+    bottle_polygon_expand_ratio: 1.18
+    max_center_distance_ratio: 0.65
+    require_grasp_point: true
+  selection:
+    max_bottles: 8
+    max_boxes: 1
+    output_order: row_major
+  output:
+    # 瓶体 angle_deg 会根据 head 中心所在半边消除 180° 歧义：
+    # 沿瓶体长轴距离 head 更远的一端定义为把手方向，输出范围 [-180, 180)。
+    include_obb_points: true
+    include_class_name: true
+
+debug:
+  save_every_trigger: false
+  save_root: /tmp/visionops_v3/detergent_grasp/latest

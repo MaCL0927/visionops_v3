@@ -222,11 +222,14 @@ loaded = {name: importlib.import_module(name) for name in required_modules}
 from apps.collector_web.backend.config_loader import CollectorConfig  # noqa: F401
 from production.carton_line.gateway.config import load_config as load_carton_line_config
 from production.carton_palletizing.config import load_config as load_palletizing_config
+from production.detergent_grasp.config import load_config as load_detergent_grasp_config
 
 if not callable(load_carton_line_config):
     raise RuntimeError("carton_line load_config is not callable")
 if not callable(load_palletizing_config):
     raise RuntimeError("carton_palletizing load_config is not callable")
+if not callable(load_detergent_grasp_config):
+    raise RuntimeError("detergent_grasp load_config is not callable")
 
 # Catch syntax/import regressions in the edge-facing Python tree without
 # starting cameras, runtimes, HTTP servers or robot gateways.
