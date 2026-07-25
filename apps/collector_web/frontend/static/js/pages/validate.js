@@ -1,6 +1,11 @@
 import { ApiError, endpoints, postJson, requestBlob, requestJson } from "../api.js";
 import { getState, updateState } from "../state.js";
 import { clearOverlay, drawInferenceOverlay } from "../render/overlay.js";
+import {
+  drawModelInputPreview,
+  inputRoiPreviewDescription,
+  renderInputRoiDiagnostics,
+} from "../render/input_roi.js";
 
 const image = document.getElementById("validate-image");
 const canvas = document.getElementById("validate-overlay");
@@ -17,6 +22,13 @@ const roiCanvas = document.getElementById("validate-roi-canvas");
 const roiStage = document.querySelector(".roi-editor-stage");
 const roiEmpty = document.getElementById("validate-roi-empty");
 const roiCoordinates = document.getElementById("validate-roi-coordinates");
+const inputPreviewButton = document.getElementById("validate-input-preview");
+const inputPreviewLayout = document.getElementById("validate-visual-grid");
+const inputPreviewPanel = document.getElementById("validate-input-preview-panel");
+const inputPreviewCanvas = document.getElementById("validate-input-preview-canvas");
+const inputPreviewStatus = document.getElementById("validate-input-preview-status");
+const inputPreviewMeta = document.getElementById("validate-input-preview-meta");
+const inputRoiDiagnostics = document.getElementById("validate-input-roi-diagnostics");
 
 let snapshotUrl = null;
 let currentResult = null;
@@ -31,6 +43,7 @@ let roiDraft = { enabled: false, x1: 0, y1: 0, x2: 1, y2: 1 };
 let roiDrawing = false;
 let roiStartPoint = null;
 let roiResizeObserver = null;
+let inputPreviewVisible = false;
 
 function formatBytes(value) {
   if (value == null || Number.isNaN(Number(value))) return "--";
@@ -53,6 +66,31 @@ function catalogMessage(text, kind = "") {
 function renderEmptySummary(text) {
   targetSummary.innerHTML = `<div class="empty-copy">${text}</div>`;
   resultBrief.textContent = "尚无结果";
+}
+
+function refreshInputPreview() {
+  const state = renderInputRoiDiagnostics(inputRoiDiagnostics, currentResult);
+  if (!inputPreviewVisible || !currentResult || !image?.naturalWidth) return state;
+  const previewState = drawModelInputPreview(inputPreviewCanvas, image, currentResult);
+  if (inputPreviewStatus) {
+    inputPreviewStatus.textContent = previewState?.enabled ? "ROI 输入" : "全画面输入";
+    inputPreviewStatus.className = `status-pill ${previewState?.enabled ? "" : "soft"}`.trim();
+  }
+  if (inputPreviewMeta) inputPreviewMeta.textContent = inputRoiPreviewDescription(previewState);
+  return previewState;
+}
+
+function setInputPreviewVisible(visible) {
+  inputPreviewVisible = Boolean(visible);
+  inputPreviewPanel?.classList.toggle("hidden", !inputPreviewVisible);
+  inputPreviewLayout?.classList.toggle("preview-active", inputPreviewVisible);
+  inputPreviewButton?.classList.toggle("active", inputPreviewVisible);
+  inputPreviewButton?.setAttribute("aria-pressed", inputPreviewVisible ? "true" : "false");
+  if (inputPreviewButton) inputPreviewButton.textContent = inputPreviewVisible ? "关闭输入预览" : "模型输入预览";
+  window.requestAnimationFrame(() => {
+    if (currentResult) drawInferenceOverlay(canvas, image, currentResult);
+    refreshInputPreview();
+  });
 }
 
 function setRealtimeButtonState(running) {
@@ -158,6 +196,7 @@ function showResult(result) {
     document.getElementById(`timing-${key}`).textContent = timing[`${key}_ms`] == null ? "--" : `${timing[`${key}_ms`]} ms`;
   }
   renderResultSummary(result);
+  renderInputRoiDiagnostics(inputRoiDiagnostics, result);
 }
 
 function showRoiModal() {
@@ -377,6 +416,21 @@ async function refreshRoiState() {
   }
 }
 
+function formatModelInputRoi(model) {
+  const roi = model?.input_roi || {};
+  if (roi.enabled !== true) return "全画面";
+  const crop = roi.crop_resolution || {};
+  const source = roi.source_resolution || {};
+  if (Number(crop.width) > 0 && Number(crop.height) > 0) {
+    const suffix = Number(source.width) > 0 && Number(source.height) > 0
+      ? ` @ ${source.width}×${source.height}`
+      : "";
+    return `${crop.width}×${crop.height}${suffix}`;
+  }
+  const pixel = Array.isArray(roi.pixel_xyxy) ? roi.pixel_xyxy : [];
+  return pixel.length === 4 ? `[${pixel.join(",")}]` : "已启用";
+}
+
 function renderModelList() {
   const models = [...(currentCatalog?.models || [])].sort((left, right) => Number(right.mtime_ms || 0) - Number(left.mtime_ms || 0));
   if (!models.length) {
@@ -401,7 +455,8 @@ function renderModelList() {
       <div class="model-meta">
         <div><span>任务</span><b>${model.task_type || "--"}</b></div>
         <div><span>平台</span><b>${model.target_platform || "--"}</b></div>
-        <div><span>输入</span><b>${Array.isArray(model.input_size) ? model.input_size.join("x") : "--"}</b></div>
+        <div><span>模型输入</span><b>${Array.isArray(model.input_size) ? model.input_size.join("x") : "--"}</b></div>
+        <div><span>输入 ROI</span><b>${formatModelInputRoi(model)}</b></div>
         <div><span>类别</span><b>${model.labels_count ?? "--"}</b></div>
         <div><span>大小</span><b>${formatBytes(model.rknn_size_bytes)}</b></div>
         <div><span>ID</span><b>${model.model_id || "--"}</b></div>
@@ -445,6 +500,7 @@ async function displayImageSource(sourceUrl) {
   });
   empty.classList.add("hidden");
   drawInferenceOverlay(canvas, image, currentResult);
+  refreshInputPreview();
 }
 
 async function refreshImage() {
@@ -584,6 +640,7 @@ export function initValidate() {
     await inferOnce();
   });
   document.getElementById("validate-realtime").addEventListener("click", toggleRealtime);
+  inputPreviewButton?.addEventListener("click", () => setInputPreviewVisible(!inputPreviewVisible));
   document.getElementById("validate-roi")?.addEventListener("click", openRoiEditor);
   document.getElementById("validate-roi-close")?.addEventListener("click", hideRoiModal);
   document.getElementById("validate-roi-cancel")?.addEventListener("click", hideRoiModal);
@@ -596,6 +653,7 @@ export function initValidate() {
   document.getElementById("validate-model-scan").addEventListener("click", refreshModelCatalog);
   window.addEventListener("resize", () => {
     if (currentResult) drawInferenceOverlay(canvas, image, currentResult);
+    refreshInputPreview();
     if (roiModal?.classList.contains("active")) window.requestAnimationFrame(renderRoiEditor);
   });
   if (roiStage && "ResizeObserver" in window && !roiResizeObserver) {
@@ -617,6 +675,8 @@ export function initValidate() {
   });
   renderEmptySummary("执行检测后显示目标摘要");
   setRealtimeButtonState(false);
+  setInputPreviewVisible(false);
+  renderInputRoiDiagnostics(inputRoiDiagnostics, null);
   renderCapturePicker();
   refreshRuntimeStatus();
   refreshModelCatalog();

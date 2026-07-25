@@ -30,6 +30,7 @@ class ModelCatalogItem:
     task_type: str
     target_platform: str
     input_size: list[int]
+    input_roi: dict[str, Any]
     rknn_file: str
     yaml_file: str
     labels_file: str
@@ -50,6 +51,7 @@ class ModelCatalogItem:
             "task_type": self.task_type,
             "target_platform": self.target_platform,
             "input_size": self.input_size,
+            "input_roi": self.input_roi,
             "rknn_file": self.rknn_file,
             "yaml_file": self.yaml_file,
             # 标准模型包不再要求 labels.txt；保留字段是为了兼容已有前端与测试。
@@ -155,6 +157,7 @@ def _scan_package_dir(
         task_type=str(yaml_meta.get("task_type") or "unknown"),
         target_platform=str(yaml_meta.get("target_platform") or "unknown"),
         input_size=yaml_meta.get("input_size") or [640, 640],
+        input_roi=yaml_meta.get("input_roi") or {"enabled": False},
         rknn_file="model.rknn",
         yaml_file="model.yaml",
         labels_file="",
@@ -175,6 +178,7 @@ def _default_yaml_meta() -> dict[str, Any]:
         "task_type": "",
         "target_platform": "",
         "input_size": None,
+        "input_roi": {"enabled": False},
         "labels_count": 0,
         "error": None,
     }
@@ -219,6 +223,11 @@ def _load_yaml_meta(path: Path) -> dict[str, Any]:
     if parsed_input:
         result["input_size"] = parsed_input
 
+    preprocess_section = document.get("preprocess")
+    input_roi = preprocess_section.get("input_roi") if isinstance(preprocess_section, dict) else None
+    if isinstance(input_roi, dict):
+        result["input_roi"] = _normalize_input_roi_summary(input_roi)
+
     class_names = document.get("class_names", document.get("names"))
     if isinstance(class_names, dict):
         labels = [str(class_names[key]).strip() for key in sorted(class_names) if str(class_names[key]).strip()]
@@ -254,6 +263,38 @@ def _parse_input_size(raw: Any) -> list[int] | None:
         return None
     return None
 
+
+
+def _normalize_input_roi_summary(raw: dict[str, Any]) -> dict[str, Any]:
+    enabled = raw.get("enabled") is True
+    summary: dict[str, Any] = {"enabled": enabled}
+    if not enabled:
+        return summary
+    summary["coordinate_space"] = str(raw.get("coordinate_space") or "runtime_snapshot")
+    for key in ("source_resolution", "crop_resolution"):
+        value = raw.get(key)
+        if isinstance(value, dict):
+            try:
+                width = int(value.get("width", 0))
+                height = int(value.get("height", 0))
+            except (TypeError, ValueError):
+                continue
+            if width > 0 and height > 0:
+                summary[key] = {"width": width, "height": height}
+    pixels = raw.get("pixel_xyxy")
+    if isinstance(pixels, list) and len(pixels) == 4:
+        try:
+            values = [int(round(float(item))) for item in pixels]
+        except (TypeError, ValueError):
+            values = []
+        if len(values) == 4 and values[2] > values[0] and values[3] > values[1]:
+            summary["pixel_xyxy"] = values
+    summary["resize_mode"] = str(raw.get("resize_mode") or "letterbox")
+    try:
+        summary["pad_value"] = int(raw.get("pad_value", 114))
+    except (TypeError, ValueError):
+        summary["pad_value"] = 114
+    return summary
 
 def _normalized_path(value: str | None) -> str | None:
     if not value:

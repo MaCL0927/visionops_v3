@@ -84,7 +84,7 @@
               <button id="validate-model-scan" class="primary model-refresh-btn">刷新模型</button>
             </aside>
             <section class="content-card validate-card">
-              <div class="screen-head"><div><div class="kicker">模型验证</div><h1>选图 / 拍照 / 实时检测</h1><p>通过 Collector 调用 Runtime，并在快照上绘制 bbox 与 OBB points。</p></div><div class="head-actions validate-actions"><button id="validate-infer" class="validate-action-btn">选图检测</button><button id="validate-photo" class="validate-action-btn primary">拍照检测</button><button id="validate-roi" class="validate-action-btn">绘制 ROI</button><button id="validate-realtime" class="validate-action-btn" aria-pressed="false">实时检测</button></div></div>
+              <div class="screen-head"><div><div class="kicker">模型验证</div><h1>选图 / 拍照 / 实时检测</h1><p>通过 Collector 调用 Runtime，并在快照上绘制 bbox 与 OBB points。</p></div><div class="head-actions validate-actions"><button id="validate-infer" class="validate-action-btn">选图检测</button><button id="validate-photo" class="validate-action-btn primary">拍照检测</button><button id="validate-roi" class="validate-action-btn">绘制结果 ROI</button><button id="validate-input-preview" class="validate-action-btn" aria-pressed="false">模型输入预览</button><button id="validate-realtime" class="validate-action-btn" aria-pressed="false">实时检测</button></div></div>
               <div id="validate-picker-panel" class="validate-picker-panel hidden">
                 <div class="validate-picker-head">
                   <b>选择采集图片</b>
@@ -93,7 +93,14 @@
                 <div id="validate-capture-list" class="validate-capture-list"><div class="empty-copy">暂无可选采集图片</div></div>
               </div>
               <div class="validation-workspace">
-                <div class="camera-stage overlay-stage"><img id="validate-image" class="stage-image" alt="模型验证快照"><canvas id="validate-overlay"></canvas><div id="validate-empty" class="stage-empty">执行检测后显示结果</div></div>
+                <div id="validate-visual-grid" class="input-preview-layout">
+                  <div class="camera-stage overlay-stage"><img id="validate-image" class="stage-image" alt="模型验证快照"><canvas id="validate-overlay"></canvas><div id="validate-empty" class="stage-empty">执行检测后显示结果</div></div>
+                  <aside id="validate-input-preview-panel" class="model-input-preview-panel hidden" aria-label="模型实际输入预览">
+                    <div class="model-input-preview-head"><div><b>模型实际输入</b><span id="validate-input-preview-meta">等待 Runtime 结果</span></div><span id="validate-input-preview-status" class="status-pill soft">未启用</span></div>
+                    <div class="model-input-preview-stage"><canvas id="validate-input-preview-canvas"></canvas><div class="model-input-preview-empty">使用当前完整快照在浏览器端复现 input_roi + letterbox，不增加相机取图和 NPU 推理。</div></div>
+                  </aside>
+                </div>
+                <div id="validate-input-roi-diagnostics" class="input-roi-diagnostics inactive" aria-label="输入 ROI 性能信息"></div>
                 <section class="validate-bottom-panels">
                   <div class="timing-grid validate-timing-grid"><div><span>预处理</span><b id="timing-preprocess">--</b></div><div><span>推理</span><b id="timing-inference">--</b></div><div><span>后处理</span><b id="timing-postprocess">--</b></div><div><span>总耗时</span><b id="timing-total">--</b></div></div>
                   <div class="target-summary-card">
@@ -117,6 +124,7 @@
             </div>
             <div class="head-actions">
               <span id="production-live-status" class="status-pill">实时检测准备中</span>
+              <button id="production-input-preview" aria-pressed="false">模型输入预览</button>
               <button id="production-view-toggle">消息状态</button>
               <button id="production-app-evaluate">执行业务判断</button>
               <button id="production-refresh" class="primary">手动刷新</button>
@@ -124,11 +132,18 @@
           </div>
 
           <section id="production-live-view" class="production-view active">
-            <div class="production-live-stage camera-stage overlay-stage">
-              <img id="production-image" class="stage-image" alt="生产模式实时画面">
-              <canvas id="production-overlay"></canvas>
-              <div id="production-empty" class="stage-empty">正在启动生产实时检测</div>
+            <div id="production-visual-grid" class="input-preview-layout production-input-preview-layout">
+              <div class="production-live-stage camera-stage overlay-stage">
+                <img id="production-image" class="stage-image" alt="生产模式实时画面">
+                <canvas id="production-overlay"></canvas>
+                <div id="production-empty" class="stage-empty">正在启动生产实时检测</div>
+              </div>
+              <aside id="production-input-preview-panel" class="model-input-preview-panel production-model-input-preview hidden" aria-label="生产模式模型实际输入预览">
+                <div class="model-input-preview-head"><div><b>模型实际输入</b><span id="production-input-preview-meta">等待 Runtime 结果</span></div><span id="production-input-preview-status" class="status-pill soft">未启用</span></div>
+                <div class="model-input-preview-stage"><canvas id="production-input-preview-canvas"></canvas><div class="model-input-preview-empty">该预览复用当前完整快照，仅在浏览器端执行裁剪和 letterbox。</div></div>
+              </aside>
             </div>
+            <div id="production-input-roi-diagnostics" class="input-roi-diagnostics production-roi-diagnostics inactive" aria-label="生产输入 ROI 性能信息"></div>
             <div class="production-live-info">
               <div><span>当前模型</span><b id="production-current-model">--</b></div>
               <div><span>任务 / 目标</span><b id="production-result-brief">--</b></div>

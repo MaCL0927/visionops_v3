@@ -81,3 +81,40 @@ def test_find_scanned_model_only_matches_known_entries(tmp_path: Path) -> None:
     assert find_scanned_model(models, package_dir="carton_tube_check") is not None
     assert find_scanned_model(models, model_id="carton_tube_check-id") is not None
     assert find_scanned_model(models, package_dir="../../etc") is None
+
+
+def test_scan_model_catalog_exposes_input_roi_summary(tmp_path: Path) -> None:
+    package = _write_model_package(tmp_path, "roi_model")
+    (package / "model.yaml").write_text(
+        "model_id: roi-model-id\n"
+        "model_name: roi-model\n"
+        "model_version: 1.0.0\n"
+        "task_type: detection\n"
+        "target_platform: rk3576\n"
+        "input_size: [640, 640]\n"
+        "class_names: [blue]\n"
+        "preprocess:\n"
+        "  input_roi:\n"
+        "    enabled: true\n"
+        "    coordinate_space: runtime_snapshot\n"
+        "    source_resolution:\n"
+        "      width: 1280\n"
+        "      height: 720\n"
+        "    pixel_xyxy: [850, 490, 1277, 719]\n"
+        "    crop_resolution:\n"
+        "      width: 427\n"
+        "      height: 229\n"
+        "    resize_mode: letterbox\n"
+        "    pad_value: 114\n",
+        encoding="utf-8",
+    )
+
+    models = scan_model_catalog(tmp_path)
+    assert len(models) == 1
+    roi = models[0]["input_roi"]
+    assert roi["enabled"] is True
+    assert roi["source_resolution"] == {"width": 1280, "height": 720}
+    assert roi["pixel_xyxy"] == [850, 490, 1277, 719]
+    assert roi["crop_resolution"] == {"width": 427, "height": 229}
+    assert roi["resize_mode"] == "letterbox"
+    assert roi["pad_value"] == 114

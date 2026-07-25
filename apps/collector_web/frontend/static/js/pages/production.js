@@ -1,6 +1,11 @@
 import { endpoints, postJson, requestBlob, requestJson } from "../api.js";
 import { getState, updateState } from "../state.js";
 import { clearOverlay, drawInferenceOverlay } from "../render/overlay.js";
+import {
+  drawModelInputPreview,
+  inputRoiPreviewDescription,
+  renderInputRoiDiagnostics,
+} from "../render/input_roi.js";
 
 const image = document.getElementById("production-image");
 const canvas = document.getElementById("production-overlay");
@@ -15,6 +20,13 @@ const statusView = document.getElementById("production-status-view");
 const viewToggle = document.getElementById("production-view-toggle");
 const refreshButton = document.getElementById("production-refresh");
 const liveStage = image?.parentElement;
+const inputPreviewButton = document.getElementById("production-input-preview");
+const inputPreviewLayout = document.getElementById("production-visual-grid");
+const inputPreviewPanel = document.getElementById("production-input-preview-panel");
+const inputPreviewCanvas = document.getElementById("production-input-preview-canvas");
+const inputPreviewStatus = document.getElementById("production-input-preview-status");
+const inputPreviewMeta = document.getElementById("production-input-preview-meta");
+const inputRoiDiagnostics = document.getElementById("production-input-roi-diagnostics");
 
 let snapshotUrl = null;
 let latestResult = null;
@@ -25,6 +37,29 @@ let activeView = "live";
 let lastLoopFinishedAt = null;
 let lastRenderedResultKey = null;
 let overlayResizeFrame = null;
+let inputPreviewVisible = false;
+
+function refreshInputPreview() {
+  const state = renderInputRoiDiagnostics(inputRoiDiagnostics, latestResult);
+  if (!inputPreviewVisible || !latestResult || !image?.naturalWidth) return state;
+  const previewState = drawModelInputPreview(inputPreviewCanvas, image, latestResult);
+  if (inputPreviewStatus) {
+    inputPreviewStatus.textContent = previewState?.enabled ? "ROI 输入" : "全画面输入";
+    inputPreviewStatus.className = `status-pill ${previewState?.enabled ? "" : "soft"}`.trim();
+  }
+  if (inputPreviewMeta) inputPreviewMeta.textContent = inputRoiPreviewDescription(previewState);
+  return previewState;
+}
+
+function setInputPreviewVisible(visible) {
+  inputPreviewVisible = Boolean(visible);
+  inputPreviewPanel?.classList.toggle("hidden", !inputPreviewVisible);
+  inputPreviewLayout?.classList.toggle("preview-active", inputPreviewVisible);
+  inputPreviewButton?.classList.toggle("active", inputPreviewVisible);
+  inputPreviewButton?.setAttribute("aria-pressed", inputPreviewVisible ? "true" : "false");
+  if (inputPreviewButton) inputPreviewButton.textContent = inputPreviewVisible ? "关闭输入预览" : "模型输入预览";
+  redrawOverlayAfterLayout();
+}
 
 function formatMs(value) {
   const number = Number(value);
@@ -109,6 +144,7 @@ function updateLiveSummary(result, elapsedMs = null) {
     : (elapsedMs ? 1000 / elapsedMs : configuredFps);
   fpsText.textContent = `${formatFps(actualFps)} / 设定 ${formatFps(configuredFps)}`;
   liveStatus.textContent = `实时检测中 · ${task}`;
+  renderInputRoiDiagnostics(inputRoiDiagnostics, result);
 }
 
 /**
@@ -142,6 +178,7 @@ function redrawOverlayAfterLayout() {
       fitProductionImage();
       if (latestResult && image.complete && image.naturalWidth) {
         drawInferenceOverlay(canvas, image, latestResult);
+        refreshInputPreview();
       }
     });
   });
@@ -158,6 +195,7 @@ async function displaySnapshot() {
   });
   empty.classList.add("hidden");
   redrawOverlayAfterLayout();
+  refreshInputPreview();
 }
 
 export async function productionInferOnce(options = {}) {
@@ -219,6 +257,7 @@ export async function productionInferOnce(options = {}) {
     resultBrief.textContent = "检测失败";
     timingTotal.textContent = "--";
     clearOverlay(canvas);
+    renderInputRoiDiagnostics(inputRoiDiagnostics, null);
     return null;
   }
 }
@@ -325,11 +364,14 @@ export function setProductionActive(active) {
 }
 
 export function initProduction() {
+  setInputPreviewVisible(false);
+  renderInputRoiDiagnostics(inputRoiDiagnostics, null);
   refreshButton.addEventListener("click", async () => {
     if (activeView === "status") await refreshProductionStatus();
     else await productionInferOnce({ force: true });
   });
   viewToggle.addEventListener("click", () => showProductionView(activeView === "live" ? "status" : "live"));
+  inputPreviewButton?.addEventListener("click", () => setInputPreviewVisible(!inputPreviewVisible));
   window.addEventListener("resize", redrawOverlayAfterLayout);
   window.addEventListener("visionops:settings-saved", redrawOverlayAfterLayout);
   window.addEventListener("visionops:camera-switched", () => {

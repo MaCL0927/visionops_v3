@@ -349,3 +349,186 @@ button.danger-soft { background:#fff3f3; color:#9f1239; border-color:#fecdd3; }
 #capture-roi-btn.active { background:#e0f2fe; border-color:#0284c7; color:#075985; box-shadow:0 0 0 3px rgba(2,132,199,.14); }
 #capture-roi-modal { padding:6px; }
 .capture-roi-editor-info { border-color:rgba(125,211,252,.95); }
+
+/* M32.4: Runtime input ROI visualization */
+.validation-workspace {
+  grid-template-rows:minmax(0,1fr) auto minmax(128px,20%);
+}
+.input-preview-layout {
+  min-height:0;
+  display:grid;
+  grid-template-columns:minmax(0,1fr);
+  gap:10px;
+  overflow:hidden;
+}
+.input-preview-layout.preview-active {
+  grid-template-columns:minmax(0,1fr) minmax(280px,31%);
+}
+.input-preview-layout > .camera-stage,
+.input-preview-layout > .production-live-stage {
+  min-width:0;
+  min-height:0;
+}
+.model-input-preview-panel {
+  min-width:0;
+  min-height:0;
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+  border:1px solid #9bdce7;
+  border-radius:18px;
+  background:#07111d;
+}
+.model-input-preview-panel.hidden { display:none; }
+.model-input-preview-head {
+  flex:0 0 auto;
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:10px;
+  padding:12px 14px;
+  color:#e6fbff;
+  border-bottom:1px solid rgba(125,211,252,.25);
+  background:#0c2735;
+}
+.model-input-preview-head div { min-width:0; }
+.model-input-preview-head b,
+.model-input-preview-head span { display:block; }
+.model-input-preview-head b { font-size:18px; }
+.model-input-preview-head div span {
+  margin-top:3px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  color:#9ed1db;
+  font-size:13px;
+  white-space:nowrap;
+}
+.model-input-preview-stage {
+  position:relative;
+  flex:1 1 auto;
+  min-height:0;
+  display:grid;
+  place-items:center;
+  overflow:hidden;
+  padding:12px;
+  background:#111827;
+}
+.model-input-preview-stage canvas {
+  display:block;
+  width:min(100%,640px);
+  max-height:100%;
+  object-fit:contain;
+  border:1px solid rgba(34,211,238,.65);
+  background:rgb(114,114,114);
+}
+.model-input-preview-empty {
+  position:absolute;
+  left:14px;
+  right:14px;
+  bottom:12px;
+  padding:8px 10px;
+  border-radius:10px;
+  color:#d9f7fb;
+  background:rgba(3,15,23,.76);
+  font-size:12px;
+  line-height:1.45;
+}
+.input-roi-diagnostics {
+  min-height:0;
+  display:grid;
+  grid-template-columns:repeat(6,minmax(110px,1fr));
+  gap:8px;
+  padding:8px 0;
+}
+.input-roi-diagnostics:empty::before {
+  content:"等待 Runtime 输入 ROI 信息";
+  grid-column:1/-1;
+  padding:12px 14px;
+  border:1px dashed #cbd5e1;
+  border-radius:12px;
+  color:#64748b;
+  background:#f8fafc;
+  text-align:center;
+  font-size:14px;
+}
+.input-roi-diagnostics > div {
+  min-width:0;
+  padding:9px 11px;
+  border:1px solid #bae6fd;
+  border-radius:12px;
+  background:#ecfeff;
+}
+.input-roi-diagnostics.inactive > div {
+  border-color:#dbe4ea;
+  background:#f8fafc;
+}
+.input-roi-diagnostics.warning > div {
+  border-color:#fed7aa;
+  background:#fff7ed;
+}
+.input-roi-diagnostics span,
+.input-roi-diagnostics b,
+.input-roi-diagnostics em { display:block; }
+.input-roi-diagnostics span {
+  color:#64748b;
+  font-size:12px;
+  font-weight:800;
+}
+.input-roi-diagnostics b {
+  margin-top:2px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  color:#0f172a;
+  font-size:16px;
+  line-height:1.25;
+  white-space:nowrap;
+}
+.input-roi-diagnostics em {
+  margin-top:2px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  color:#64748b;
+  font-size:11px;
+  font-style:normal;
+  white-space:nowrap;
+}
+#validate-input-preview.active,
+#production-input-preview.active {
+  color:#075985;
+  border-color:#22d3ee;
+  background:#cffafe;
+  box-shadow:0 0 0 3px rgba(34,211,238,.14);
+}
+.production-input-preview-layout {
+  flex:1 1 auto;
+  min-height:0;
+}
+.production-input-preview-layout.preview-active {
+  grid-template-columns:minmax(0,1fr) minmax(300px,28%);
+}
+.production-model-input-preview { border-radius:22px; }
+.production-roi-diagnostics {
+  flex:0 0 auto;
+  padding:0;
+}
+.production-roi-diagnostics > div {
+  padding:8px 10px;
+  background:#e6fbff;
+}
+
+@media(max-width:1400px) {
+  .input-roi-diagnostics { grid-template-columns:repeat(3,minmax(120px,1fr)); }
+  .input-preview-layout.preview-active,
+  .production-input-preview-layout.preview-active { grid-template-columns:minmax(0,1fr) minmax(260px,34%); }
+}
+@media(max-width:980px) {
+  .validation-workspace { grid-template-rows:auto auto auto; }
+  .input-preview-layout.preview-active,
+  .production-input-preview-layout.preview-active { grid-template-columns:1fr; overflow:visible; }
+  .model-input-preview-panel { min-height:360px; }
+  .input-roi-diagnostics { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .production-input-preview-layout { overflow:visible; }
+}
+@media(max-width:560px) {
+  .input-roi-diagnostics { grid-template-columns:1fr; }
+}

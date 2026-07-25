@@ -75,6 +75,46 @@ function roiCoordinates(roi, sourceWidth, sourceHeight) {
   return null;
 }
 
+function modelInputSize(result) {
+  const raw = result?.model?.input_size || result?.loaded_model?.input_size;
+  if (Array.isArray(raw) && raw.length >= 2) return [Number(raw[0]), Number(raw[1])];
+  if (raw && typeof raw === "object") return [Number(raw.width), Number(raw.height)];
+  const size = Number(raw);
+  return Number.isFinite(size) && size > 0 ? [size, size] : [0, 0];
+}
+
+function drawInputRoi(ctx, result, sourceWidth, sourceHeight, sx, sy, canvasWidth) {
+  const roi = result?.input_roi;
+  if (!roi?.enabled) return;
+  const coordinates = roiCoordinates(roi, sourceWidth, sourceHeight);
+  if (!coordinates) return;
+  const [x1, y1, x2, y2] = coordinates;
+  if (!(x2 > x1 && y2 > y1)) return;
+  const crop = roi.crop_resolution || {};
+  const [modelWidth, modelHeight] = modelInputSize(result);
+  const cropWidth = Number(crop.width) || Math.round(x2 - x1);
+  const cropHeight = Number(crop.height) || Math.round(y2 - y1);
+  const target = modelWidth > 0 && modelHeight > 0 ? ` → ${Math.round(modelWidth)}×${Math.round(modelHeight)}` : "";
+  const label = `模型输入 ROI ${Math.round(cropWidth)}×${Math.round(cropHeight)}${target}`;
+
+  ctx.save();
+  ctx.fillStyle = "rgba(34, 211, 238, .08)";
+  ctx.fillRect(x1 * sx, y1 * sy, (x2 - x1) * sx, (y2 - y1) * sy);
+  ctx.strokeStyle = "#22d3ee";
+  ctx.lineWidth = Math.max(3, Math.round(canvasWidth / 360));
+  ctx.setLineDash([]);
+  ctx.strokeRect(x1 * sx, y1 * sy, (x2 - x1) * sx, (y2 - y1) * sy);
+  ctx.font = `bold ${Math.max(14, Math.round(canvasWidth / 68))}px system-ui`;
+  const labelX = x1 * sx;
+  const labelY = Math.max(0, y1 * sy - 27);
+  const labelWidth = Math.min(canvasWidth - labelX, ctx.measureText(label).width + 16);
+  ctx.fillStyle = "rgba(8, 145, 178, .94)";
+  ctx.fillRect(labelX, labelY, labelWidth, 25);
+  ctx.fillStyle = "#ecfeff";
+  ctx.fillText(label, labelX + 8, labelY + 18);
+  ctx.restore();
+}
+
 function drawOutputRoi(ctx, roi, sourceWidth, sourceHeight, sx, sy, canvasWidth) {
   const coordinates = roiCoordinates(roi, sourceWidth, sourceHeight);
   if (!coordinates) return;
@@ -346,6 +386,7 @@ export function drawInferenceOverlay(canvas, image, result) {
   const overlay = getState().config.overlay || {};
   const maskOpacity = clamp(Number(overlay.mask_opacity ?? 0.28), 0, 1);
 
+  drawInputRoi(ctx, result, sourceWidth, sourceHeight, sx, sy, canvas.width);
   drawOutputRoi(ctx, result?.roi, sourceWidth, sourceHeight, sx, sy, canvas.width);
   drawPlacementOverlay(ctx, result?.placement, sx, sy, canvas.width, canvas.height);
   drawBoxGraspOverlay(ctx, result?.box_grasp, sx, sy, canvas.width);

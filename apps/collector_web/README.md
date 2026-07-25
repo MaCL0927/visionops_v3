@@ -410,3 +410,7 @@ POST /api/app/inference_settings  {"detection_fps":10}
 不会先换算成整数毫秒再反算，因此输入 `15` 时 App 收到的就是 `15.0`，不会变成
 `14.925...`。生产画面显示 App 返回的 `configured_fps` 与 `actual_fps`，不再把浏览器
 轮询频率误标为生产推理设定。WebSocket 没有独立推送 Hz，每个完成的生产结果都会立即推送。
+
+## M32.4 输入 ROI 可视化
+
+模型验证页和生产模式会在完整快照上绘制青色 `input_roi`，并保留黄色结果过滤 ROI。两页均可打开“模型输入预览”，在浏览器端复现 crop + letterbox，同时展示 RGA、ROI 解析、crop_resize 和 NPU 推理耗时。该功能不触发额外相机取图或 Runtime 推理。完整说明见 `docs/M32.4_WEB_INPUT_ROI_VISUALIZATION_PHASE4.md`。

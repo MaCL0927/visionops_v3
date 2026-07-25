@@ -1,6 +1,8 @@
 #include "visionops_runtime/rga_preprocess.hpp"
 
-// 必须位于 Rockchip RGA 头文件之前
+// Rockchip im2d headers use the unqualified C function memset inside macros
+// and inline helpers. It must be declared before including im2d.hpp on the
+// RGA headers shipped with some LB3576 images.
 #include <cstring>
 
 #ifdef VISIONOPS_HAS_RGA
