@@ -8,9 +8,27 @@ namespace visionops::runtime {
 
 bool rga_backend_compiled();
 
-// Resize an RGB888 image with RGA. The destination ImageBuffer is always RGB888
-// and is resized to dst_width x dst_height. The caller is responsible for
-// applying letterbox padding around the resized image if needed.
+// Crop a source rectangle and resize it directly into a destination rectangle
+// on the final RGB888 canvas. The canvas is initialized with pad_value, so a
+// letterbox path requires no intermediate ROI/resized ImageBuffer and no CPU
+// paste after RGA.
+bool rga_crop_resize_rgb888(
+    const ImageBuffer& src,
+    int src_x,
+    int src_y,
+    int src_width,
+    int src_height,
+    int canvas_width,
+    int canvas_height,
+    int dst_x,
+    int dst_y,
+    int dst_width,
+    int dst_height,
+    int pad_value,
+    ImageBuffer& dst,
+    std::string& error);
+
+// Backward-compatible full-frame resize helper.
 bool rga_resize_rgb888(
     const ImageBuffer& src,
     int dst_width,

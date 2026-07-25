@@ -84,12 +84,14 @@ cmake --build build-rknn-rga-release -j4
 
 ```bash
 --preprocess-backend cpu   # 默认 CPU letterbox
---preprocess-backend rga   # 强制使用 RGA resize + CPU letterbox paste
---preprocess-backend auto  # RGA 可用时优先使用，失败时回退 CPU
+--preprocess-backend rga   # 强制使用 RGA；input_roi 启用时融合 crop + resize
+--preprocess-backend auto  # RGA 可用时优先使用，失败时回退直接 ROI CPU 采样
 --rga-mode resize_rgb      # 当前推荐模式
 ```
 
-`/api/runtime/status` 会展示 `frame_source`、`loaded_model` 和当前运行状态；`infer_once` 的耗时字段可用于确认预处理与推理路径是否变化。
+`/api/runtime/status` 会展示 `frame_source`、`loaded_model.input_roi` 和当前运行状态；`infer_once` 的 `input_roi_resolve_ms`、`crop_resize_ms`、`rga_fused_crop_resize` 可用于确认输入 ROI 是否真正生效。
+
+模型包包含 `preprocess.input_roi` 时，RGA 直接把完整 RGB 帧中的 source rect 缩放到最终模型 canvas，不创建 ROI 中间图。模型输出在后处理阶段恢复为完整图坐标，再执行原有结果 ROI 过滤。完整说明见 `docs/M32.3_RUNTIME_INPUT_ROI_PHASE3.md`。
 
 如果 HP60C Bridge 提供原始帧入口，当前还支持：
 
@@ -247,6 +249,8 @@ OBB RKNN split-DFL 后处理现在不再写死 640 输入或固定 8400 candidat
 - `capture_ms`
 - `decode_ms`
 - `preprocess_ms`
+- `input_roi_resolve_ms`
+- `crop_resize_ms`
 - `inference_ms`
 - `postprocess_ms`
 - `result_build_ms`
@@ -257,6 +261,8 @@ OBB RKNN split-DFL 后处理现在不再写死 640 输入或固定 8400 candidat
 - `capture_ms`
 - `decode_ms`
 - `preprocess_ms`
+- `input_roi_resolve_ms`
+- `crop_resize_ms`
 - `rknn_set_input_ms`
 - `rknn_run_ms`
 - `rknn_get_output_ms`
@@ -405,6 +411,27 @@ bash edge/runtime_cpp/tests/smoke_test.sh
 Runtime segmentation 后处理支持 Rockchip YOLOv8-seg split-DFL 多输出格式。该格式通常包含 3 个尺度，每个尺度分别输出 bbox DFL、class、objectness、mask coefficients，并额外输出 proto。后处理根据 head 的 H/W 与模型输入尺寸动态推导 stride，不写死 640 或 8400。
 
 当前 segmentation mask 使用 bbox polygon 简化表示，满足 Web 可视化与基础结果查看；真正基于 proto 的实例 mask 栅格化后续再实现。
+
+## 模型输入 ROI（M32.3）
+
+模型包可声明：
+
+```yaml
+preprocess:
+  input_roi:
+    enabled: true
+    coordinate_space: runtime_snapshot
+    source_resolution: {width: 1280, height: 720}
+    pixel_xyxy: [850, 490, 1277, 719]
+    normalized_xyxy: [0.6640625, 0.680555555556, 0.99765625, 0.998611111111]
+    crop_resolution: {width: 427, height: 229}
+    resize_mode: letterbox
+    pad_value: 114
+```
+
+该 ROI 在模型预处理前生效，会真实减少模型看到的视野。RGA 路径一次完成 crop + resize 并直接写入最终 letterbox canvas；检测、OBB 和分割结果随后恢复到完整图坐标。旧模型或 `enabled: false` 继续使用完整图。
+
+它与下面的统一输出 ROI 不同：`input_roi` 控制模型输入，`--roi-config` 只过滤后处理结果。
 
 ## 统一输出 ROI
 

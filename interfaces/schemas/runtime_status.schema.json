@@ -3,7 +3,9 @@
   "$id": "https://visionops.local/schemas/runtime_status.schema.json",
   "title": "C++ Runtime 状态快照",
   "allOf": [
-    { "$ref": "common.schema.json#/$defs/commonMessage" },
+    {
+      "$ref": "common.schema.json#/$defs/commonMessage"
+    },
     {
       "type": "object",
       "required": [
@@ -21,66 +23,548 @@
         "last_error"
       ],
       "properties": {
-        "message_type": { "const": "runtime_status" },
-        "running": { "type": "boolean" },
-        "mode": { "enum": ["idle", "preview", "detect", "error", "maintenance"] },
-        "health": { "enum": ["ok", "degraded", "error"] },
-        "uptime_s": { "type": "number", "minimum": 0 },
+        "message_type": {
+          "const": "runtime_status"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "mode": {
+          "enum": [
+            "idle",
+            "preview",
+            "detect",
+            "error",
+            "maintenance"
+          ]
+        },
+        "health": {
+          "enum": [
+            "ok",
+            "degraded",
+            "error"
+          ]
+        },
+        "uptime_s": {
+          "type": "number",
+          "minimum": 0
+        },
         "loaded_model": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "properties": {
-            "model_id": { "type": "string" },
-            "model_name": { "type": "string" },
-            "model_version": { "type": "string" },
-            "task_type": { "type": "string" },
-            "backend": { "enum": ["rknn", "onnx", "mock"] }
+            "model_id": {
+              "type": "string"
+            },
+            "model_name": {
+              "type": "string"
+            },
+            "model_version": {
+              "type": "string"
+            },
+            "task_type": {
+              "type": "string"
+            },
+            "backend": {
+              "enum": [
+                "rknn",
+                "onnx",
+                "mock"
+              ]
+            },
+            "runtime_preprocess": {
+              "type": "string"
+            },
+            "runner_loaded": {
+              "type": "boolean"
+            },
+            "rknn_compiled": {
+              "type": "boolean"
+            },
+            "input_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "output_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "runner_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "target_platform": {
+              "type": "string"
+            },
+            "rknn_path": {
+              "type": "string"
+            },
+            "config_path": {
+              "type": "string"
+            },
+            "labels_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "input_size": {
+              "$ref": "common.schema.json#/$defs/size2d"
+            },
+            "score_threshold": {
+              "type": "number"
+            },
+            "nms_threshold": {
+              "type": "number"
+            },
+            "max_detections": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "mask_max_points": {
+              "type": "integer",
+              "minimum": 4
+            },
+            "input_roi": {
+              "type": "object",
+              "required": [
+                "enabled"
+              ],
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "coordinate_space": {
+                  "type": "string"
+                },
+                "source_resolution": {
+                  "type": "object",
+                  "required": [
+                    "width",
+                    "height"
+                  ],
+                  "properties": {
+                    "width": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "height": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "full_resolution": {
+                  "type": "object",
+                  "required": [
+                    "width",
+                    "height"
+                  ],
+                  "properties": {
+                    "width": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "height": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "pixel_xyxy": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "number"
+                        }
+                      ],
+                      "items": false
+                    }
+                  ]
+                },
+                "normalized_xyxy": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        }
+                      ],
+                      "items": false
+                    }
+                  ]
+                },
+                "crop_resolution": {
+                  "type": "object",
+                  "required": [
+                    "width",
+                    "height"
+                  ],
+                  "properties": {
+                    "width": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "height": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "resize_mode": {
+                  "enum": [
+                    "letterbox",
+                    "resize"
+                  ]
+                },
+                "pad_value": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 255
+                },
+                "scaled_from_normalized": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            },
+            "model_load_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           },
           "additionalProperties": false
         },
-        "camera_connected": { "type": "boolean" },
+        "camera_connected": {
+          "type": "boolean"
+        },
         "fps": {
           "type": "object",
-          "required": ["camera_fps", "inference_fps", "snapshot_fps"],
+          "required": [
+            "camera_fps",
+            "inference_fps",
+            "snapshot_fps"
+          ],
           "properties": {
-            "camera_fps": { "type": "number", "minimum": 0 },
-            "inference_fps": { "type": "number", "minimum": 0 },
-            "snapshot_fps": { "type": "number", "minimum": 0 }
+            "camera_fps": {
+              "type": "number",
+              "minimum": 0
+            },
+            "inference_fps": {
+              "type": "number",
+              "minimum": 0
+            },
+            "snapshot_fps": {
+              "type": "number",
+              "minimum": 0
+            }
           },
           "additionalProperties": false
         },
         "latency_ms": {
           "type": "object",
-          "required": ["latest", "average", "p95"],
+          "required": [
+            "latest",
+            "average",
+            "p95"
+          ],
           "properties": {
-            "latest": { "type": "number", "minimum": 0 },
-            "average": { "type": "number", "minimum": 0 },
-            "p95": { "type": "number", "minimum": 0 }
+            "latest": {
+              "type": "number",
+              "minimum": 0
+            },
+            "average": {
+              "type": "number",
+              "minimum": 0
+            },
+            "p95": {
+              "type": "number",
+              "minimum": 0
+            }
           },
           "additionalProperties": false
         },
         "counters": {
           "type": "object",
-          "required": ["frames_in", "frames_inferred", "frames_dropped", "errors"],
+          "required": [
+            "frames_in",
+            "frames_inferred",
+            "frames_dropped",
+            "errors"
+          ],
           "properties": {
-            "frames_in": { "type": "integer", "minimum": 0 },
-            "frames_inferred": { "type": "integer", "minimum": 0 },
-            "frames_dropped": { "type": "integer", "minimum": 0 },
-            "errors": { "type": "integer", "minimum": 0 }
+            "frames_in": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "frames_inferred": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "frames_dropped": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "errors": {
+              "type": "integer",
+              "minimum": 0
+            }
           },
           "additionalProperties": false
         },
-        "last_result_id": { "type": ["string", "null"] },
-        "last_frame_id": { "type": ["string", "null"] },
-        "last_error": { "$ref": "common.schema.json#/$defs/error" },
+        "last_result_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_frame_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_error": {
+          "$ref": "common.schema.json#/$defs/error"
+        },
         "resources": {
           "type": "object",
           "properties": {
-            "cpu_percent": { "type": "number", "minimum": 0, "maximum": 100 },
-            "memory_mb": { "type": "number", "minimum": 0 },
-            "npu_percent": { "type": "number", "minimum": 0, "maximum": 100 },
-            "temperature_c": { "type": "number" }
+            "cpu_percent": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "memory_mb": {
+              "type": "number",
+              "minimum": 0
+            },
+            "npu_percent": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "temperature_c": {
+              "type": "number"
+            }
           },
           "additionalProperties": true
+        },
+        "frame_source": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "http_server": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        },
+        "roi": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "preprocess": {
+          "type": "object",
+          "properties": {
+            "backend_requested": {
+              "type": "string"
+            },
+            "backend_active": {
+              "type": "string"
+            },
+            "rga_mode": {
+              "type": "string"
+            },
+            "rga_available": {
+              "type": "boolean"
+            },
+            "input_roi": {
+              "type": "object",
+              "required": [
+                "enabled"
+              ],
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "coordinate_space": {
+                  "type": "string"
+                },
+                "source_resolution": {
+                  "type": "object",
+                  "required": [
+                    "width",
+                    "height"
+                  ],
+                  "properties": {
+                    "width": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "height": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "full_resolution": {
+                  "type": "object",
+                  "required": [
+                    "width",
+                    "height"
+                  ],
+                  "properties": {
+                    "width": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "height": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "pixel_xyxy": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "number"
+                        }
+                      ],
+                      "items": false
+                    }
+                  ]
+                },
+                "normalized_xyxy": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        }
+                      ],
+                      "items": false
+                    }
+                  ]
+                },
+                "crop_resolution": {
+                  "type": "object",
+                  "required": [
+                    "width",
+                    "height"
+                  ],
+                  "properties": {
+                    "width": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "height": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "resize_mode": {
+                  "enum": [
+                    "letterbox",
+                    "resize"
+                  ]
+                },
+                "pad_value": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 255
+                },
+                "scaled_from_normalized": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
         }
       }
     }

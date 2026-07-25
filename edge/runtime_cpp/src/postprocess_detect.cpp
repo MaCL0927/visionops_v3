@@ -25,17 +25,11 @@ struct Detection {
 float sigmoid(float value) { return 1.0F / (1.0F + std::exp(-value)); }
 
 float map_x(float value, const LetterboxMeta& meta) {
-  return std::clamp(
-      (value - meta.pad_x) / std::max(meta.scale, 1e-6F),
-      0.0F,
-      static_cast<float>(std::max(0, meta.orig_width - 1)));
+  return map_model_x_to_full_image(value, meta);
 }
 
 float map_y(float value, const LetterboxMeta& meta) {
-  return std::clamp(
-      (value - meta.pad_y) / std::max(meta.scale, 1e-6F),
-      0.0F,
-      static_cast<float>(std::max(0, meta.orig_height - 1)));
+  return map_model_y_to_full_image(value, meta);
 }
 
 float iou(const Detection& a, const Detection& b) {

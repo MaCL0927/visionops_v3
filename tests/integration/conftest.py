@@ -69,3 +69,24 @@ def shared_postprocess_fixture_binary(shared_runtime_build_dir: Path) -> Path:
     binary = shared_runtime_build_dir / "edge/runtime_cpp/visionops_postprocess_fixture"
     assert binary.is_file()
     return binary
+
+
+@pytest.fixture(scope="session")
+def shared_preprocess_fixture_binary(shared_runtime_build_dir: Path) -> Path:
+    subprocess.run(
+        [
+            "cmake",
+            "--build",
+            str(shared_runtime_build_dir),
+            "-j4",
+            "--target",
+            "visionops_preprocess_fixture",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    binary = shared_runtime_build_dir / "edge/runtime_cpp/visionops_preprocess_fixture"
+    assert binary.is_file()
+    return binary

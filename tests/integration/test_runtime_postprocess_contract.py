@@ -60,3 +60,38 @@ def test_detection_roi_filters_target_after_full_frame_postprocess(
     result = json.loads(completed.stdout)
     assert result["task_type"] == "detection"
     assert result["detections"] == []
+
+
+def test_detection_coordinates_are_restored_to_full_frame_after_input_roi(
+    postprocess_fixture_binary: Path,
+) -> None:
+    completed = subprocess.run(
+        [str(postprocess_fixture_binary), "detection_input_roi"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+    detection = result["detections"][0]
+    assert detection["center_xy"] == pytest.approx([1063.5, 604.4227], abs=1e-3)
+    assert detection["bbox_xyxy"] == pytest.approx(
+        [1010.125, 564.3914, 1116.875, 644.4539], abs=1e-3
+    )
+
+
+def test_obb_points_and_angle_are_restored_after_input_roi(
+    postprocess_fixture_binary: Path,
+) -> None:
+    completed = subprocess.run(
+        [str(postprocess_fixture_binary), "obb_input_roi"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+    obb = result["detections"][0]["obb"]
+    assert [obb["cx"], obb["cy"]] == pytest.approx([1063.5, 604.4227], abs=1e-3)
+    assert obb["angle_deg"] == pytest.approx(14.3239, abs=1e-3)
+    assert len(obb["points"]) == 4
+    assert all(850 <= point[0] <= 1277 for point in obb["points"])
+    assert all(490 <= point[1] <= 719 for point in obb["points"])

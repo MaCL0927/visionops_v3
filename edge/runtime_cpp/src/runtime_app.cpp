@@ -101,6 +101,49 @@ std::string format_ms(double value) {
   return stream.str();
 }
 
+
+std::string input_roi_config_json(const InputRoiConfig& roi) {
+  std::ostringstream stream;
+  stream << std::fixed << std::setprecision(12)
+         << "{\"enabled\":" << json_bool(roi.enabled)
+         << ",\"coordinate_space\":\"" << json_escape(roi.coordinate_space) << '"'
+         << ",\"source_resolution\":{\"width\":" << roi.source_width
+         << ",\"height\":" << roi.source_height << '}'
+         << ",\"pixel_xyxy\":";
+  if (roi.has_pixel_xyxy) {
+    stream << '[' << roi.x0 << ',' << roi.y0 << ',' << roi.x1 << ',' << roi.y1 << ']';
+  } else {
+    stream << "null";
+  }
+  stream << ",\"normalized_xyxy\":";
+  if (roi.has_normalized_xyxy) {
+    stream << '[' << roi.normalized_x0 << ',' << roi.normalized_y0 << ','
+           << roi.normalized_x1 << ',' << roi.normalized_y1 << ']';
+  } else {
+    stream << "null";
+  }
+  stream << ",\"crop_resolution\":{\"width\":" << roi.crop_width
+         << ",\"height\":" << roi.crop_height << '}'
+         << ",\"resize_mode\":\"" << json_escape(roi.resize_mode) << '"'
+         << ",\"pad_value\":" << roi.pad_value << '}';
+  return stream.str();
+}
+
+std::string effective_input_roi_json(const LetterboxMeta& meta) {
+  std::ostringstream stream;
+  stream << "{\"enabled\":" << json_bool(meta.input_roi_enabled)
+         << ",\"coordinate_space\":\"" << json_escape(meta.roi_coordinate_space) << '"'
+         << ",\"full_resolution\":{\"width\":" << meta.orig_width
+         << ",\"height\":" << meta.orig_height << '}'
+         << ",\"pixel_xyxy\":[" << meta.roi_x << ',' << meta.roi_y << ','
+         << meta.roi_x + meta.roi_width << ',' << meta.roi_y + meta.roi_height << ']'
+         << ",\"crop_resolution\":{\"width\":" << meta.roi_width
+         << ",\"height\":" << meta.roi_height << '}'
+         << ",\"scaled_from_normalized\":" << json_bool(meta.roi_scaled_from_normalized)
+         << '}';
+  return stream.str();
+}
+
 void replace_token(std::string& target, const std::string& token, const std::string& replacement) {
   std::size_t position = 0;
   while ((position = target.find(token, position)) != std::string::npos) {
@@ -311,6 +354,11 @@ std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
       snapshot.running && snapshot.mode == "preview" && !frame_source.stale
           ? frame_source.fps
           : 0.0;
+  std::string configured_input_roi_json;
+  {
+    std::lock_guard<std::recursive_mutex> lock(model_mutex_);
+    configured_input_roi_json = input_roi_config_json(model_info_.input_roi);
+  }
   std::ostringstream stream;
   stream << std::fixed << std::setprecision(3)
          << "{\"schema_version\":\"1.0\",\"message_type\":\"runtime_status\""
@@ -333,7 +381,8 @@ std::string RuntimeApp::status_json(const RuntimeSnapshot& snapshot) const {
          << ",\"preprocess\":{\"backend_requested\":\"" << json_escape(config_.preprocess_backend)
          << "\",\"backend_active\":\"" << json_escape(config_.preprocess_backend == "auto" && rga_backend_compiled() ? "rga" : config_.preprocess_backend)
          << "\",\"rga_mode\":\"" << json_escape(config_.rga_mode)
-         << "\",\"rga_available\":" << json_bool(rga_backend_compiled()) << '}'
+         << "\",\"rga_available\":" << json_bool(rga_backend_compiled())
+         << ",\"input_roi\":" << configured_input_roi_json << '}'
          << ",\"fps\":{\"camera_fps\":" << frame_source.fps << ",\"inference_fps\":" << inference_fps
          << ",\"snapshot_fps\":" << snapshot_fps << '}'
          << ",\"latency_ms\":{\"latest\":" << snapshot.latency_latest_ms
@@ -378,6 +427,7 @@ std::string RuntimeApp::loaded_model_json() const {
          << ",\"nms_threshold\":" << model_info_.nms_threshold
          << ",\"max_detections\":" << model_info_.max_detections
          << ",\"mask_max_points\":" << model_info_.mask_max_points
+         << ",\"input_roi\":" << input_roi_config_json(model_info_.input_roi)
          << ",\"model_load_error\":"
          << (model_info_.model_load_error.empty()
                  ? "null"
@@ -403,6 +453,27 @@ std::string RuntimeApp::infer_once() {
   const auto identity = state_.begin_inference(
       frame_prefix_for_source(config_.frame_source),
       result_prefix_for_backend(config_.backend));
+  {
+    std::lock_guard<std::recursive_mutex> model_lock(model_mutex_);
+    if (model_info_.package_invalid) {
+      MockFrame frame;
+      const auto source_status = stream_worker_.status();
+      frame.width = source_status.width;
+      frame.height = source_status.height;
+      const auto error = inference_error_json(
+          identity,
+          frame,
+          "MODEL_PACKAGE_INVALID",
+          model_info_.model_load_error,
+          0.0,
+          0.0,
+          nullptr,
+          nullptr,
+          "model_package_invalid");
+      state_.complete_inference_error(identity, error);
+      return error;
+    }
+  }
   auto frame_result = stream_worker_.next_frame(identity.sequence);
   auto frame = frame_result.frame;
   if (!frame_result.ok) {
@@ -439,7 +510,7 @@ std::string RuntimeApp::infer_once() {
     source_image.sequence = identity.sequence;
     source_image.source = "frame_source:test_image";
   } else if (image_buffer_valid_rgb(frame_result.image)) {
-    source_image = frame_result.image;
+    source_image = std::move(frame_result.image);
   } else {
     source_image = make_mock_image(frame);
   }
@@ -458,14 +529,18 @@ std::string RuntimeApp::infer_once() {
   const std::string preprocess_mode = model_info_.runtime_preprocess.empty()
       ? std::string("letterbox")
       : model_info_.runtime_preprocess;
-  const PreprocessOptions preprocess_options{config_.preprocess_backend, config_.rga_mode, preprocess_mode};
+  const PreprocessOptions preprocess_options{
+      config_.preprocess_backend,
+      config_.rga_mode,
+      preprocess_mode,
+      model_info_.input_roi};
   const auto preprocess = preprocess_image(
       frame, source_image, model_info_.input_width, model_info_.input_height, preprocess_options);
   if (!preprocess.error.empty()) {
     const auto error = inference_error_json(
         identity,
         frame,
-        "PREPROCESS_FAILED",
+        preprocess.error_code.empty() ? "PREPROCESS_FAILED" : preprocess.error_code,
         preprocess.error,
         frame_result.capture_ms,
         frame_result.decode_ms,
@@ -697,11 +772,14 @@ std::string RuntimeApp::inference_result_json(
          << ",\"model\":" << loaded_model_json()
          << ",\"image\":{\"width\":" << preprocess.letterbox.orig_width
          << ",\"height\":" << preprocess.letterbox.orig_height << '}'
+         << ",\"input_roi\":" << effective_input_roi_json(preprocess.letterbox)
          << ",\"roi\":" << roi_filter_.value_json(
                 preprocess.letterbox.orig_width, preprocess.letterbox.orig_height)
          << ",\"timing\":{\"capture_ms\":" << capture_ms
          << ",\"decode_ms\":" << decode_ms
          << ",\"preprocess_ms\":" << preprocess.elapsed_ms
+         << ",\"input_roi_resolve_ms\":" << preprocess.input_roi_resolve_ms
+         << ",\"crop_resize_ms\":" << preprocess.crop_resize_ms
          << ",\"inference_ms\":" << inference.inference_ms
          << ",\"postprocess_ms\":" << inference.postprocess_ms
          << ",\"result_build_ms\":" << kResultBuildToken
@@ -709,6 +787,8 @@ std::string RuntimeApp::inference_result_json(
          << ",\"timing_detail\":{\"capture_ms\":" << capture_ms
          << ",\"decode_ms\":" << decode_ms
          << ",\"preprocess_ms\":" << preprocess.elapsed_ms
+         << ",\"input_roi_resolve_ms\":" << preprocess.input_roi_resolve_ms
+         << ",\"crop_resize_ms\":" << preprocess.crop_resize_ms
          << ",\"rknn_set_input_ms\":" << inference.set_input_ms
          << ",\"rknn_run_ms\":" << inference.run_ms
          << ",\"rknn_get_output_ms\":" << inference.get_output_ms
@@ -737,7 +817,13 @@ std::string RuntimeApp::inference_result_json(
            << ",\"rga_mode\":\"" << json_escape(preprocess.rga_mode) << '"'
            << ",\"rga_available\":" << json_bool(preprocess.rga_available)
            << ",\"rga_used\":" << json_bool(preprocess.rga_used)
+           << ",\"rga_fused_crop_resize\":" << json_bool(preprocess.rga_fused_crop_resize)
+           << ",\"input_roi\":" << effective_input_roi_json(preprocess.letterbox)
+           << ",\"preprocess_warning\":"
+           << (preprocess.warning.empty() ? "null" : '"' + json_escape(preprocess.warning) + '"')
            << ",\"letterbox\":{\"scale\":" << preprocess.letterbox.scale
+           << ",\"scale_x\":" << preprocess.letterbox.scale_x
+           << ",\"scale_y\":" << preprocess.letterbox.scale_y
            << ",\"pad_x\":" << preprocess.letterbox.pad_x
            << ",\"pad_y\":" << preprocess.letterbox.pad_y << "}}";
   }
@@ -781,9 +867,12 @@ std::string RuntimeApp::postprocess_error_json(
          << ",\"model\":" << loaded_model_json()
          << ",\"image\":{\"width\":" << preprocess.letterbox.orig_width
          << ",\"height\":" << preprocess.letterbox.orig_height << '}'
+         << ",\"input_roi\":" << effective_input_roi_json(preprocess.letterbox)
          << ",\"timing\":{\"capture_ms\":" << capture_ms
          << ",\"decode_ms\":" << decode_ms
          << ",\"preprocess_ms\":" << preprocess.elapsed_ms
+         << ",\"input_roi_resolve_ms\":" << preprocess.input_roi_resolve_ms
+         << ",\"crop_resize_ms\":" << preprocess.crop_resize_ms
          << ",\"inference_ms\":" << inference.inference_ms
          << ",\"postprocess_ms\":" << inference.postprocess_ms
          << ",\"result_build_ms\":" << kResultBuildToken
@@ -791,6 +880,8 @@ std::string RuntimeApp::postprocess_error_json(
          << ",\"timing_detail\":{\"capture_ms\":" << capture_ms
          << ",\"decode_ms\":" << decode_ms
          << ",\"preprocess_ms\":" << preprocess.elapsed_ms
+         << ",\"input_roi_resolve_ms\":" << preprocess.input_roi_resolve_ms
+         << ",\"crop_resize_ms\":" << preprocess.crop_resize_ms
          << ",\"rknn_set_input_ms\":" << inference.set_input_ms
          << ",\"rknn_run_ms\":" << inference.run_ms
          << ",\"rknn_get_output_ms\":" << inference.get_output_ms
@@ -822,7 +913,13 @@ std::string RuntimeApp::postprocess_error_json(
   }
   stream << ']';
   if (!debug_key.empty()) stream << ",\"" << json_escape(debug_key) << "\":true";
-  stream << ",\"letterbox\":{\"scale\":" << preprocess.letterbox.scale
+  stream << ",\"rga_fused_crop_resize\":" << json_bool(preprocess.rga_fused_crop_resize)
+         << ",\"input_roi\":" << effective_input_roi_json(preprocess.letterbox)
+         << ",\"preprocess_warning\":"
+         << (preprocess.warning.empty() ? "null" : '"' + json_escape(preprocess.warning) + '"')
+         << ",\"letterbox\":{\"scale\":" << preprocess.letterbox.scale
+         << ",\"scale_x\":" << preprocess.letterbox.scale_x
+         << ",\"scale_y\":" << preprocess.letterbox.scale_y
          << ",\"pad_x\":" << preprocess.letterbox.pad_x
          << ",\"pad_y\":" << preprocess.letterbox.pad_y << "}}}";
   std::string body = stream.str();
@@ -849,6 +946,8 @@ std::string RuntimeApp::inference_error_json(
   constexpr char kResultBuildToken[] = "__RESULT_BUILD_MS__";
   constexpr char kTotalToken[] = "__TOTAL_MS__";
   const double preprocess_ms = preprocess == nullptr ? 0.0 : preprocess->elapsed_ms;
+  const double input_roi_resolve_ms = preprocess == nullptr ? 0.0 : preprocess->input_roi_resolve_ms;
+  const double crop_resize_ms = preprocess == nullptr ? 0.0 : preprocess->crop_resize_ms;
   const double inference_ms = inference == nullptr ? 0.0 : inference->inference_ms;
   const double postprocess_ms = inference == nullptr ? 0.0 : inference->postprocess_ms;
   const double set_input_ms = inference == nullptr ? 0.0 : inference->set_input_ms;
@@ -868,9 +967,16 @@ std::string RuntimeApp::inference_error_json(
          << ",\"source\":\"runtime:" << json_escape(config_.backend) << "\",\"status\":\"error\""
          << ",\"model\":" << loaded_model_json()
          << ",\"image\":{\"width\":" << frame.width << ",\"height\":" << frame.height << '}'
+         << ",\"input_roi\":"
+         << (preprocess == nullptr || preprocess->letterbox.roi_width <= 0 ||
+                     preprocess->letterbox.roi_height <= 0
+                 ? input_roi_config_json(model_info_.input_roi)
+                 : effective_input_roi_json(preprocess->letterbox))
          << ",\"timing\":{\"capture_ms\":" << capture_ms
          << ",\"decode_ms\":" << decode_ms
          << ",\"preprocess_ms\":" << preprocess_ms
+         << ",\"input_roi_resolve_ms\":" << input_roi_resolve_ms
+         << ",\"crop_resize_ms\":" << crop_resize_ms
          << ",\"inference_ms\":" << inference_ms
          << ",\"postprocess_ms\":" << postprocess_ms
          << ",\"result_build_ms\":" << kResultBuildToken
@@ -878,6 +984,8 @@ std::string RuntimeApp::inference_error_json(
          << ",\"timing_detail\":{\"capture_ms\":" << capture_ms
          << ",\"decode_ms\":" << decode_ms
          << ",\"preprocess_ms\":" << preprocess_ms
+         << ",\"input_roi_resolve_ms\":" << input_roi_resolve_ms
+         << ",\"crop_resize_ms\":" << crop_resize_ms
          << ",\"rknn_set_input_ms\":" << set_input_ms
          << ",\"rknn_run_ms\":" << run_ms
          << ",\"rknn_get_output_ms\":" << get_output_ms
@@ -895,7 +1003,14 @@ std::string RuntimeApp::inference_error_json(
            << ",\"preprocess_mode\":\"" << json_escape(preprocess->mode) << '"'
            << ",\"rga_mode\":\"" << json_escape(preprocess->rga_mode) << '"'
            << ",\"rga_available\":" << json_bool(preprocess->rga_available)
-           << ",\"rga_used\":" << json_bool(preprocess->rga_used);
+           << ",\"rga_used\":" << json_bool(preprocess->rga_used)
+           << ",\"rga_fused_crop_resize\":" << json_bool(preprocess->rga_fused_crop_resize)
+           << ",\"input_roi\":"
+           << (preprocess->letterbox.roi_width <= 0 || preprocess->letterbox.roi_height <= 0
+                   ? input_roi_config_json(model_info_.input_roi)
+                   : effective_input_roi_json(preprocess->letterbox))
+           << ",\"preprocess_warning\":"
+           << (preprocess->warning.empty() ? "null" : '"' + json_escape(preprocess->warning) + '"');
   }
   if (!debug_key.empty()) stream << ",\"" << json_escape(debug_key) << "\":true";
   stream << "}}";

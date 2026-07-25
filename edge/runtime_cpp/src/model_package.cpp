@@ -69,6 +69,7 @@ LoadedModelInfo load_model_package(const AppConfig& app_config) {
       if (yaml.nms_threshold >= 0.0) info.nms_threshold = yaml.nms_threshold;
       if (yaml.max_detections > 0) info.max_detections = yaml.max_detections;
       if (yaml.mask_max_points >= 4) info.mask_max_points = yaml.mask_max_points;
+      info.input_roi = yaml.input_roi;
       info.class_names = yaml.class_names;
       info.labels_count = static_cast<int>(info.class_names.size());
     } else {
@@ -84,6 +85,21 @@ LoadedModelInfo load_model_package(const AppConfig& app_config) {
     append_error(info.model_load_error, "不支持的模型 task_type: " + info.task_type);
     info.task_type = app_config.mock_task_type;
   }
+  if (info.input_roi.enabled &&
+      (info.task_type == "obb") && info.input_roi.resize_mode != "letterbox") {
+    append_error(
+        info.model_load_error,
+        "OBB 模型启用 input_roi 时必须使用 letterbox，非等比例 resize 会破坏旋转框角度");
+  }
+  if (info.input_roi.enabled) {
+    info.runtime_preprocess = info.input_roi.resize_mode;
+  }
+
+  // Snapshot package validity before Runtime runner/backend errors are appended
+  // by prepare_model_runtime(). This lets inference distinguish an invalid ROI
+  // package from an unavailable RKNN backend.
+  info.package_invalid = !info.model_load_error.empty();
+
   if ((info.task_type == "classification" || info.task_type == "classify") &&
       (info.runtime_preprocess.empty() || info.runtime_preprocess == "letterbox")) {
     // Old classification packages may have been generated with letterbox.

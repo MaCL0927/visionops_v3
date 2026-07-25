@@ -36,7 +36,6 @@ float logit_threshold(float probability) {
   return std::log(probability / (1.0F - probability));
 }
 
-float clip(float value, float maximum) { return std::clamp(value, 0.0F, maximum); }
 
 bool valid_tensor_data(const RuntimeTensor& tensor, std::size_t minimum_float_count) {
   return tensor.data_size() >= minimum_float_count * sizeof(float);
@@ -119,20 +118,22 @@ float dfl_expectation(
 }
 
 void finalize(ObbItem& item, const LetterboxMeta& meta) {
-  item.cx = (item.cx - meta.pad_x) / std::max(meta.scale, 1e-6F);
-  item.cy = (item.cy - meta.pad_y) / std::max(meta.scale, 1e-6F);
-  item.width /= std::max(meta.scale, 1e-6F);
-  item.height /= std::max(meta.scale, 1e-6F);
   if (std::fabs(item.angle) > 2.0F * static_cast<float>(M_PI)) {
     item.angle *= static_cast<float>(M_PI) / 180.0F;
   }
+  const float input_cx = item.cx;
+  const float input_cy = item.cy;
+  const float input_width = item.width;
+  const float input_height = item.height;
   const float cosine = std::cos(item.angle);
   const float sine = std::sin(item.angle);
-  const float half_width = item.width * 0.5F;
-  const float half_height = item.height * 0.5F;
+  const float half_width = input_width * 0.5F;
+  const float half_height = input_height * 0.5F;
   const float local[8] = {
       -half_width, -half_height, half_width, -half_height,
       half_width, half_height, -half_width, half_height};
+
+  float mapped_points[8]{};
   item.x1 = static_cast<float>(meta.orig_width);
   item.y1 = static_cast<float>(meta.orig_height);
   item.x2 = 0.0F;
@@ -140,17 +141,30 @@ void finalize(ObbItem& item, const LetterboxMeta& meta) {
   for (int point = 0; point < 4; ++point) {
     const float x = local[point * 2];
     const float y = local[point * 2 + 1];
-    item.points[point * 2] = clip(
-        x * cosine - y * sine + item.cx,
-        static_cast<float>(std::max(0, meta.orig_width - 1)));
-    item.points[point * 2 + 1] = clip(
-        x * sine + y * cosine + item.cy,
-        static_cast<float>(std::max(0, meta.orig_height - 1)));
+    const float model_x = x * cosine - y * sine + input_cx;
+    const float model_y = x * sine + y * cosine + input_cy;
+    // Keep an unclipped inverse transform for OBB geometry. Public points are
+    // clipped to the actual source ROI, but clipping must not rotate or shrink
+    // the reported OBB when it touches an ROI boundary.
+    mapped_points[point * 2] = map_model_x_to_full_image_unclamped(model_x, meta);
+    mapped_points[point * 2 + 1] = map_model_y_to_full_image_unclamped(model_y, meta);
+    item.points[point * 2] = map_model_x_to_full_image(model_x, meta);
+    item.points[point * 2 + 1] = map_model_y_to_full_image(model_y, meta);
     item.x1 = std::min(item.x1, item.points[point * 2]);
     item.y1 = std::min(item.y1, item.points[point * 2 + 1]);
     item.x2 = std::max(item.x2, item.points[point * 2]);
     item.y2 = std::max(item.y2, item.points[point * 2 + 1]);
   }
+
+  item.cx = map_model_x_to_full_image(input_cx, meta);
+  item.cy = map_model_y_to_full_image(input_cy, meta);
+  const float width_dx = mapped_points[2] - mapped_points[0];
+  const float width_dy = mapped_points[3] - mapped_points[1];
+  const float height_dx = mapped_points[4] - mapped_points[2];
+  const float height_dy = mapped_points[5] - mapped_points[3];
+  item.width = std::hypot(width_dx, width_dy);
+  item.height = std::hypot(height_dx, height_dy);
+  item.angle = std::atan2(width_dy, width_dx);
 }
 
 bool finalize_valid(ObbItem& item, const LetterboxMeta& meta) {

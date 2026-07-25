@@ -11,7 +11,7 @@
 负责：
 
 - 读取 Camera Bridge 帧；
-- 预处理与 RGA 加速；
+- 预处理、模型包输入 ROI 与 RGA 融合 crop+resize；
 - RKNN Context 和 NPU 推理；
 - Detection、Classification、OBB、Segmentation 后处理；
 - 标准 `inference_result`；
@@ -60,3 +60,7 @@ production/<line_id>/config/line.yaml
 ```
 
 设备实际生效配置安装到 `/etc/visionops_v3/`。仓库不提交真实 `.env`。
+
+## 4. 模型输入 ROI
+
+M32.3 起，Runtime 从当前模型包 `model.yaml.preprocess.input_roi` 读取输入区域。Camera Bridge 仍输出完整帧；Runtime 在 RGA 预处理中使用 source rect，一次完成 ROI 裁剪和缩放。后处理统一恢复完整图坐标，再执行 `/api/runtime/roi` 结果过滤。采集 ROI、模型输入 ROI、结果 ROI 不共享字段。

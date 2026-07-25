@@ -22,19 +22,62 @@ visionops::runtime::RuntimeTensor make_tensor(
   return tensor;
 }
 
+visionops::runtime::LetterboxMeta make_letterbox_meta(
+    int orig_width,
+    int orig_height,
+    int input_width,
+    int input_height,
+    int resized_width,
+    int resized_height,
+    float scale,
+    float pad_x,
+    float pad_y) {
+  visionops::runtime::LetterboxMeta meta;
+  meta.orig_width = orig_width;
+  meta.orig_height = orig_height;
+  meta.roi_x = 0;
+  meta.roi_y = 0;
+  meta.roi_width = orig_width;
+  meta.roi_height = orig_height;
+  meta.input_width = input_width;
+  meta.input_height = input_height;
+  meta.resized_width = resized_width;
+  meta.resized_height = resized_height;
+  meta.scale = scale;
+  meta.scale_x = scale;
+  meta.scale_y = scale;
+  meta.pad_x = pad_x;
+  meta.pad_y = pad_y;
+  return meta;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
   if (argc != 2) {
-    std::cerr << "用法: visionops_postprocess_fixture detection|obb|segmentation|classification\n";
+    std::cerr << "用法: visionops_postprocess_fixture detection|detection_input_roi|obb|obb_input_roi|segmentation|classification\n";
     return 2;
   }
   const std::string task = argv[1];
-  const visionops::runtime::LetterboxMeta meta{1280, 720, 640, 640, 640, 360, 0.5F, 0.0F, 140.0F};
+  auto meta = make_letterbox_meta(1280, 720, 640, 640, 640, 360, 0.5F, 0.0F, 140.0F);
+  if (task == "detection_input_roi" || task == "obb_input_roi") {
+    meta.input_roi_enabled = true;
+    meta.roi_x = 850;
+    meta.roi_y = 490;
+    meta.roi_width = 427;
+    meta.roi_height = 229;
+    meta.resized_width = 640;
+    meta.resized_height = 343;
+    meta.scale = 640.0F / 427.0F;
+    meta.scale_x = meta.scale;
+    meta.scale_y = meta.scale;
+    meta.pad_x = 0.0F;
+    meta.pad_y = (640.0F - 343.0F) / 2.0F;
+  }
   const visionops::runtime::PostprocessConfig config{{"tube", "bag"}, 0.5F, 0.45F, 100, {}};
   visionops::runtime::PostprocessResult result;
   std::string output_task = task;
-  if (task == "detection" || task == "detection_roi") {
+  if (task == "detection" || task == "detection_roi" || task == "detection_input_roi") {
     auto detection_config = config;
     if (task == "detection_roi") {
       detection_config.roi.enabled = true;
@@ -44,6 +87,7 @@ int main(int argc, char* argv[]) {
       detection_config.roi.y2 = 1.0;
       output_task = "detection";
     }
+    if (task == "detection_input_roi") output_task = "detection";
     result = visionops::runtime::postprocess_detection(
         {make_tensor({1, 2, 6}, {
             320, 320, 160, 120, 0.9F, 0.1F,
@@ -61,11 +105,12 @@ int main(int argc, char* argv[]) {
         config,
         meta);
     output_task = "detection";
-  } else if (task == "obb") {
+  } else if (task == "obb" || task == "obb_input_roi") {
     result = visionops::runtime::postprocess_obb(
         {make_tensor({1, 1, 7}, {320, 320, 180, 80, 0.92F, 0.08F, 0.25F})},
         config,
         meta);
+    if (task == "obb_input_roi") output_task = "obb";
   } else if (task == "obb_rockchip") {
     std::vector<float> head(66, -20.0F);
     // 64 个 DFL 通道 + 1 个类别通道，单个 1x1 网格。
@@ -87,7 +132,7 @@ int main(int argc, char* argv[]) {
         meta);
     output_task = "obb";
   } else if (task == "obb_rockchip_extra_channel") {
-    const visionops::runtime::LetterboxMeta meta1280{1280, 720, 1280, 1280, 1280, 720, 1.0F, 0.0F, 280.0F};
+    const auto meta1280 = make_letterbox_meta(1280, 720, 1280, 1280, 1280, 720, 1.0F, 0.0F, 280.0F);
     const visionops::runtime::PostprocessConfig config2{{"bag", "point"}, 0.5F, 0.45F, 100, {}};
     std::vector<float> head(67, -20.0F);
     // 64 个 DFL 通道 + 2 个类别通道 + 1 个额外辅助通道。

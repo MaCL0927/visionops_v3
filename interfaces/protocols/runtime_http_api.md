@@ -240,8 +240,18 @@ HTTP `200 OK`，响应遵守 `inference_result.schema.json`。Detection 示例�
     "input_size": {"width": 640, "height": 640}
   },
   "image": {"width": 1920, "height": 1080},
+  "input_roi": {
+    "enabled": true,
+    "coordinate_space": "runtime_snapshot",
+    "full_resolution": {"width": 1920, "height": 1080},
+    "pixel_xyxy": [600, 280, 1320, 920],
+    "crop_resolution": {"width": 720, "height": 640},
+    "scaled_from_normalized": false
+  },
   "timing": {
     "preprocess_ms": 2.0,
+    "input_roi_resolve_ms": 0.02,
+    "crop_resize_ms": 1.8,
     "inference_ms": 12.0,
     "postprocess_ms": 2.0,
     "total_ms": 16.0
@@ -249,6 +259,8 @@ HTTP `200 OK`，响应遵守 `inference_result.schema.json`。Detection 示例�
   "detections": []
 }
 ```
+
+启用模型输入 ROI 时，`image` 仍表示完整视频尺寸；所有检测坐标也已恢复为完整图坐标。`input_roi` 表示本帧实际生效区域。
 
 ### 错误状态
 

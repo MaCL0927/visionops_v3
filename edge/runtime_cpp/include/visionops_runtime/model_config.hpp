@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include "visionops_runtime/input_roi.hpp"
+
 namespace visionops::runtime {
 
 struct ModelConfigData {
@@ -19,6 +21,7 @@ struct ModelConfigData {
   double nms_threshold{-1.0};
   int max_detections{100};
   int mask_max_points{160};
+  InputRoiConfig input_roi;
 };
 
 bool load_model_config_yaml(

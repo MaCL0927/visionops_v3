@@ -3,6 +3,7 @@ set(VISIONOPS_RUNTIME_SOURCES
   src/app_config.cpp
   src/cli_args.cpp
   src/http_server.cpp
+  src/input_roi.cpp
   src/json_utils.cpp
   src/model_config.cpp
   src/model_package.cpp
@@ -106,3 +107,12 @@ add_executable(visionops_postprocess_fixture
 )
 target_include_directories(visionops_postprocess_fixture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 target_compile_options(visionops_postprocess_fixture PRIVATE -Wall -Wextra -Wpedantic)
+
+add_executable(visionops_preprocess_fixture
+  tests/preprocess_fixture.cpp
+  src/input_roi.cpp
+  src/preprocess.cpp
+  src/rga_preprocess.cpp
+)
+target_include_directories(visionops_preprocess_fixture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/../..)
+target_compile_options(visionops_preprocess_fixture PRIVATE -Wall -Wextra -Wpedantic)

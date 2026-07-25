@@ -70,4 +70,4 @@ preprocess:
     pad_value: 114
 ```
 
-`preprocess.input_roi` 由 M32.2 从采集包元数据自动传递到模型包。没有采集 ROI 的旧数据集输出 `enabled: false`。该字段在 M32.3 Runtime 输入裁剪阶段才会实际生效；当前结果过滤 ROI 的字段和语义保持不变。
+`preprocess.input_roi` 由 M32.2 从采集包元数据自动传递到模型包。没有采集 ROI 的旧数据集输出 `enabled: false`。M32.3 Runtime 已读取该字段，并通过 RGA/CPU 直接裁剪模型输入；当前结果过滤 ROI 的字段和语义保持不变。

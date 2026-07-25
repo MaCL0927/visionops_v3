@@ -62,7 +62,7 @@ model.rknn
 model.yaml
 ```
 
-边缘端 Collector Web 扫描后即可切换模型。M32.2 会把数据集的输入 ROI 写入 `model.yaml.preprocess.input_roi`，供下一阶段 Runtime 裁剪输入图像。
+边缘端 Collector Web 扫描后即可切换模型。M32.2 会把数据集的输入 ROI 写入 `model.yaml.preprocess.input_roi`，M32.3 Runtime 会读取该字段并裁剪输入图像。
 
 ## 6. 设备分发
 
