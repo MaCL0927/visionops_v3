@@ -54,4 +54,20 @@ postprocess:
 runtime:
   preprocess: letterbox
   color: rgb
+preprocess:
+  input_roi:
+    enabled: true
+    coordinate_space: runtime_snapshot
+    source_resolution:
+      width: 1280
+      height: 720
+    pixel_xyxy: [320, 144, 960, 576]
+    normalized_xyxy: [0.25, 0.2, 0.75, 0.8]
+    crop_resolution:
+      width: 640
+      height: 432
+    resize_mode: letterbox
+    pad_value: 114
 ```
+
+`preprocess.input_roi` 由 M32.2 从采集包元数据自动传递到模型包。没有采集 ROI 的旧数据集输出 `enabled: false`。该字段在 M32.3 Runtime 输入裁剪阶段才会实际生效；当前结果过滤 ROI 的字段和语义保持不变。

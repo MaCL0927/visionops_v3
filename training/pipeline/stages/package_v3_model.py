@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from training.pipeline.common import PipelineContext, normalize_task, write_json
+from tools.config.capture_roi_metadata import model_preprocess_document, normalize_input_roi
 
 
 def run(
@@ -57,6 +58,7 @@ def run(
         conf_threshold=float(ctx.job.get("conf_threshold", 0.25)),
         iou_threshold=float(ctx.job.get("iou_threshold", 0.45)),
         max_det=int(ctx.job.get("max_det", 100)),
+        input_roi=ctx.job.get("input_roi") if isinstance(ctx.job.get("input_roi"), dict) else ctx.dataset.get("input_roi"),
     )
     _write_model_yaml(package_dir / "model.yaml", model_yaml)
 
@@ -71,6 +73,10 @@ def run(
         "input_size": input_size,
         "dataset_id": ctx.dataset.get("dataset_id"),
         "job_id": ctx.job.get("job_id"),
+        "images_are_cropped": bool(ctx.job.get("images_are_cropped") or ctx.dataset.get("images_are_cropped")),
+        "input_roi": normalize_input_roi(
+            ctx.job.get("input_roi") if isinstance(ctx.job.get("input_roi"), dict) else ctx.dataset.get("input_roi")
+        ),
         "created_at_ms": now,
         "updated_at_ms": now,
         "artifacts": {
@@ -98,6 +104,8 @@ def run(
         "model_rknn": str(package_dir / "model.rknn"),
         "task_type": task_type,
         "input_size": input_size,
+        "input_roi": package_meta["input_roi"],
+        "images_are_cropped": package_meta["images_are_cropped"],
     }
     write_json(ctx.output_dir / "package_v3_model_report.json", report)
     ctx.log(f"[package] model_id={model_id} task={task_type} package_dir={package_dir}")
@@ -153,6 +161,7 @@ def _make_model_yaml(
     conf_threshold: float,
     iou_threshold: float,
     max_det: int,
+    input_roi: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     runtime_task = _runtime_task(task_type)
     class_docs = [{"id": i, "name": name} for i, name in enumerate(classes or ["object"])]
@@ -187,6 +196,7 @@ def _make_model_yaml(
             "preprocess": "resize" if runtime_task == "classification" else "letterbox",
             "color": "rgb",
         },
+        "preprocess": model_preprocess_document(input_roi),
     }
 
 
@@ -264,6 +274,8 @@ def _write_model_yaml(path: Path, doc: dict[str, Any]) -> None:
     model = doc.get("model") if isinstance(doc.get("model"), dict) else {}
     post = doc.get("postprocess") if isinstance(doc.get("postprocess"), dict) else {}
     runtime = doc.get("runtime") if isinstance(doc.get("runtime"), dict) else {}
+    preprocess_doc = doc.get("preprocess") if isinstance(doc.get("preprocess"), dict) else {}
+    input_roi = normalize_input_roi(preprocess_doc.get("input_roi"))
     classes = doc.get("classes") if isinstance(doc.get("classes"), list) else []
     class_names = doc.get("class_names") if isinstance(doc.get("class_names"), list) else []
 
@@ -304,6 +316,27 @@ def _write_model_yaml(path: Path, doc: dict[str, Any]) -> None:
         "runtime:",
         f"  preprocess: {_yaml_scalar(runtime.get('preprocess', 'letterbox'))}",
         f"  color: {_yaml_scalar(runtime.get('color', 'rgb'))}",
+        "preprocess:",
+        "  input_roi:",
+        f"    enabled: {'true' if input_roi.get('enabled') else 'false'}",
     ])
+    if input_roi.get("enabled"):
+        source = input_roi["source_resolution"]
+        crop = input_roi["crop_resolution"]
+        pixel = input_roi["pixel_xyxy"]
+        normalized = input_roi["normalized_xyxy"]
+        lines.extend([
+            f"    coordinate_space: {_yaml_scalar(input_roi.get('coordinate_space', 'runtime_snapshot'))}",
+            "    source_resolution:",
+            f"      width: {int(source['width'])}",
+            f"      height: {int(source['height'])}",
+            f"    pixel_xyxy: [{int(pixel[0])}, {int(pixel[1])}, {int(pixel[2])}, {int(pixel[3])}]",
+            "    normalized_xyxy: [" + ", ".join(f"{float(value):.12g}" for value in normalized) + "]",
+            "    crop_resolution:",
+            f"      width: {int(crop['width'])}",
+            f"      height: {int(crop['height'])}",
+            f"    resize_mode: {_yaml_scalar(input_roi.get('resize_mode', 'letterbox'))}",
+            f"    pad_value: {int(input_roi.get('pad_value', 114))}",
+        ])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

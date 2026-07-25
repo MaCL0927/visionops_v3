@@ -16,7 +16,7 @@ server_data/incoming/
 server_data/batches/<batch_id>/raw/
 ```
 
-里面保存解压后的 `manifest.json`、`images/`、`labels/` 等内容。原始压缩包会移动到：
+里面保存解压后的 `manifest.json`、`capture_manifest.json`、`images/`、`labels/` 等内容。服务端会校验并把 M32.1 的采集 ROI 规范化为 `batch.json.input_roi`。原始压缩包会移动到：
 
 ```text
 server_data/incoming/processed/
@@ -40,7 +40,10 @@ server_data/incoming/processed/
 ```text
 server_data/datasets/<device_id>_<customer_id>_<task>_<yyyymmdd_hhmmss>/dataset.json
 server_data/datasets/<device_id>_<customer_id>_<task>_<yyyymmdd_hhmmss>/batches.json
+server_data/datasets/<device_id>_<customer_id>_<task>_<yyyymmdd_hhmmss>/capture_metadata.json
 ```
+
+当选择多个 batch 时，服务端要求它们的采集 ROI 完全一致；完整图与 ROI 图混合、源分辨率不同或 ROI 坐标不同都会被拒绝。
 
 审核完成后会自动从指定 batch 构建 dataset，并物化 Ultralytics 训练目录。为避免重复占用空间，dataset 图片优先与 batches 原图建立硬链接，标签文件独立复制；因此标注数据仍可在 batches 中浏览，dataset 也可以独立删除和训练，但图片数据块通常只保存一份。
 
@@ -59,7 +62,7 @@ model.rknn
 model.yaml
 ```
 
-边缘端 Collector Web 扫描后即可切换模型。
+边缘端 Collector Web 扫描后即可切换模型。M32.2 会把数据集的输入 ROI 写入 `model.yaml.preprocess.input_roi`，供下一阶段 Runtime 裁剪输入图像。
 
 ## 6. 设备分发
 

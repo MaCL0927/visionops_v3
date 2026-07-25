@@ -11,6 +11,11 @@ from typing import Any
 
 from .ingest_service import BatchService, IMAGE_EXTENSIONS
 from .storage_utils import link_or_copy_immutable
+from tools.config.capture_roi_metadata import (
+    normalize_capture_metadata,
+    normalize_input_roi,
+    resolve_common_input_roi,
+)
 
 CLASSIFICATION_ROOT_NAMES = {"cls", "classification", "raw_classification", "classes"}
 RESERVED_DIR_NAMES = {
@@ -129,6 +134,23 @@ class DatasetService:
         if not selected:
             raise ValueError("没有可用于构建数据集的 extracted/accepted batch")
 
+        # Validate ROI compatibility before changing batch status or creating a
+        # dataset directory.  A training dataset can carry only one production
+        # input ROI, so mixed/full-frame and different ROI batches are rejected.
+        source_capture_metadata: dict[str, dict[str, Any]] = {}
+        source_input_rois: list[dict[str, Any]] = []
+        for item in selected:
+            capture_metadata = item.get("capture_metadata")
+            if not isinstance(capture_metadata, dict):
+                capture_metadata = normalize_capture_metadata(
+                    item.get("capture_manifest"),
+                    item.get("manifest"),
+                    source_name=str(item.get("source_package") or item.get("batch_id") or ""),
+                )
+            source_capture_metadata[str(item["batch_id"])] = capture_metadata
+            source_input_rois.append(normalize_input_roi(capture_metadata.get("input_roi")))
+        input_roi = resolve_common_input_roi(source_input_rois, context="所选 batch")
+
         normalized_selected: list[dict[str, Any]] = []
         for item in selected:
             batch = self.batch_service.set_status(item["batch_id"], "accepted", item.get("review_note", ""), task_type=task_type)
@@ -139,7 +161,6 @@ class DatasetService:
         created_time = time.strftime("%Y%m%d_%H%M%S")
         dataset_id = _unique_dataset_id(self.datasets_root, _make_dataset_id(source_device_id, source_customer_id, task_type, created_time))
         dataset_dir = self.datasets_root / dataset_id
-        dataset_dir.mkdir(parents=True, exist_ok=False)
         now = int(time.time() * 1000)
 
         if task_type == "classification":
@@ -159,6 +180,16 @@ class DatasetService:
             raise ValueError("选中的 batch 中没有带非空 labels 的图片，请先完成标注审核")
 
         source_manifests = {item["batch_id"]: item.get("manifest", {}) for item in normalized_selected if isinstance(item.get("manifest"), dict)}
+        capture_metadata = {
+            "schema_version": "1.0",
+            "message_type": "dataset_capture_metadata",
+            "images_are_cropped": bool(input_roi.get("enabled")),
+            "input_roi": input_roi,
+            "source_batch_count": len(normalized_selected),
+            "source_batch_ids": [item["batch_id"] for item in normalized_selected],
+            "sources": source_capture_metadata,
+        }
+        dataset_dir.mkdir(parents=True, exist_ok=False)
         meta = {
             "schema_version": "1.0",
             "dataset_id": dataset_id,
@@ -180,12 +211,18 @@ class DatasetService:
             "data_yaml": data_path,
             "training_data_path": data_path,
             "source_manifests": source_manifests,
+            "source_capture_metadata": source_capture_metadata,
+            "capture_metadata": capture_metadata,
+            "capture_metadata_json": str(dataset_dir / "capture_metadata.json"),
+            "images_are_cropped": bool(input_roi.get("enabled")),
+            "input_roi": input_roi,
             "created_at_ms": now,
             "updated_at_ms": now,
             "note": "Reviewed batch materialized once under datasets; image bytes are hard-linked from batches when possible, and training jobs reference this dataset directly.",
         }
         _write_json(dataset_dir / "dataset.json", meta)
         _write_json(dataset_dir / "batches.json", normalized_selected)
+        _write_json(dataset_dir / "capture_metadata.json", capture_metadata)
         if task_type == "classification":
             storage = _materialize_classification_dataset(dataset_dir / dataset_subdir, normalized_selected, classes)
         else:

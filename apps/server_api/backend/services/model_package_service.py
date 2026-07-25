@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from tools.config.capture_roi_metadata import model_preprocess_document, normalize_input_roi
+
 try:
     import yaml
 except Exception:  # pragma: no cover
@@ -43,6 +45,7 @@ def make_model_yaml(
     max_det: int = 100,
     preprocess: str = "letterbox",
     color: str = "rgb",
+    input_roi: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     task_type = normalize_model_task(task_type)
     if task_type == "classification" and preprocess == "letterbox":
@@ -84,6 +87,7 @@ def make_model_yaml(
             "preprocess": preprocess,
             "color": color,
         },
+        "preprocess": model_preprocess_document(input_roi),
     }
 
 
@@ -100,6 +104,8 @@ def write_model_yaml(path: Path, document: dict[str, Any]) -> None:
     model = document.get("model") if isinstance(document.get("model"), dict) else {}
     post = document.get("postprocess") if isinstance(document.get("postprocess"), dict) else {}
     runtime = document.get("runtime") if isinstance(document.get("runtime"), dict) else {}
+    preprocess_doc = document.get("preprocess") if isinstance(document.get("preprocess"), dict) else {}
+    input_roi = normalize_input_roi(preprocess_doc.get("input_roi"))
     classes = document.get("classes") if isinstance(document.get("classes"), list) else []
     class_names = document.get("class_names") if isinstance(document.get("class_names"), list) else []
 
@@ -140,7 +146,28 @@ def write_model_yaml(path: Path, document: dict[str, Any]) -> None:
         "runtime:",
         f"  preprocess: {_yaml_scalar(runtime.get('preprocess', 'letterbox'))}",
         f"  color: {_yaml_scalar(runtime.get('color', 'rgb'))}",
+        "preprocess:",
+        "  input_roi:",
+        f"    enabled: {'true' if input_roi.get('enabled') else 'false'}",
     ])
+    if input_roi.get("enabled"):
+        source = input_roi["source_resolution"]
+        crop = input_roi["crop_resolution"]
+        pixel = input_roi["pixel_xyxy"]
+        normalized = input_roi["normalized_xyxy"]
+        lines.extend([
+            f"    coordinate_space: {_yaml_scalar(input_roi.get('coordinate_space', 'runtime_snapshot'))}",
+            "    source_resolution:",
+            f"      width: {int(source['width'])}",
+            f"      height: {int(source['height'])}",
+            f"    pixel_xyxy: [{int(pixel[0])}, {int(pixel[1])}, {int(pixel[2])}, {int(pixel[3])}]",
+            "    normalized_xyxy: [" + ", ".join(f"{float(value):.12g}" for value in normalized) + "]",
+            "    crop_resolution:",
+            f"      width: {int(crop['width'])}",
+            f"      height: {int(crop['height'])}",
+            f"    resize_mode: {_yaml_scalar(input_roi.get('resize_mode', 'letterbox'))}",
+            f"    pad_value: {int(input_roi.get('pad_value', 114))}",
+        ])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -187,6 +214,8 @@ class ModelPackageService:
             "metrics": metrics,
             "created_at_ms": meta.get("created_at_ms"),
             "updated_at_ms": meta.get("updated_at_ms"),
+            "images_are_cropped": bool(meta.get("images_are_cropped")),
+            "input_roi": normalize_input_roi(meta.get("input_roi")),
         }
 
     def create_mock_package(
@@ -215,6 +244,7 @@ class ModelPackageService:
             task_type=task_type,
             classes=classes,
             target_platform=target_platform,
+            input_roi=(train_config or {}).get("input_roi") if isinstance(train_config, dict) else None,
         )
         (package_dir / "model.rknn").write_bytes(b"VISIONOPS_V3_MOCK_RKNN_PLACEHOLDER\n")
         write_model_yaml(package_dir / "model.yaml", model_yaml)
@@ -228,6 +258,8 @@ class ModelPackageService:
             "target_platform": target_platform,
             "dataset_id": dataset_id,
             "job_id": job_id,
+            "images_are_cropped": bool((train_config or {}).get("images_are_cropped")) if isinstance(train_config, dict) else False,
+            "input_roi": normalize_input_roi((train_config or {}).get("input_roi") if isinstance(train_config, dict) else None),
             "created_at_ms": now,
             "updated_at_ms": now,
             "note": "当前为服务端 MVP mock 模型包；真实训练/RKNN 转换接入后会替换 model.rknn。",

@@ -247,3 +247,118 @@ def test_active_training_reference_blocks_dataset_delete(tmp_path: Path) -> None
     dataset_service.release_training_reference(dataset["dataset_id"], "active-job")
     deleted = dataset_service.delete_dataset(dataset["dataset_id"])
     assert deleted["status"] == "deleted"
+
+
+def _capture_roi_document(pixel_xyxy: list[int] | None = None) -> dict:
+    pixel = pixel_xyxy or [320, 144, 960, 576]
+    source_width, source_height = 1280, 720
+    x1, y1, x2, y2 = pixel
+    return {
+        "schema_version": "1.0",
+        "message_type": "capture_manifest",
+        "images_are_cropped": True,
+        "coordinate_space": "runtime_snapshot",
+        "capture_roi": {
+            "enabled": True,
+            "coordinate_space": "runtime_snapshot",
+            "source_resolution": {"width": source_width, "height": source_height},
+            "normalized_xyxy": [
+                x1 / source_width,
+                y1 / source_height,
+                x2 / source_width,
+                y2 / source_height,
+            ],
+            "pixel_xyxy": pixel,
+            "crop_resolution": {"width": x2 - x1, "height": y2 - y1},
+        },
+        "image_count": 1,
+    }
+
+
+def _sample_capture_tar_gz(path: Path, pixel_xyxy: list[int] | None = None) -> Path:
+    root = path.parent / (path.stem.replace(".", "_") + "_root")
+    (root / "images").mkdir(parents=True)
+    (root / "labels").mkdir(parents=True)
+    capture = _capture_roi_document(pixel_xyxy)
+    manifest = {
+        "device_id": "rk3576-001",
+        "customer_id": "roi-test",
+        "counts": {"all": 1},
+        "capture": {
+            "images_are_cropped": True,
+            "capture_roi": capture["capture_roi"],
+            "manifest_file": "capture_manifest.json",
+        },
+    }
+    (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (root / "capture_manifest.json").write_text(json.dumps(capture), encoding="utf-8")
+    (root / "images" / "a.jpg").write_bytes(b"fake-image")
+    (root / "labels" / "a.txt").write_text("0 0.5 0.5 0.1 0.1\n", encoding="utf-8")
+    with tarfile.open(path, "w:gz") as archive:
+        archive.add(root / "manifest.json", arcname="manifest.json")
+        archive.add(root / "capture_manifest.json", arcname="capture_manifest.json")
+        archive.add(root / "images" / "a.jpg", arcname="images/a.jpg")
+        archive.add(root / "labels" / "a.txt", arcname="labels/a.txt")
+    return path
+
+
+def test_capture_roi_metadata_flows_from_ingest_to_dataset(tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    package = _sample_capture_tar_gz(incoming / "rk3576-001_roi-test_20260725_101010.tar.gz")
+    batch_service = BatchService(tmp_path / "batches", ("detection",), incoming_root=incoming)
+    batch = batch_service.process_incoming_packages([package.name])
+
+    assert batch["images_are_cropped"] is True
+    assert batch["input_roi"]["enabled"] is True
+    assert batch["input_roi"]["pixel_xyxy"] == [320, 144, 960, 576]
+    assert Path(batch["capture_manifest_path"]).is_file()
+
+    dataset_service = DatasetService(tmp_path / "datasets", batch_service)
+    dataset = dataset_service.build_dataset(task_type="detection", batch_ids=[batch["batch_id"]])
+    assert dataset["images_are_cropped"] is True
+    assert dataset["input_roi"]["crop_resolution"] == {"width": 640, "height": 432}
+    capture_meta = json.loads(Path(dataset["capture_metadata_json"]).read_text(encoding="utf-8"))
+    assert capture_meta["input_roi"]["source_resolution"] == {"width": 1280, "height": 720}
+
+
+def test_training_job_and_model_yaml_inherit_input_roi(tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    package = _sample_capture_tar_gz(incoming / "rk3576-001_roi-test_20260725_111111.tar.gz")
+    batch_service = BatchService(tmp_path / "batches", ("detection",), incoming_root=incoming)
+    batch = batch_service.process_incoming_packages([package.name])
+    dataset_service = DatasetService(tmp_path / "datasets", batch_service)
+    dataset = dataset_service.build_dataset(task_type="detection", batch_ids=[batch["batch_id"]])
+    package_service = ModelPackageService(tmp_path / "packages")
+    job_service = TrainingJobService(tmp_path / "jobs", dataset_service, package_service)
+
+    job = job_service.create_job({"dataset_id": dataset["dataset_id"], "runner": "mock", "run_inline": True})
+    assert job["input_roi"]["enabled"] is True
+    model = package_service.get_package(job["output_model_package"])
+    assert model is not None
+    assert model["input_roi"]["pixel_xyxy"] == [320, 144, 960, 576]
+    yaml_text = (Path(model["package_path"]) / "model.yaml").read_text(encoding="utf-8")
+    assert "preprocess:" in yaml_text
+    assert "input_roi:" in yaml_text
+    assert "enabled: true" in yaml_text
+    assert "pixel_xyxy: [320, 144, 960, 576]" in yaml_text
+    assert "resize_mode: letterbox" in yaml_text
+
+
+def test_dataset_rejects_batches_with_different_capture_rois(tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    package_a = _sample_capture_tar_gz(incoming / "rk3576-001_roi-a_20260725_121212.tar.gz", [320, 144, 960, 576])
+    package_b = _sample_capture_tar_gz(incoming / "rk3576-001_roi-b_20260725_121213.tar.gz", [300, 144, 940, 576])
+    batch_service = BatchService(tmp_path / "batches", ("detection",), incoming_root=incoming)
+    batch_a = batch_service.process_incoming_packages([package_a.name])
+    batch_b = batch_service.process_incoming_packages([package_b.name])
+    dataset_service = DatasetService(tmp_path / "datasets", batch_service)
+
+    try:
+        dataset_service.build_dataset(task_type="detection", batch_ids=[batch_a["batch_id"], batch_b["batch_id"]])
+    except ValueError as error:
+        assert "不一致的采集 ROI" in str(error)
+    else:
+        raise AssertionError("different capture ROIs must be rejected")

@@ -27,6 +27,17 @@ function formatTime(ms) {
   if (!ms) return '-';
   try { return new Date(Number(ms)).toLocaleString(); } catch { return '-'; }
 }
+function inputRoiText(item) {
+  const roi = item && item.input_roi && typeof item.input_roi === 'object' ? item.input_roi : null;
+  if (!roi || roi.enabled !== true) return 'inputROI=full-frame';
+  const source = roi.source_resolution || {};
+  const crop = roi.crop_resolution || {};
+  const px = Array.isArray(roi.pixel_xyxy) ? roi.pixel_xyxy : [];
+  const cropText = `${crop.width || '?'}x${crop.height || '?'}`;
+  const sourceText = `${source.width || '?'}x${source.height || '?'}`;
+  const pixelText = px.length === 4 ? `[${px.join(',')}]` : '';
+  return `inputROI=${cropText}@${sourceText}${pixelText}`;
+}
 function badgeClass(status) {
   if (['ok', 'ready', 'success', 'accepted', 'connect', 'connected', 'synced'].includes(status)) return '';
   if (['failed', 'rejected', 'error', 'fail', 'sync_failed'].includes(status)) return 'danger';
@@ -150,7 +161,7 @@ function renderBatches() {
       <div class="folder-icon">📁</div>
       <div>
         <div class="folder-title">${escapeHtml(item.batch_id)} <span class="badge ${badgeClass(item.status)}">${escapeHtml(item.status || 'extracted')}</span></div>
-        <div class="folder-meta">device=${escapeHtml(item.device_id || '-')} | customer=${escapeHtml(item.customer_id || '-')} | task=${escapeHtml(item.task_type || 'unassigned')} | images=${item.image_count || 0} | labels=${item.label_count || 0} | ${formatTime(item.created_at_ms)}</div>
+        <div class="folder-meta">device=${escapeHtml(item.device_id || '-')} | customer=${escapeHtml(item.customer_id || '-')} | task=${escapeHtml(item.task_type || 'unassigned')} | images=${item.image_count || 0} | labels=${item.label_count || 0} | ${escapeHtml(inputRoiText(item))} | ${formatTime(item.created_at_ms)}</div>
       </div>
       <div class="folder-actions">
         <button onclick="openAnnotator('${escapeHtml(item.batch_id)}')">标注</button>
@@ -173,7 +184,7 @@ function renderDatasets() {
   root.innerHTML = items.map(item => `
     <div class="item">
       <div class="item-title">${escapeHtml(item.dataset_id)} <span class="badge ${badgeClass(item.status)}">${escapeHtml(item.status || 'ready')}</span></div>
-      <div class="item-meta">${escapeHtml(item.task_type)} | batches=${(item.batch_ids || []).length} | images=${item.image_count || 0} | labels=${item.label_count || 0} | classes=${item.class_count || 0}</div>
+      <div class="item-meta">${escapeHtml(item.task_type)} | batches=${(item.batch_ids || []).length} | images=${item.image_count || 0} | labels=${item.label_count || 0} | classes=${item.class_count || 0} | ${escapeHtml(inputRoiText(item))}</div>
       <div class="item-actions">
         <button onclick="openDatasetFolder('${escapeHtml(item.dataset_id)}')" class="secondary">详情</button>
         <button onclick="deleteDataset('${escapeHtml(item.dataset_id)}')" class="danger">删除</button>
@@ -194,7 +205,7 @@ function renderJobs() {
     <div class="item item-compact">
       <div class="inline-info">
         <span class="item-title">${escapeHtml(item.job_id)} <span class="badge ${badgeClass(item.status)}">${escapeHtml(item.status)}</span></span>
-        <span class="item-meta inline-meta">stage=${escapeHtml(item.current_stage)} | dataset=${escapeHtml(item.dataset_id)} | model=${escapeHtml(item.output_model_package || '-')} | ${formatTime(item.updated_at_ms)}</span>
+        <span class="item-meta inline-meta">stage=${escapeHtml(item.current_stage)} | dataset=${escapeHtml(item.dataset_id)} | model=${escapeHtml(item.output_model_package || '-')} | ${escapeHtml(inputRoiText(item))} | ${formatTime(item.updated_at_ms)}</span>
       </div>
       <div class="item-actions">
         ${cancelBtn}
@@ -214,7 +225,7 @@ function renderModels() {
     <div class="item item-compact">
       <div class="inline-info">
         <span class="item-title">${escapeHtml(item.model_id)} <span class="badge ${badgeClass(item.status)}">${escapeHtml(item.status)}</span></span>
-        <span class="item-meta inline-meta">${escapeHtml(item.task_type)} | platform=${escapeHtml(item.target_platform)} | job=${escapeHtml(item.job_id || '-')}</span>
+        <span class="item-meta inline-meta">${escapeHtml(item.task_type)} | platform=${escapeHtml(item.target_platform)} | job=${escapeHtml(item.job_id || '-')} | ${escapeHtml(inputRoiText(item))}</span>
       </div>
       <div class="item-actions">
         <button onclick="publishModel('${escapeHtml(item.model_id)}')" class="success">发布</button>

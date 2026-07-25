@@ -15,10 +15,16 @@ from pathlib import Path
 from typing import Any
 
 from ..storage.json_store import JsonStore
+from tools.config.capture_roi_metadata import (
+    normalize_capture_metadata,
+    read_json_object,
+    resolve_common_input_roi,
+)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 LABEL_EXTENSIONS = {".txt", ".xml"}
 MANIFEST_NAMES = {"manifest.json", "collector_manifest.json"}
+CAPTURE_MANIFEST_NAME = "capture_manifest.json"
 IMAGE_DIR_NAMES = {"images", "all_images", "positive", "negative"}
 LABEL_DIR_NAMES = {"labels", "labels_auto"}
 
@@ -108,6 +114,12 @@ class BatchService:
                 shutil.copytree(dataset_root, raw_dir)
 
             manifest = _read_manifest(raw_dir)
+            capture_manifest = read_json_object(raw_dir / CAPTURE_MANIFEST_NAME, strict=(raw_dir / CAPTURE_MANIFEST_NAME).exists())
+            capture_metadata = normalize_capture_metadata(
+                capture_manifest,
+                manifest,
+                source_name=package_path.name,
+            )
             device_id = _pick_text(manifest, ["device_id", "equipment_id", "edge_device_id"], name_device_id)
             customer_id = _pick_text(manifest, ["customer_id", "cust_id", "user_id"], name_customer_id)
             image_count, label_count, total_files = _count_dataset_files(raw_dir)
@@ -132,6 +144,11 @@ class BatchService:
                 "labels_path": _best_existing_dir(raw_dir, ["labels", "labels_auto"]),
                 "manifest_path": str(raw_dir / "manifest.json") if (raw_dir / "manifest.json").exists() else "",
                 "manifest": manifest,
+                "capture_manifest_path": str(raw_dir / CAPTURE_MANIFEST_NAME) if (raw_dir / CAPTURE_MANIFEST_NAME).exists() else "",
+                "capture_manifest": capture_manifest,
+                "capture_metadata": capture_metadata,
+                "images_are_cropped": bool(capture_metadata.get("images_are_cropped")),
+                "input_roi": capture_metadata.get("input_roi", {"enabled": False}),
                 "created_at_ms": now,
                 "updated_at_ms": now,
                 "review_note": "",
@@ -142,6 +159,8 @@ class BatchService:
             self._store(batch_id).write(meta)
             return meta
         except Exception:
+            if batch_dir.exists():
+                shutil.rmtree(batch_dir, ignore_errors=True)
             if package_path.exists():
                 _move_package(package_path, self.failed_root)
             raise
@@ -163,6 +182,15 @@ class BatchService:
                     _safe_extract_archive(package_path, tmp_dir)
                     dataset_root = _find_package_root(tmp_dir)
                     manifest = _read_manifest(dataset_root)
+                    capture_manifest = read_json_object(
+                        dataset_root / CAPTURE_MANIFEST_NAME,
+                        strict=(dataset_root / CAPTURE_MANIFEST_NAME).exists(),
+                    )
+                    capture_metadata = normalize_capture_metadata(
+                        capture_manifest,
+                        manifest,
+                        source_name=package_path.name,
+                    )
                     sources.append(
                         {
                             "package_name": package_path.name,
@@ -171,6 +199,9 @@ class BatchService:
                             "customer_id": _pick_text(manifest, ["customer_id", "cust_id", "user_id"], customer_id),
                             "captured_at": captured_at,
                             "manifest": manifest,
+                            "capture_manifest": capture_manifest,
+                            "capture_metadata": capture_metadata,
+                            "input_roi": capture_metadata.get("input_roi", {"enabled": False}),
                         }
                     )
                     for folder in IMAGE_DIR_NAMES | LABEL_DIR_NAMES:
@@ -179,6 +210,21 @@ class BatchService:
                     for filename in MANIFEST_NAMES | {"collector_meta.jsonl"}:
                         if (dataset_root / filename).is_file() and not (raw_dir / filename).exists():
                             shutil.copy2(dataset_root / filename, raw_dir / filename)
+
+            common_input_roi = resolve_common_input_roi(
+                [item.get("input_roi") for item in sources],
+                context="合并上传包",
+            )
+            merged_capture_manifest = {
+                "schema_version": "1.0",
+                "message_type": "capture_manifest",
+                "is_merged": True,
+                "images_are_cropped": bool(common_input_roi.get("enabled")),
+                "capture_roi": common_input_roi,
+                "source_package_count": len(sources),
+                "source_packages": [item.get("package_name") for item in sources],
+            }
+            _write_json(raw_dir / CAPTURE_MANIFEST_NAME, merged_capture_manifest)
 
             merged_manifest = {
                 "schema_version": "visionops_server_merged_manifest_v1",
@@ -191,6 +237,11 @@ class BatchService:
                 "source_package_count": len(package_paths),
                 "source_packages": [path.name for path in package_paths],
                 "sources": sources,
+                "capture": {
+                    "images_are_cropped": bool(common_input_roi.get("enabled")),
+                    "capture_roi": common_input_roi,
+                    "manifest_file": CAPTURE_MANIFEST_NAME,
+                },
             }
             _write_json(raw_dir / "manifest.json", merged_manifest)
             image_count, label_count, total_files = _count_dataset_files(raw_dir)
@@ -214,6 +265,17 @@ class BatchService:
                 "labels_path": _best_existing_dir(raw_dir, ["labels", "labels_auto"]),
                 "manifest_path": str(raw_dir / "manifest.json"),
                 "manifest": merged_manifest,
+                "capture_manifest_path": str(raw_dir / CAPTURE_MANIFEST_NAME),
+                "capture_manifest": merged_capture_manifest,
+                "capture_metadata": {
+                    "schema_version": "1.0",
+                    "message_type": "capture_metadata",
+                    "source_name": batch_id,
+                    "images_are_cropped": bool(common_input_roi.get("enabled")),
+                    "input_roi": common_input_roi,
+                },
+                "images_are_cropped": bool(common_input_roi.get("enabled")),
+                "input_roi": common_input_roi,
                 "created_at_ms": now,
                 "updated_at_ms": now,
                 "review_note": "",
@@ -224,6 +286,8 @@ class BatchService:
             self._store(batch_id).write(meta)
             return meta
         except Exception:
+            if batch_dir.exists():
+                shutil.rmtree(batch_dir, ignore_errors=True)
             for package_path in package_paths:
                 if package_path.exists():
                     _move_package(package_path, self.failed_root)
@@ -251,6 +315,12 @@ class BatchService:
         _safe_extract_zip(zip_path, raw_dir)
         image_count, label_count, total_files = _count_dataset_files(raw_dir)
         manifest = _read_manifest(raw_dir)
+        capture_manifest = read_json_object(raw_dir / CAPTURE_MANIFEST_NAME, strict=(raw_dir / CAPTURE_MANIFEST_NAME).exists())
+        capture_metadata = normalize_capture_metadata(
+            capture_manifest,
+            manifest,
+            source_name=zip_path.name,
+        )
         now = _now_ms()
         meta = {
             "schema_version": "1.0",
@@ -270,6 +340,11 @@ class BatchService:
             "labels_path": _best_existing_dir(raw_dir, ["labels", "labels_auto"]),
             "manifest_path": str(raw_dir / "manifest.json") if (raw_dir / "manifest.json").exists() else "",
             "manifest": manifest,
+            "capture_manifest_path": str(raw_dir / CAPTURE_MANIFEST_NAME) if (raw_dir / CAPTURE_MANIFEST_NAME).exists() else "",
+            "capture_manifest": capture_manifest,
+            "capture_metadata": capture_metadata,
+            "images_are_cropped": bool(capture_metadata.get("images_are_cropped")),
+            "input_roi": capture_metadata.get("input_roi", {"enabled": False}),
             "created_at_ms": now,
             "updated_at_ms": now,
             "review_note": "",

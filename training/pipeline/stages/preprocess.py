@@ -103,6 +103,9 @@ def _reuse_materialized_dataset(
         "storage_mode": "shared_dataset_reference",
         "source_dataset_path": str(dataset.get("dataset_path") or dataset_dir.parent),
         "job_dataset_copy_created": False,
+        "images_are_cropped": bool(dataset.get("images_are_cropped")),
+        "input_roi": dataset.get("input_roi") if isinstance(dataset.get("input_roi"), dict) else {"enabled": False},
+        "capture_metadata_json": str(dataset.get("capture_metadata_json") or ""),
     }
     if task_type == "classification":
         report["classification_layout"] = "ultralytics_folder"
@@ -170,6 +173,9 @@ def _run_yolo_labels(ctx: PipelineContext, dataset: dict[str, Any], task_type: s
         "total_labeled_images": len(items),
         "train_images": len(train_items),
         "val_images": len(val_items),
+        "images_are_cropped": bool(dataset.get("images_are_cropped")),
+        "input_roi": dataset.get("input_roi") if isinstance(dataset.get("input_roi"), dict) else {"enabled": False},
+        "capture_metadata_json": str(dataset.get("capture_metadata_json") or ""),
     }
     write_json(ctx.output_dir / "preprocess_report.json", report)
     ctx.log(f"[preprocess] data_yaml={data_yaml_path} train={len(train_items)} val={len(val_items)} classes={classes}")
@@ -239,6 +245,9 @@ def _run_classification(ctx: PipelineContext, dataset: dict[str, Any], classes: 
         "train_images": len(train_items),
         "val_images": len(val_items),
         "classification_layout": "ultralytics_folder",
+        "images_are_cropped": bool(dataset.get("images_are_cropped")),
+        "input_roi": dataset.get("input_roi") if isinstance(dataset.get("input_roi"), dict) else {"enabled": False},
+        "capture_metadata_json": str(dataset.get("capture_metadata_json") or ""),
     }
     write_json(ctx.output_dir / "preprocess_report.json", report)
     ctx.log(f"[preprocess] classification data={data_root} train={len(train_items)} val={len(val_items)} classes={class_names}")

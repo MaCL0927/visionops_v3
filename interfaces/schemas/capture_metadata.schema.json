@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://visionops.local/schemas/capture_metadata.schema.json",
+  "title": "VisionOps capture ROI metadata",
+  "type": "object",
+  "required": ["schema_version", "message_type", "images_are_cropped", "input_roi"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "message_type": {"enum": ["capture_metadata", "dataset_capture_metadata"]},
+    "source_name": {"type": "string"},
+    "images_are_cropped": {"type": "boolean"},
+    "input_roi": {"$ref": "#/$defs/inputRoi"},
+    "source_batch_count": {"type": "integer", "minimum": 0},
+    "source_batch_ids": {"type": "array", "items": {"type": "string"}},
+    "sources": {"type": "object"}
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "resolution": {
+      "type": "object",
+      "required": ["width", "height"],
+      "properties": {
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "inputRoi": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["enabled"],
+          "properties": {"enabled": {"const": false}},
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "enabled",
+            "coordinate_space",
+            "source_resolution",
+            "pixel_xyxy",
+            "normalized_xyxy",
+            "crop_resolution",
+            "resize_mode",
+            "pad_value"
+          ],
+          "properties": {
+            "enabled": {"const": true},
+            "coordinate_space": {"enum": ["runtime_snapshot", "bridge_output_image", "image"]},
+            "source_resolution": {"$ref": "#/$defs/resolution"},
+            "pixel_xyxy": {
+              "type": "array",
+              "prefixItems": [
+                {"type": "integer", "minimum": 0},
+                {"type": "integer", "minimum": 0},
+                {"type": "integer", "minimum": 1},
+                {"type": "integer", "minimum": 1}
+              ],
+              "minItems": 4,
+              "maxItems": 4
+            },
+            "normalized_xyxy": {
+              "type": "array",
+              "prefixItems": [
+                {"type": "number", "minimum": 0, "maximum": 1},
+                {"type": "number", "minimum": 0, "maximum": 1},
+                {"type": "number", "minimum": 0, "maximum": 1},
+                {"type": "number", "minimum": 0, "maximum": 1}
+              ],
+              "minItems": 4,
+              "maxItems": 4
+            },
+            "crop_resolution": {"$ref": "#/$defs/resolution"},
+            "resize_mode": {"enum": ["letterbox", "resize"]},
+            "pad_value": {"type": "integer", "minimum": 0, "maximum": 255}
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}
