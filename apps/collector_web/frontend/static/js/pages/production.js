@@ -1,5 +1,6 @@
 import { endpoints, postJson, requestBlob, requestJson } from "../api.js";
 import { getState, updateState } from "../state.js";
+import { SlidingRateMeter, targetIntervalMs } from "../realtime_rate.js";
 import { clearOverlay, drawInferenceOverlay } from "../render/overlay.js";
 import {
   drawModelInputPreview,
@@ -32,12 +33,14 @@ let snapshotUrl = null;
 let latestResult = null;
 let liveTimer = null;
 let liveBusy = false;
+let snapshotTimer = null;
+let snapshotBusy = false;
 let liveEnabled = false;
 let activeView = "live";
-let lastLoopFinishedAt = null;
 let lastRenderedResultKey = null;
 let overlayResizeFrame = null;
 let inputPreviewVisible = false;
+const inferenceRate = new SlidingRateMeter(2000, 180);
 
 function refreshInputPreview() {
   const state = renderInputRoiDiagnostics(inputRoiDiagnostics, latestResult);
@@ -118,7 +121,7 @@ function placementSummary(result) {
   return `第${layer}层 ${occupied}/${total}${next}`;
 }
 
-function updateLiveSummary(result, elapsedMs = null) {
+function updateLiveSummary(result, measuredInferenceFps = null) {
   latestResult = result;
   updateState({ latestResult: result });
   const task = result?.task_type || "--";
@@ -139,10 +142,15 @@ function updateLiveSummary(result, elapsedMs = null) {
     ?? 15,
   );
   const measuredProducerFps = Number(producer.actual_fps);
+  const runtimeReportedFps = Number(result?.fps?.inference_fps);
+  const localMeasuredFps = Number(measuredInferenceFps);
   const actualFps = Number.isFinite(measuredProducerFps) && measuredProducerFps > 0
     ? measuredProducerFps
-    : (elapsedMs ? 1000 / elapsedMs : configuredFps);
-  fpsText.textContent = `${formatFps(actualFps)} / 设定 ${formatFps(configuredFps)}`;
+    : (Number.isFinite(runtimeReportedFps) && runtimeReportedFps > 0
+      ? runtimeReportedFps
+      : (Number.isFinite(localMeasuredFps) && localMeasuredFps > 0 ? localMeasuredFps : configuredFps));
+  const displayFps = Number(getState().config.display_fps || 5);
+  fpsText.textContent = `${formatFps(actualFps)} / 设定 ${formatFps(configuredFps)} · 画面 ${formatFps(displayFps)}`;
   liveStatus.textContent = `实时检测中 · ${task}`;
   renderInputRoiDiagnostics(inputRoiDiagnostics, result);
 }
@@ -199,7 +207,7 @@ async function displaySnapshot() {
 }
 
 export async function productionInferOnce(options = {}) {
-  const startedAt = performance.now();
+  const refreshSnapshot = options.refreshSnapshot !== false;
   try {
     const source = getState().config.production_inference_source || "runtime";
     const force = options.force === true;
@@ -243,12 +251,10 @@ export async function productionInferOnce(options = {}) {
       return result;
     }
 
-    const finishedAt = performance.now();
-    const elapsedMs = lastLoopFinishedAt ? finishedAt - lastLoopFinishedAt : finishedAt - startedAt;
-    lastLoopFinishedAt = finishedAt;
     lastRenderedResultKey = key || null;
-    updateLiveSummary(result, elapsedMs);
-    await displaySnapshot();
+    const measuredInferenceFps = inferenceRate.mark(performance.now());
+    updateLiveSummary(result, measuredInferenceFps);
+    if (refreshSnapshot) await displaySnapshot();
     return result;
   } catch (error) {
     empty.classList.remove("hidden");
@@ -277,13 +283,47 @@ async function runLiveLoop() {
   const startedAt = performance.now();
   liveBusy = true;
   try {
-    await productionInferOnce();
+    await productionInferOnce({ refreshSnapshot: false });
   } finally {
     liveBusy = false;
     if (liveEnabled && activeView === "live") {
-      const targetMs = Math.max(16, Number(getState().config.inference_interval_ms || 500));
+      const targetMs = targetIntervalMs(getState().config.production_inference_fps, getState().config.inference_interval_ms || 500);
       const remainingMs = Math.max(0, targetMs - (performance.now() - startedAt));
       scheduleLiveLoop(remainingMs);
+    }
+  }
+}
+
+function scheduleSnapshotLoop(delayMs = 0) {
+  if (snapshotTimer) clearTimeout(snapshotTimer);
+  snapshotTimer = setTimeout(runSnapshotLoop, Math.max(0, delayMs));
+}
+
+async function runSnapshotLoop() {
+  if (!liveEnabled || activeView !== "live") return;
+  if (snapshotBusy) {
+    scheduleSnapshotLoop(1);
+    return;
+  }
+
+  const startedAt = performance.now();
+  snapshotBusy = true;
+  try {
+    await displaySnapshot();
+  } catch (error) {
+    if (!latestResult) {
+      empty.classList.remove("hidden");
+      empty.textContent = error.body?.error?.message || error.message || "生产画面刷新失败";
+    }
+  } finally {
+    snapshotBusy = false;
+    if (liveEnabled && activeView === "live") {
+      const targetMs = targetIntervalMs(
+        getState().config.display_fps,
+        getState().config.snapshot_refresh_interval_ms || 200,
+      );
+      const remainingMs = Math.max(0, targetMs - (performance.now() - startedAt));
+      scheduleSnapshotLoop(remainingMs);
     }
   }
 }
@@ -292,17 +332,24 @@ function startLive() {
   if (liveEnabled) return;
   liveEnabled = true;
   liveStatus.textContent = "实时检测启动中";
-  lastLoopFinishedAt = null;
   lastRenderedResultKey = null;
+  inferenceRate.reset();
   scheduleLiveLoop(0);
+  scheduleSnapshotLoop(0);
 }
 
 function stopLive() {
   liveEnabled = false;
   liveBusy = false;
+  snapshotBusy = false;
+  inferenceRate.reset();
   if (liveTimer) {
     clearTimeout(liveTimer);
     liveTimer = null;
+  }
+  if (snapshotTimer) {
+    clearTimeout(snapshotTimer);
+    snapshotTimer = null;
   }
 }
 

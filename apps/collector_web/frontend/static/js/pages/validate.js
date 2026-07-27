@@ -1,5 +1,6 @@
 import { ApiError, endpoints, postJson, requestBlob, requestJson } from "../api.js";
 import { getState, updateState } from "../state.js";
+import { SlidingRateMeter, targetIntervalMs } from "../realtime_rate.js";
 import { clearOverlay, drawInferenceOverlay } from "../render/overlay.js";
 import {
   drawModelInputPreview,
@@ -34,6 +35,8 @@ let snapshotUrl = null;
 let currentResult = null;
 let realtimeTimer = null;
 let realtimeBusy = false;
+let realtimeSnapshotTimer = null;
+let realtimeSnapshotBusy = false;
 let currentCatalog = null;
 let switchingModelId = null;
 let selectedCaptureRecord = null;
@@ -44,6 +47,7 @@ let roiDrawing = false;
 let roiStartPoint = null;
 let roiResizeObserver = null;
 let inputPreviewVisible = false;
+const inferenceRate = new SlidingRateMeter(2000, 180);
 
 function formatBytes(value) {
   if (value == null || Number.isNaN(Number(value))) return "--";
@@ -102,9 +106,16 @@ function setRealtimeButtonState(running) {
 
 function stopRealtimeLoop() {
   realtimeEnabled = false;
+  realtimeBusy = false;
+  realtimeSnapshotBusy = false;
+  inferenceRate.reset();
   if (realtimeTimer) {
     clearTimeout(realtimeTimer);
     realtimeTimer = null;
+  }
+  if (realtimeSnapshotTimer) {
+    clearTimeout(realtimeSnapshotTimer);
+    realtimeSnapshotTimer = null;
   }
   setRealtimeButtonState(false);
 }
@@ -188,12 +199,25 @@ function renderResultSummary(result) {
   });
 }
 
-function showResult(result) {
+function showResult(result, measuredInferenceFps = null) {
   currentResult = result;
   updateState({ latestResult: result });
   const timing = result.timing || {};
   for (const key of ["preprocess", "inference", "postprocess", "total"]) {
     document.getElementById(`timing-${key}`).textContent = timing[`${key}_ms`] == null ? "--" : `${timing[`${key}_ms`]} ms`;
+  }
+  const configuredFps = Number(getState().config.production_inference_fps || 15);
+  const actualFps = Number(measuredInferenceFps);
+  const fpsNode = document.getElementById("timing-fps");
+  if (fpsNode) {
+    fpsNode.textContent = Number.isFinite(actualFps) && actualFps > 0
+      ? `${actualFps.toFixed(actualFps >= 10 ? 1 : 2)} / ${configuredFps.toFixed(configuredFps >= 10 ? 1 : 2)}`
+      : `-- / ${configuredFps.toFixed(configuredFps >= 10 ? 1 : 2)}`;
+  }
+  const displayFpsNode = document.getElementById("timing-display-fps");
+  if (displayFpsNode) {
+    const displayFps = Number(getState().config.display_fps || 5);
+    displayFpsNode.textContent = `${displayFps.toFixed(displayFps >= 10 ? 1 : 2)} FPS`;
   }
   renderResultSummary(result);
   renderInputRoiDiagnostics(inputRoiDiagnostics, result);
@@ -514,11 +538,14 @@ async function refreshImage() {
   await displayImageSource(snapshotUrl);
 }
 
-export async function inferOnce() {
+export async function inferOnce(options = {}) {
+  const refreshSnapshot = options.refreshSnapshot !== false;
+  const measureRate = options.measureRate === true;
   try {
     const result = await postJson(endpoints.inferOnce);
-    showResult(result);
-    await refreshImage();
+    const measuredInferenceFps = measureRate ? inferenceRate.mark(performance.now()) : null;
+    showResult(result, measuredInferenceFps);
+    if (refreshSnapshot) await refreshImage();
     return result;
   } catch (error) {
     empty.classList.remove("hidden");
@@ -596,6 +623,39 @@ export async function switchModel(modelId) {
   }
 }
 
+function scheduleRealtimeSnapshot(delayMs = 0) {
+  if (realtimeSnapshotTimer) clearTimeout(realtimeSnapshotTimer);
+  realtimeSnapshotTimer = setTimeout(runRealtimeSnapshot, Math.max(0, delayMs));
+}
+
+async function runRealtimeSnapshot() {
+  if (!realtimeEnabled) return;
+  if (realtimeSnapshotBusy) {
+    scheduleRealtimeSnapshot(1);
+    return;
+  }
+  const startedAt = performance.now();
+  realtimeSnapshotBusy = true;
+  try {
+    await refreshImage();
+  } catch (error) {
+    if (!currentResult) {
+      empty.classList.remove("hidden");
+      empty.textContent = error.body?.error?.message || error.message || "实时画面刷新失败";
+    }
+  } finally {
+    realtimeSnapshotBusy = false;
+    if (realtimeEnabled) {
+      const targetMs = targetIntervalMs(
+        getState().config.display_fps,
+        getState().config.snapshot_refresh_interval_ms || 200,
+      );
+      const remainingMs = Math.max(0, targetMs - (performance.now() - startedAt));
+      scheduleRealtimeSnapshot(remainingMs);
+    }
+  }
+}
+
 function toggleRealtime() {
   if (realtimeEnabled) {
     stopRealtimeLoop();
@@ -605,6 +665,7 @@ function toggleRealtime() {
   hidePicker();
   setRealtimeButtonState(true);
   realtimeEnabled = true;
+  inferenceRate.reset();
   const runLoop = async () => {
     if (!realtimeEnabled) return;
     if (realtimeBusy) {
@@ -614,17 +675,25 @@ function toggleRealtime() {
     const startedAt = performance.now();
     realtimeBusy = true;
     try {
-      await inferOnce();
+      await inferOnce({ refreshSnapshot: false, measureRate: true });
     } finally {
       realtimeBusy = false;
       if (realtimeEnabled) {
-        const targetMs = Math.max(16, Number(getState().config.inference_interval_ms || 500));
+        const targetMs = targetIntervalMs(
+          getState().config.production_inference_fps,
+          getState().config.inference_interval_ms || 500,
+        );
         const remainingMs = Math.max(0, targetMs - (performance.now() - startedAt));
         realtimeTimer = setTimeout(runLoop, remainingMs);
       }
     }
   };
   runLoop();
+  scheduleRealtimeSnapshot(0);
+}
+
+export function setValidateActive(active) {
+  if (!active) stopRealtimeLoop();
 }
 
 export function initValidate() {

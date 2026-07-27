@@ -183,6 +183,10 @@ bool load_model_config_yaml(
   bool collecting_input_size = false;
   int input_size_indent = -1;
   std::vector<std::string> pending_input_size;
+  enum class PendingRoiList { kNone, kPixelXyxy, kNormalizedXyxy };
+  PendingRoiList pending_roi_list = PendingRoiList::kNone;
+  int roi_list_indent = -1;
+  std::vector<std::string> pending_roi_values;
   std::vector<Section> sections;
 
   const auto finalize_input_size = [&](int current_line) -> bool {
@@ -210,6 +214,38 @@ bool load_model_config_yaml(
     return true;
   };
 
+  const auto finalize_roi_list = [&](int current_line) -> bool {
+    if (pending_roi_list == PendingRoiList::kNone) return true;
+    if (pending_roi_values.size() != 4) {
+      error_message = "模型配置 input_roi 列表必须包含4个元素，行 " +
+                      std::to_string(current_line);
+      return false;
+    }
+    try {
+      auto& roi = config.input_roi;
+      if (pending_roi_list == PendingRoiList::kPixelXyxy) {
+        roi.x0 = std::stoi(pending_roi_values[0]);
+        roi.y0 = std::stoi(pending_roi_values[1]);
+        roi.x1 = std::stoi(pending_roi_values[2]);
+        roi.y1 = std::stoi(pending_roi_values[3]);
+        roi.has_pixel_xyxy = true;
+      } else {
+        roi.normalized_x0 = std::stod(pending_roi_values[0]);
+        roi.normalized_y0 = std::stod(pending_roi_values[1]);
+        roi.normalized_x1 = std::stod(pending_roi_values[2]);
+        roi.normalized_y1 = std::stod(pending_roi_values[3]);
+        roi.has_normalized_xyxy = true;
+      }
+    } catch (const std::exception&) {
+      error_message = "模型配置 input_roi 列表非法，行 " + std::to_string(current_line);
+      return false;
+    }
+    pending_roi_list = PendingRoiList::kNone;
+    pending_roi_values.clear();
+    roi_list_indent = -1;
+    return true;
+  };
+
   while (std::getline(input, raw_line)) {
     ++line_number;
     const auto comment = raw_line.find('#');
@@ -226,6 +262,14 @@ bool load_model_config_yaml(
         continue;
       }
       if (!finalize_input_size(line_number)) return false;
+    }
+    if (pending_roi_list != PendingRoiList::kNone) {
+      if (indent >= roi_list_indent && starts_with_dash_item(line)) {
+        std::string item = unquote(trim(line.substr(1)));
+        if (!item.empty()) pending_roi_values.push_back(std::move(item));
+        continue;
+      }
+      if (!finalize_roi_list(line_number)) return false;
     }
     if (collecting_class_names) {
       if (indent >= class_names_indent && starts_with_dash_item(line)) {
@@ -310,16 +354,28 @@ bool load_model_config_yaml(
         } else if (path_is(path_parts, {"preprocess", "input_roi", "coordinate_space"})) {
           roi.coordinate_space = unquote(value);
         } else if (path_is(path_parts, {"preprocess", "input_roi", "pixel_xyxy"})) {
-          int values[4]{};
-          if (!parse_int_list4(value, values)) throw std::invalid_argument("invalid pixel_xyxy");
-          roi.x0 = values[0]; roi.y0 = values[1]; roi.x1 = values[2]; roi.y1 = values[3];
-          roi.has_pixel_xyxy = true;
+          if (value.empty()) {
+            pending_roi_list = PendingRoiList::kPixelXyxy;
+            roi_list_indent = indent;
+            pending_roi_values.clear();
+          } else {
+            int values[4]{};
+            if (!parse_int_list4(value, values)) throw std::invalid_argument("invalid pixel_xyxy");
+            roi.x0 = values[0]; roi.y0 = values[1]; roi.x1 = values[2]; roi.y1 = values[3];
+            roi.has_pixel_xyxy = true;
+          }
         } else if (path_is(path_parts, {"preprocess", "input_roi", "normalized_xyxy"})) {
-          double values[4]{};
-          if (!parse_double_list4(value, values)) throw std::invalid_argument("invalid normalized_xyxy");
-          roi.normalized_x0 = values[0]; roi.normalized_y0 = values[1];
-          roi.normalized_x1 = values[2]; roi.normalized_y1 = values[3];
-          roi.has_normalized_xyxy = true;
+          if (value.empty()) {
+            pending_roi_list = PendingRoiList::kNormalizedXyxy;
+            roi_list_indent = indent;
+            pending_roi_values.clear();
+          } else {
+            double values[4]{};
+            if (!parse_double_list4(value, values)) throw std::invalid_argument("invalid normalized_xyxy");
+            roi.normalized_x0 = values[0]; roi.normalized_y0 = values[1];
+            roi.normalized_x1 = values[2]; roi.normalized_y1 = values[3];
+            roi.has_normalized_xyxy = true;
+          }
         } else if (path_is(path_parts, {"preprocess", "input_roi", "resize_mode"})) {
           roi.resize_mode = unquote(value);
         } else if (path_is(path_parts, {"preprocess", "input_roi", "pad_value"})) {
@@ -339,12 +395,14 @@ bool load_model_config_yaml(
       return false;
     }
 
-    if (value.empty() && !collecting_input_size && !collecting_class_names) {
+    if (value.empty() && !collecting_input_size && !collecting_class_names &&
+        pending_roi_list == PendingRoiList::kNone) {
       sections.push_back({indent, key});
     }
   }
 
   if (!finalize_input_size(line_number + 1)) return false;
+  if (!finalize_roi_list(line_number + 1)) return false;
 
   std::string roi_error_code;
   std::string roi_error_message;

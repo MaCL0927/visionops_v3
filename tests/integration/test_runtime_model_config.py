@@ -190,3 +190,68 @@ def test_runtime_reads_postprocess_limits_and_cli_overrides(
         model = status["loaded_model"]
         assert model["max_detections"] == 1
         assert model["mask_max_points"] == 32
+
+
+def test_runtime_accepts_pyyaml_block_lists_for_input_roi(
+    model_config_runtime_binary: Path, tmp_path: Path
+) -> None:
+    """兼容历史设置页 safe_dump 产生的 input ROI 块列表。"""
+
+    package = tmp_path / "block_list_roi_model"
+    package.mkdir()
+    (package / "model.rknn").write_bytes(b"mock")
+    (package / "model.yaml").write_text(
+        """schema_version: '1.0'
+model_id: block-list-roi
+model_name: block-list-roi
+model_version: 20260725165208
+task_type: detection
+target_platform: rk3576
+input_size:
+- 640
+- 640
+class_names:
+- blue
+postprocess:
+  conf_threshold: 0.25
+  iou_threshold: 0.45
+preprocess:
+  input_roi:
+    enabled: true
+    coordinate_space: runtime_snapshot
+    source_resolution:
+      width: 1280
+      height: 720
+    pixel_xyxy:
+    - 850
+    - 490
+    - 1277
+    - 719
+    normalized_xyxy:
+    - 0.6640625
+    - 0.680555555556
+    - 0.99765625
+    - 0.998611111111
+    crop_resolution:
+      width: 427
+      height: 229
+    resize_mode: letterbox
+    pad_value: 114
+""",
+        encoding="utf-8",
+    )
+
+    with _running_runtime(
+        model_config_runtime_binary,
+        ["--model-dir", str(package)],
+    ) as base_url:
+        status = _request_json(f"{base_url}/api/runtime/status")
+        model = status["loaded_model"]
+        assert status["health"] == "ok"
+        assert model["model_load_error"] is None
+        assert model["input_size"] == {"width": 640, "height": 640}
+        assert model["input_roi"]["enabled"] is True
+        assert model["input_roi"]["pixel_xyxy"] == [850, 490, 1277, 719]
+        assert model["input_roi"]["normalized_xyxy"] == pytest.approx(
+            [0.6640625, 0.680555555556, 0.99765625, 0.998611111111]
+        )

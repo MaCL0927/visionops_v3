@@ -182,6 +182,7 @@ def test_collector_status_survives_unreachable_runtime() -> None:
             ("/static/js/pages/capture.js", "text/javascript"),
             ("/static/js/pages/settings.js", "text/javascript"),
             ("/static/js/pages/production.js", "text/javascript"),
+            ("/static/js/realtime_rate.js", "text/javascript"),
             ("/static/js/render/overlay.js", "text/javascript"),
         ):
             status, content_type, body, _ = _request(f"{collector_url}{path}")
@@ -203,6 +204,7 @@ def test_collector_status_survives_unreachable_runtime() -> None:
         assert status == 200
         assert frontend_config["device_id"] == "example-edge-collector-test"
         assert frontend_config["snapshot_refresh_interval_ms"] >= 100
+        assert 0.1 <= frontend_config["production_inference_fps"] <= 30.0
 
         frontend_root = PROJECT_ROOT / "apps/collector_web/frontend/static/js"
         source = "\n".join(path.read_text(encoding="utf-8") for path in frontend_root.rglob("*.js"))

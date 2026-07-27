@@ -2,7 +2,7 @@
 
 视觉盒子设置约定：
 - 启动命令固定的 URL、Device ID、端口和目录只展示，不从 Web 修改。
-- Web 可修改默认启动模式、状态刷新 FPS、磁盘告警阈值和服务端上传配置。
+- Web 可修改默认启动模式、生产/验证推理 FPS、状态刷新 FPS、磁盘告警阈值和服务端上传配置。
 - 配置持久化到 /opt/visionops_v3/config/vision_box_settings.json，可通过环境变量覆盖。
 """
 
@@ -271,6 +271,7 @@ def _status_ms_to_fps(ms: Any) -> float:
 def _default_settings(config: CollectorConfig) -> dict[str, Any]:
     return {
         "default_mode": "factory",
+        "production_inference_fps": 15.0,
         "status_refresh_fps": _status_ms_to_fps(config.status_refresh_interval_ms),
         "status_refresh_interval_ms": config.status_refresh_interval_ms,
         "disk_warning_percent": 85,
@@ -319,10 +320,17 @@ def _normalize_settings(raw: dict[str, Any], config: CollectorConfig) -> dict[st
     default_mode = str(raw.get("default_mode") or defaults["default_mode"]).strip().lower()
     if default_mode not in {"factory", "production"}:
         default_mode = "factory"
+    inference_fps = _clamp_number(
+        raw.get("production_inference_fps"),
+        defaults["production_inference_fps"],
+        0.1,
+        30.0,
+    )
     status_fps = _clamp_number(raw.get("status_refresh_fps"), defaults["status_refresh_fps"], 0.2, 10)
     status_ms = _status_fps_to_ms(status_fps)
     return {
         "default_mode": default_mode,
+        "production_inference_fps": round(inference_fps, 3),
         "status_refresh_fps": round(status_fps, 2 if status_fps < 1 else 1),
         "status_refresh_interval_ms": status_ms,
         "disk_warning_percent": _to_int(raw.get("disk_warning_percent"), defaults["disk_warning_percent"], 50, 99),
@@ -410,6 +418,10 @@ def apply_vision_box_settings(config: CollectorConfig, payload: dict[str, Any]) 
     before = load_vision_box_settings(config)
     candidate = _normalize_settings({
         "default_mode": payload.get("default_mode", before["default_mode"]),
+        "production_inference_fps": payload.get(
+            "production_inference_fps",
+            before["production_inference_fps"],
+        ),
         "status_refresh_fps": payload.get("status_refresh_fps", before["status_refresh_fps"]),
         "disk_warning_percent": payload.get("disk_warning_percent", before["disk_warning_percent"]),
         "upload": payload.get("upload", before["upload"]),

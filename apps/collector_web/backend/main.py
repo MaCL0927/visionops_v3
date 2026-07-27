@@ -250,6 +250,7 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             "production_inference_source": config.production_inference_source,
             "device_id": config.device_id,
             "snapshot_refresh_interval_ms": config.snapshot_refresh_interval_ms,
+            "production_inference_fps": board.get("production_inference_fps", 15.0),
             "status_refresh_interval_ms": board.get("status_refresh_interval_ms", config.status_refresh_interval_ms),
             "default_mode": board.get("default_mode", "factory"),
             "disk_warning_percent": board.get("disk_warning_percent", 85),

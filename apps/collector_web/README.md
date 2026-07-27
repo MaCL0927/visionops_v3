@@ -414,3 +414,23 @@ POST /api/app/inference_settings  {"detection_fps":10}
 ## M32.4 输入 ROI 可视化
 
 模型验证页和生产模式会在完整快照上绘制青色 `input_roi`，并保留黄色结果过滤 ROI。两页均可打开“模型输入预览”，在浏览器端复现 crop + letterbox，同时展示 RGA、ROI 解析、crop_resize 和 NPU 推理耗时。该功能不触发额外相机取图或 Runtime 推理。完整说明见 `docs/M32.4_WEB_INPUT_ROI_VISUALIZATION_PHASE4.md`。
+
+## M32.4.1 model.yaml 设置保存修复
+
+算法设置不再通过 PyYAML 重写整个 `model.yaml`，而是只原位修改
+`postprocess` 中的阈值标量，保持输入尺寸、input ROI 内联数组、版本字符串、
+注释和字段顺序不变。classification、detection、segmentation、OBB 四类任务均已覆盖。
+Runtime 同时兼容历史 PyYAML 生成的 `pixel_xyxy` / `normalized_xyxy` 块列表。
+完整说明见 `docs/M32.4.1_MODEL_YAML_SETTINGS_FORMAT_FIX.md`。
+
+## M32.4.2 通用 Runtime 推理 FPS 解耦
+
+使用 `scripts/start_runtime.sh + scripts/start_collector.sh` 时，旧实时循环会串行等待
+`infer_once`、快照 JPEG、浏览器解码和 Canvas 绘制，导致 33 ms 的模型也可能只有约
+5～6 FPS。M32.4.2 将推理循环与画面刷新循环分离：推理由
+`production_inference_fps` 控制，画面由 `display_fps` 控制，二者互不等待。
+
+生产页面显示“实际推理 FPS / 设定推理 FPS · 画面 FPS”；模型验证页也分别显示推理和
+画面 FPS。通用 Runtime 模式的统一推理 FPS 会持久化到
+`config/vision_box_settings.json`，不再只依赖浏览器 localStorage。完整说明见
+`docs/M32.4.2_GENERIC_RUNTIME_FPS_DECOUPLING.md`。

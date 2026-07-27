@@ -315,6 +315,7 @@ function fillVisionBoxSettings(payload) {
   setValue(fields.business_app_url, services.business_app_url ?? getState().config.business_app_url);
   setValue(fields.device_id, services.device_id ?? getState().config.device_id);
   setValue(fields.status_refresh_fps, settings.status_refresh_fps ?? intervalMsToFps(getState().config.status_refresh_interval_ms, 0.5));
+  setValue(fields.inference_fps, settings.production_inference_fps ?? getState().config.production_inference_fps ?? 15);
   setValue(fields.default_mode, settings.default_mode ?? getState().config.default_mode ?? "factory");
   setValue(fields.models_root, paths.models_root ?? getState().config.models_root);
   setValue(fields.data_root, paths.data_root ?? getState().config.data_root);
@@ -365,6 +366,7 @@ async function loadVisionBoxSettings() {
 function buildVisionBoxPayload(config) {
   return {
     default_mode: config.default_mode,
+    production_inference_fps: config.production_inference_fps,
     status_refresh_fps: getNumber(fields.status_refresh_fps, intervalMsToFps(config.status_refresh_interval_ms, 0.5)),
     disk_warning_percent: config.disk_warning_percent,
     upload: {
@@ -582,7 +584,7 @@ async function saveAppInferenceSettings(requestedFps) {
     };
   } catch (error) {
     if (error instanceof ApiError && [0, 404, 405, 502, 503].includes(error.status)) {
-      return { skipped: true, appliedFps: detectionFps, message: "后台业务应用未提供推理 FPS 接口，仅应用模型验证刷新设置" };
+      return { skipped: true, appliedFps: detectionFps, message: "后台业务应用未提供推理 FPS 接口，生产/验证改由浏览器按该 FPS 直接驱动 Runtime" };
     }
     throw error;
   }

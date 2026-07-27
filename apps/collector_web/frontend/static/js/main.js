@@ -2,7 +2,7 @@ import { endpoints, postJson, requestJson } from "./api.js";
 import { getState, loadPersistedConfig, normalizeConfig, persistConfig, updateState } from "./state.js";
 import { initCalibration, refreshCalibration } from "./pages/calibration.js";
 import { initCapture, refreshCapture } from "./pages/capture.js";
-import { initValidate } from "./pages/validate.js";
+import { initValidate, setValidateActive } from "./pages/validate.js";
 import { initSettings } from "./pages/settings.js";
 import { initProduction, refreshProduction, setProductionActive } from "./pages/production.js";
 
@@ -61,6 +61,7 @@ function activateFactoryPage(name, options = {}) {
   document.getElementById("production-mode").classList.remove("active");
   document.getElementById("mode-toggle").textContent = "切换生产模式";
   setProductionActive(false);
+  setValidateActive(name === "validate");
   if (name === "calibration") refreshCalibration("position");
   if (name === "capture") refreshCapture();
 }
@@ -71,6 +72,7 @@ function setProductionMode(entering, options = {}) {
     return;
   }
   updateState({ productionMode: entering });
+  if (entering) setValidateActive(false);
   document.getElementById("factory-mode").classList.toggle("active", !entering);
   document.getElementById("production-mode").classList.toggle("active", entering);
   document.getElementById("mode-toggle").textContent = entering ? "返回工厂模式" : "切换生产模式";
@@ -91,8 +93,9 @@ async function loadConfig() {
         ? normalizeConfig({
             ...backendConfig,
             ...persistedConfig,
-            // 生产推理来源属于部署拓扑，不能被浏览器旧缓存覆盖。
+            // 生产推理来源和统一推理 FPS 属于视觉盒部署配置，不能被浏览器旧缓存覆盖。
             production_inference_source: backendConfig.production_inference_source,
+            production_inference_fps: backendConfig.production_inference_fps,
           })
         : backendConfig,
       savedConfig: { ...backendConfig },
