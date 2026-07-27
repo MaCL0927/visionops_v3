@@ -255,10 +255,13 @@ def test_collector_proxies_runtime_mock(
             assert preview["running"] is True
             assert preview["mode"] == "preview"
 
-            status, result = _request_json(
+            status, content_type, result_body, infer_headers = _request(
                 f"{collector_url}/api/runtime/infer_once", method="POST"
             )
             assert status == 200
+            assert content_type == "application/json"
+            assert infer_headers["X-VisionOps-Upstream-Transport"] == "raw_socket"
+            result = json.loads(result_body.decode("utf-8"))
             assert result["message_type"] == "inference_result"
             assert result["frame_id"] == "frame-mock-00000001"
 
@@ -272,6 +275,7 @@ def test_collector_proxies_runtime_mock(
             assert status == 200
             assert content_type == "image/jpeg"
             assert headers["Cache-Control"] == "no-store"
+            assert headers["X-VisionOps-Upstream-Transport"] == "raw_socket"
             assert snapshot.startswith(b"\xff\xd8")
             assert snapshot.endswith(b"\xff\xd9")
 
@@ -279,6 +283,8 @@ def test_collector_proxies_runtime_mock(
             assert status == 200
             assert combined["runtime"]["reachable"] is True
             assert combined["runtime"]["health"] == "ok"
+            assert combined["proxy"]["runtime_transport"]["raw_local_enabled"] is True
+            assert combined["proxy"]["runtime_transport"]["last_transport"] == "raw_socket"
 
 
 def test_collector_lists_models_and_rejects_arbitrary_switch_path(

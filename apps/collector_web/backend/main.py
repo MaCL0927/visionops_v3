@@ -67,7 +67,14 @@ class CollectorServer(ThreadingHTTPServer):
         super().__init__((config.host, config.port), CollectorRequestHandler)
         self.config = config
         self.started_at = time.monotonic()
-        self.runtime_client = RuntimeClient(config.runtime_url)
+        # Runtime infer_once/snapshot 是 Collector 的高频本机代理链路。
+        # 仅该客户端启用 TCP_NODELAY raw HTTP，Gateway/App 继续保持 urllib，
+        # 避免将本次性能修复扩大到其他下游服务。
+        self.runtime_client = RuntimeClient(
+            config.runtime_url,
+            raw_local_enabled=True,
+            raw_local_fallback_urllib=True,
+        )
         self.gateway_client = RuntimeClient(config.gateway_url)
         self.business_app_client = RuntimeClient(config.business_app_url)
         self.timed_capture = TimedCaptureController(self.runtime_client)
@@ -649,6 +656,7 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
                     "business_app_url": self.server.config.business_app_url,
                     "timeout_s": self.server.runtime_client.timeout_s,
                     "mode": "http",
+                    "runtime_transport": self.server.runtime_client.transport_status(),
                 },
             },
         )
@@ -855,11 +863,18 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/runtime/snapshot.jpg" and response.content_type == "image/jpeg":
-            forwarded_headers = {
-                name: value
-                for name, value in response.headers.items()
-                if name.lower() in {"cache-control", "x-frame-id", "x-trace-id", "x-timestamp-ms"}
+            canonical_snapshot_headers = {
+                "cache-control": "Cache-Control",
+                "x-frame-id": "X-Frame-Id",
+                "x-trace-id": "X-Trace-Id",
+                "x-timestamp-ms": "X-Timestamp-Ms",
             }
+            forwarded_headers = {
+                canonical_snapshot_headers[name.lower()]: value
+                for name, value in response.headers.items()
+                if name.lower() in canonical_snapshot_headers
+            }
+            forwarded_headers["X-VisionOps-Upstream-Transport"] = response.transport
             send_bytes(self, response.status_code, response.body, "image/jpeg", forwarded_headers)
             return
 
@@ -881,6 +896,7 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
                 "X-VisionOps-Proxied-By": self.server.config.component,
                 "X-VisionOps-Runtime-Url": self.server.config.runtime_url,
                 "X-VisionOps-Proxy-Timestamp-Ms": str(timestamp_ms()),
+                "X-VisionOps-Upstream-Transport": response.transport,
             },
         )
 

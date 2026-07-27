@@ -21,12 +21,13 @@ from copy import deepcopy
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 import cv2  # type: ignore
 import numpy as np  # type: ignore
 
-from production.carton_line.gateway.runtime_client import HttpClient, RuntimeClient, UpstreamError
+from production.carton_line.gateway.runtime_client import HttpClient
+from production.common.runtime_ipc import RuntimeIpcClient
 from production.detergent_grasp.config import DEFAULT_CONFIG_PATH, load_config
 from production.detergent_grasp.tasks.detergent_grasp_vision.algorithm import (
     DetergentGraspAlgorithm,
@@ -75,17 +76,55 @@ class TriggerRequest:
     trigger_task_id: Optional[object]
 
 
+@dataclass
+class InferencePacket:
+    """One Runtime result moving from the inference stage to postprocess.
+
+    Continuous packets are latest-only and may be replaced before postprocess.
+    Explicit robot triggers carry ``trigger`` and are never intentionally dropped.
+    """
+
+    frame_id: int
+    request_id: Optional[object]
+    trigger_task_id: Optional[object]
+    started_timestamp: float
+    started_monotonic: float
+    runtime_raw: bytes = b""
+    runtime_result: Optional[Dict[str, Any]] = None
+    runtime_lock_wait_ms: float = 0.0
+    runtime_request_ms: float = 0.0
+    runtime_connect_ms: float = 0.0
+    runtime_send_ms: float = 0.0
+    runtime_headers_wait_ms: float = 0.0
+    runtime_body_read_ms: float = 0.0
+    runtime_transport: str = "unknown"
+    runtime_server_queue_ms: float = 0.0
+    runtime_server_route_ms: float = 0.0
+    runtime_json_decode_ms: float = 0.0
+    runtime_internal_ms: float = 0.0
+    inference_stage_ms: float = 0.0
+    runtime_response_bytes: int = 0
+    inference_completed_monotonic: float = 0.0
+    error: Optional[Exception] = None
+    trigger: Optional[TriggerRequest] = None
+    continuous: bool = False
+
+
 class CameraUnavailableError(RuntimeError):
     pass
 
 
 class ServiceState:
+    """Thread-safe live state and rolling App timing statistics."""
+
     def __init__(self, config: Mapping[str, Any], configured_fps: float) -> None:
         self.config = config
         self.lock = threading.RLock()
         self.started_at = time.monotonic()
         self.continuous_enabled = bool(config["websocket"].get("auto_start", True))
         self.busy = False
+        self.inference_busy = False
+        self.postprocess_busy = False
         self.frame_id = 0
         self.configured_fps = float(configured_fps)
         self.latest_decision: Optional[Dict[str, Any]] = None
@@ -93,7 +132,11 @@ class ServiceState:
         self.latest_runtime_result: Optional[Dict[str, Any]] = None
         self.last_error: Optional[Dict[str, Any]] = None
         self.last_latency_ms = 0.0
-        self.inference_times: deque[float] = deque(maxlen=120)
+        self.last_app_timing: Dict[str, Any] = {}
+        self.completion_times: deque[float] = deque(maxlen=120)
+        self.inference_stage_times: deque[float] = deque(maxlen=120)
+        self.latency_samples: deque[float] = deque(maxlen=120)
+        self.timing_samples: Dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=120))
         self.counters: Dict[str, int] = defaultdict(int)
 
     def next_frame_id(self) -> int:
@@ -109,57 +152,134 @@ class ServiceState:
         with self.lock:
             self.configured_fps = float(fps)
 
-    def begin(self) -> None:
+    def begin_inference(self) -> None:
         with self.lock:
+            self.inference_busy = True
             self.busy = True
             self.counters["inference_requests"] += 1
+
+    def end_inference(self, completed: bool = True) -> None:
+        with self.lock:
+            self.inference_busy = False
+            self.busy = self.postprocess_busy
+            if completed:
+                self.inference_stage_times.append(time.monotonic())
+                self.counters["inference_stage_completed"] += 1
+
+    def begin_postprocess(self) -> None:
+        with self.lock:
+            self.postprocess_busy = True
+            self.busy = True
+            self.counters["postprocess_requests"] += 1
+
+    def end_postprocess(self) -> None:
+        with self.lock:
+            self.postprocess_busy = False
+            self.busy = self.inference_busy
+
+    @staticmethod
+    def _percentile(values: Sequence[float], percentile: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(float(value) for value in values)
+        index = min(len(ordered) - 1, max(0, int(np.ceil(len(ordered) * percentile) - 1)))
+        return round(ordered[index], 3)
+
+    @staticmethod
+    def _rate(times: Sequence[float]) -> float:
+        if len(times) < 2:
+            return 0.0
+        elapsed = float(times[-1]) - float(times[0])
+        return round((len(times) - 1) / elapsed, 3) if elapsed > 0.0 else 0.0
+
+    def fps(self) -> float:
+        with self.lock:
+            return self._rate(list(self.completion_times))
+
+    def inference_stage_fps(self) -> float:
+        with self.lock:
+            return self._rate(list(self.inference_stage_times))
+
+    def _record_timing_locked(self, timing: Mapping[str, Any]) -> None:
+        self.last_app_timing = dict(timing)
+        for key, value in timing.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                self.timing_samples[str(key)].append(float(value))
 
     def success(
         self,
         decision: Mapping[str, Any],
         robot_message: Mapping[str, Any],
         runtime_result: Mapping[str, Any],
-        latency_ms: float,
-    ) -> None:
+        started_monotonic: float,
+        app_timing: Dict[str, Any],
+    ) -> float:
+        store_started = time.perf_counter()
         with self.lock:
-            self.busy = False
-            self.latest_decision = deepcopy(dict(decision))
-            self.latest_robot_message = deepcopy(dict(robot_message))
-            self.latest_runtime_result = deepcopy(dict(runtime_result))
+            latency_ms = round((time.monotonic() - started_monotonic) * 1000.0, 3)
+            if isinstance(robot_message, dict):
+                robot_message["latency_ms"] = latency_ms
+            # Results are immutable after publication.  Keep shallow top-level
+            # copies and deepcopy only when an HTTP snapshot is requested.
+            self.latest_decision = dict(decision)
+            self.latest_robot_message = dict(robot_message)
+            self.latest_runtime_result = dict(runtime_result)
             self.last_error = None
-            self.last_latency_ms = float(latency_ms)
-            self.inference_times.append(time.monotonic())
+            app_timing["state_store_ms"] = round((time.perf_counter() - store_started) * 1000.0, 3)
+            app_timing["pipeline_age_ms"] = latency_ms
+            app_timing["total_ms"] = latency_ms
+            self.last_latency_ms = latency_ms
+            self.completion_times.append(time.monotonic())
+            self.latency_samples.append(latency_ms)
+            self._record_timing_locked(app_timing)
             self.counters["inference_success"] += 1
+            self.busy = self.inference_busy or self.postprocess_busy
+            return latency_ms
 
     def failure(
         self,
         decision: Mapping[str, Any],
         robot_message: Mapping[str, Any],
         error: Exception,
-        latency_ms: float,
-    ) -> None:
+        started_monotonic: float,
+        app_timing: Dict[str, Any],
+    ) -> float:
+        store_started = time.perf_counter()
         with self.lock:
-            self.busy = False
-            self.latest_decision = deepcopy(dict(decision))
-            self.latest_robot_message = deepcopy(dict(robot_message))
-            self.last_latency_ms = float(latency_ms)
+            latency_ms = round((time.monotonic() - started_monotonic) * 1000.0, 3)
+            if isinstance(robot_message, dict):
+                robot_message["latency_ms"] = latency_ms
+            self.latest_decision = dict(decision)
+            self.latest_robot_message = dict(robot_message)
+            app_timing["state_store_ms"] = round((time.perf_counter() - store_started) * 1000.0, 3)
+            app_timing["pipeline_age_ms"] = latency_ms
+            app_timing["total_ms"] = latency_ms
+            self.last_latency_ms = latency_ms
+            self.latency_samples.append(latency_ms)
+            self._record_timing_locked(app_timing)
             self.last_error = {
                 "code": type(error).__name__,
                 "message": str(error),
                 "timestamp_ms": _timestamp_ms(),
             }
             self.counters["inference_failure"] += 1
-
-    def fps(self) -> float:
-        with self.lock:
-            times = list(self.inference_times)
-        if len(times) < 2:
-            return 0.0
-        elapsed = times[-1] - times[0]
-        return round((len(times) - 1) / elapsed, 3) if elapsed > 0.0 else 0.0
+            self.busy = self.inference_busy or self.postprocess_busy
+            return latency_ms
 
     def snapshot(self, websocket: WebSocketJsonServer) -> Dict[str, Any]:
         with self.lock:
+            latency_values = list(self.latency_samples)
+            timing_stats = {
+                key: {
+                    "avg": round(sum(values) / len(values), 3),
+                    "p50": self._percentile(list(values), 0.50),
+                    "p95": self._percentile(list(values), 0.95),
+                    "max": round(max(values), 3),
+                    "samples": len(values),
+                }
+                for key, values in self.timing_samples.items()
+                if values
+            }
             return {
                 "schema_version": "1.0",
                 "message_type": "detergent_grasp_service_status",
@@ -168,10 +288,23 @@ class ServiceState:
                 "timestamp_ms": _timestamp_ms(),
                 "uptime_s": round(time.monotonic() - self.started_at, 3),
                 "busy": self.busy,
+                "inference_busy": self.inference_busy,
+                "postprocess_busy": self.postprocess_busy,
                 "continuous_enabled": self.continuous_enabled,
-                "detection_fps": self.fps(),
+                "detection_fps": self._rate(list(self.completion_times)),
+                "inference_stage_fps": self._rate(list(self.inference_stage_times)),
                 "configured_detection_fps": round(self.configured_fps, 6),
                 "last_latency_ms": round(self.last_latency_ms, 3),
+                "latency_ms": {
+                    "latest": round(self.last_latency_ms, 3),
+                    "avg": round(sum(latency_values) / len(latency_values), 3) if latency_values else 0.0,
+                    "p50": self._percentile(latency_values, 0.50),
+                    "p95": self._percentile(latency_values, 0.95),
+                    "max": round(max(latency_values), 3) if latency_values else 0.0,
+                    "samples": len(latency_values),
+                },
+                "last_app_timing": deepcopy(self.last_app_timing),
+                "app_timing_stats": timing_stats,
                 "websocket": {
                     "listen_host": self.config["websocket"]["listen_host"],
                     "listen_port": self.config["websocket"]["listen_port"],
@@ -195,7 +328,11 @@ class DetergentGraspVisionService:
     def __init__(self, config: Mapping[str, Any]) -> None:
         self.config = config
         timeout_s = float(config["app"]["request_timeout_ms"]) / 1000.0
-        self.runtime = RuntimeClient(str(config["runtime"]["url"]), timeout_s)
+        self.runtime = RuntimeIpcClient(
+            str(config["runtime"]["url"]),
+            timeout_s,
+            config.get("runtime_ipc") if isinstance(config.get("runtime_ipc"), Mapping) else {},
+        )
         self.http = HttpClient(timeout_s=timeout_s)
         self.algorithm = DetergentGraspAlgorithm(config["algorithm"])
         self.inference_settings_path = Path(str(config["app"]["inference_settings_path"]))
@@ -204,10 +341,21 @@ class DetergentGraspVisionService:
         self.production_fps_source = "default"
         self._load_production_fps_override()
         self.state = ServiceState(config, self.production_inference_fps)
+        # Manual HTTP requests serialize with one another.  Runtime access has a
+        # separate lock so one RKNN context remains safe while inference and
+        # CPU postprocess overlap across different frames.
         self.execution_lock = threading.Lock()
+        self.runtime_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.wakeup = threading.Event()
+        pipeline = config.get("pipeline") if isinstance(config.get("pipeline"), Mapping) else {}
+        self.pipeline_enabled = bool(pipeline.get("enabled", True))
+        self.pipeline_max_result_age_ms = max(1, int(pipeline.get("max_result_age_ms", 500)))
+        self.result_queue: "queue.Queue[InferencePacket]" = queue.Queue(
+            maxsize=max(1, int(pipeline.get("result_queue_size", 1)))
+        )
         self.worker_thread: Optional[threading.Thread] = None
+        self.postprocess_thread: Optional[threading.Thread] = None
         self.status_thread: Optional[threading.Thread] = None
         self.manual_request_id = 0
         self.trigger_queue: "queue.Queue[TriggerRequest]" = queue.Queue(
@@ -304,11 +452,27 @@ class DetergentGraspVisionService:
             "push_mode": "every_completed_result",
         }
 
+    def pipeline_status(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.pipeline_enabled,
+            "architecture": "inference_producer_latest_only_postprocess",
+            "result_queue_size": self.result_queue.qsize(),
+            "result_queue_capacity": self.result_queue.maxsize,
+            "max_result_age_ms": self.pipeline_max_result_age_ms,
+            "inference_thread_alive": bool(self.worker_thread and self.worker_thread.is_alive()),
+            "postprocess_thread_alive": bool(self.postprocess_thread and self.postprocess_thread.is_alive()),
+            "runtime_ipc": self.runtime.transport_status(),
+        }
+
     def start(self) -> None:
         self.websocket.start()
-        self.worker_thread = threading.Thread(target=self._worker_loop, name="detergent-grasp-inference", daemon=True)
+        self.worker_thread = threading.Thread(target=self._inference_loop, name="detergent-grasp-inference", daemon=True)
+        self.postprocess_thread = threading.Thread(
+            target=self._postprocess_loop, name="detergent-grasp-postprocess", daemon=True
+        )
         self.status_thread = threading.Thread(target=self._status_loop, name="detergent-grasp-status", daemon=True)
         self.worker_thread.start()
+        self.postprocess_thread.start()
         self.status_thread.start()
 
     def stop(self) -> None:
@@ -317,6 +481,8 @@ class DetergentGraspVisionService:
         self.websocket.stop()
         if self.worker_thread is not None:
             self.worker_thread.join(timeout=5.0)
+        if self.postprocess_thread is not None:
+            self.postprocess_thread.join(timeout=5.0)
         if self.status_thread is not None:
             self.status_thread.join(timeout=3.0)
 
@@ -540,98 +706,353 @@ class DetergentGraspVisionService:
             document["trigger_task_id"] = trigger_task_id
         return document
 
+    @staticmethod
+    def _runtime_internal_ms(runtime_result: Mapping[str, Any]) -> float:
+        timing = runtime_result.get("timing") if isinstance(runtime_result.get("timing"), Mapping) else {}
+        try:
+            return float(timing.get("total_ms") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+    def _run_inference_stage(
+        self,
+        request_id: Optional[object] = None,
+        trigger_task_id: Optional[object] = None,
+        trigger: Optional[TriggerRequest] = None,
+        continuous: bool = False,
+    ) -> InferencePacket:
+        packet = InferencePacket(
+            frame_id=self.state.next_frame_id(),
+            request_id=request_id,
+            trigger_task_id=trigger_task_id,
+            started_timestamp=time.time(),
+            started_monotonic=time.monotonic(),
+            trigger=trigger,
+            continuous=bool(continuous),
+        )
+        self.state.begin_inference()
+        stage_started = time.perf_counter()
+        completed = False
+        try:
+            lock_wait_started = time.perf_counter()
+            with self.runtime_lock:
+                packet.runtime_lock_wait_ms = round(
+                    (time.perf_counter() - lock_wait_started) * 1000.0, 3
+                )
+                # Keep the producer stage limited to Runtime I/O.  The raw HTTP
+                # body is handed to the CPU postprocess thread, which performs
+                # UTF-8/JSON decoding while Runtime starts the next frame.
+                response = self.runtime.infer_once_raw()
+            packet.runtime_raw = response.body
+            packet.runtime_request_ms = round(response.total_ms, 3)
+            packet.runtime_connect_ms = round(response.connect_ms, 3)
+            packet.runtime_send_ms = round(response.send_ms, 3)
+            packet.runtime_headers_wait_ms = round(response.headers_wait_ms, 3)
+            packet.runtime_body_read_ms = round(response.body_read_ms, 3)
+            packet.runtime_transport = str(response.transport)
+            packet.runtime_server_queue_ms = round(
+                response.header_float("x-visionops-http-queue-ms"), 3
+            )
+            packet.runtime_server_route_ms = round(
+                response.header_float("x-visionops-http-route-ms"), 3
+            )
+            packet.runtime_response_bytes = len(response.body)
+            completed = True
+        except Exception as error:
+            packet.error = error
+            completed = True
+        finally:
+            packet.inference_stage_ms = round((time.perf_counter() - stage_started) * 1000.0, 3)
+            packet.inference_completed_monotonic = time.monotonic()
+            self.state.end_inference(completed=completed)
+        return packet
+
+    def _dispatch_packet(self, packet: InferencePacket, robot: Mapping[str, Any]) -> tuple[float, int]:
+        started = time.perf_counter()
+        sent = 0
+        if packet.trigger is not None:
+            try:
+                packet.trigger.session.send_json(robot)
+                sent = 1
+            except (OSError, ConnectionError):
+                self.state.counters["websocket_send_failures"] += 1
+        elif packet.continuous and self.websocket.client_count() > 0:
+            sent = self.websocket.broadcast_json(robot)
+        elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        self.state.counters["websocket_messages_sent"] += int(sent)
+        return elapsed_ms, sent
+
+    def _complete_packet(self, packet: InferencePacket, dispatch: bool = False) -> Dict[str, Any]:
+        self.state.begin_postprocess()
+        postprocess_started = time.perf_counter()
+        timing: Dict[str, Any] = {
+            "runtime_lock_wait_ms": round(packet.runtime_lock_wait_ms, 3),
+            "runtime_request_ms": round(packet.runtime_request_ms, 3),
+            "runtime_roundtrip_ms": round(packet.runtime_request_ms, 3),
+            "runtime_connect_ms": round(packet.runtime_connect_ms, 3),
+            "runtime_send_ms": round(packet.runtime_send_ms, 3),
+            "runtime_headers_wait_ms": round(packet.runtime_headers_wait_ms, 3),
+            "runtime_body_read_ms": round(packet.runtime_body_read_ms, 3),
+            "runtime_transport": packet.runtime_transport,
+            "runtime_server_queue_ms": round(packet.runtime_server_queue_ms, 3),
+            "runtime_server_route_ms": round(packet.runtime_server_route_ms, 3),
+            "runtime_json_decode_ms": 0.0,
+            "runtime_internal_ms": round(packet.runtime_internal_ms, 3),
+            "runtime_outside_ms": 0.0,
+            "runtime_non_route_ms": round(
+                max(
+                    0.0,
+                    packet.runtime_request_ms
+                    - packet.runtime_server_queue_ms
+                    - packet.runtime_server_route_ms,
+                ),
+                3,
+            ),
+            "runtime_response_bytes": int(packet.runtime_response_bytes),
+            "inference_stage_ms": round(packet.inference_stage_ms, 3),
+            "result_queue_wait_ms": round(
+                max(0.0, (time.monotonic() - packet.inference_completed_monotonic) * 1000.0), 3
+            ) if packet.inference_completed_monotonic > 0.0 else 0.0,
+            "runtime_validation_ms": 0.0,
+            "algorithm_ms": 0.0,
+            "robot_message_build_ms": 0.0,
+            "visualization_build_ms": 0.0,
+            "decision_build_ms": 0.0,
+            "websocket_send_ms": 0.0,
+            "websocket_clients_sent": 0,
+            "debug_enqueue_ms": 0.0,
+            "postprocess_stage_ms": 0.0,
+            "state_store_ms": 0.0,
+            "pipeline_age_ms": 0.0,
+            "total_ms": 0.0,
+        }
+        try:
+            if packet.error is not None:
+                raise packet.error
+            runtime_result = packet.runtime_result
+            if runtime_result is None:
+                decode_started = time.perf_counter()
+                runtime_result = self.runtime.decode_inference(packet.runtime_raw)
+                packet.runtime_json_decode_ms = round(
+                    (time.perf_counter() - decode_started) * 1000.0, 3
+                )
+                packet.runtime_result = runtime_result
+            packet.runtime_internal_ms = round(self._runtime_internal_ms(runtime_result), 3)
+            timing["runtime_json_decode_ms"] = packet.runtime_json_decode_ms
+            timing["runtime_internal_ms"] = packet.runtime_internal_ms
+            timing["runtime_outside_ms"] = round(
+                max(0.0, packet.runtime_request_ms - packet.runtime_internal_ms), 3
+            )
+
+            validation_started = time.perf_counter()
+            self._validate_runtime(runtime_result)
+            timing["runtime_validation_ms"] = round((time.perf_counter() - validation_started) * 1000.0, 3)
+
+            algorithm_started = time.perf_counter()
+            result = self.algorithm.evaluate(runtime_result)
+            timing["algorithm_ms"] = round((time.perf_counter() - algorithm_started) * 1000.0, 3)
+
+            try:
+                capture_timestamp_ms = int(runtime_result.get("capture_timestamp_ms") or 0)
+            except (TypeError, ValueError, OverflowError):
+                capture_timestamp_ms = 0
+            capture_timestamp = (
+                capture_timestamp_ms / 1000.0 if capture_timestamp_ms > 0 else packet.started_timestamp
+            )
+
+            robot_started = time.perf_counter()
+            interim_latency_ms = (time.monotonic() - packet.started_monotonic) * 1000.0
+            robot = self._robot_message(
+                packet.frame_id,
+                capture_timestamp,
+                result,
+                interim_latency_ms,
+                packet.request_id,
+                packet.trigger_task_id,
+                runtime_result=runtime_result,
+            )
+            timing["robot_message_build_ms"] = round((time.perf_counter() - robot_started) * 1000.0, 3)
+
+            visualization_started = time.perf_counter()
+            diagnostics = {
+                "matched_bottle_count": len(
+                    [item for item in result.items if item.get("target_type") != "box"]
+                ),
+                "box_count": len(result.boxes),
+                "detected_bottle_count": len(result.bottles),
+                "detected_grasp_point_count": len(result.grasp_points),
+                "unmatched_bottles": result.unmatched_bottles,
+                "unmatched_grasp_points": result.unmatched_grasp_points,
+                "ignored_detections": result.ignored,
+                "camera_health": {"connected": True, "source": "runtime_inference"},
+            }
+            # Runtime results are immutable after publication.  A shallow copy
+            # avoids recursively duplicating every detection and debug field.
+            visualization = dict(runtime_result)
+            visualization["detergent_grasp"] = {
+                "robot_items": result.items,
+                "diagnostics": diagnostics,
+                "video_url": self.config["video"]["public_url"],
+            }
+            producer = self.producer_metadata()
+            visualization["producer"] = producer
+            timing["visualization_build_ms"] = round(
+                (time.perf_counter() - visualization_started) * 1000.0, 3
+            )
+
+            decision_started = time.perf_counter()
+            decision: Dict[str, Any] = {
+                "schema_version": "1.0",
+                "message_type": "app_decision",
+                "status": "ok",
+                "task_id": str(self.config.get("task_id") or "detergent_grasp"),
+                "timestamp_ms": _timestamp_ms(),
+                "robot_message": robot,
+                "visualization_result": visualization,
+                "producer": producer,
+                "app_timing": timing,
+            }
+            timing["decision_build_ms"] = round((time.perf_counter() - decision_started) * 1000.0, 3)
+            visualization["detergent_grasp"]["app_timing"] = timing
+
+            if dispatch:
+                robot["latency_ms"] = round(
+                    (time.monotonic() - packet.started_monotonic) * 1000.0, 3
+                )
+                send_ms, sent = self._dispatch_packet(packet, robot)
+                timing["websocket_send_ms"] = send_ms
+                timing["websocket_clients_sent"] = sent
+
+            debug_started = time.perf_counter()
+            self._save_debug_async(decision)
+            timing["debug_enqueue_ms"] = round((time.perf_counter() - debug_started) * 1000.0, 3)
+            timing["postprocess_stage_ms"] = round((time.perf_counter() - postprocess_started) * 1000.0, 3)
+            final_latency_ms = self.state.success(
+                decision, robot, runtime_result, packet.started_monotonic, timing
+            )
+            robot["latency_ms"] = round(final_latency_ms, 3)
+            return decision
+        except Exception as raw_error:
+            fault_started = time.perf_counter()
+            fault_code, fault_type = self._fault_for_error(raw_error)
+            timing["fault_mapping_ms"] = round((time.perf_counter() - fault_started) * 1000.0, 3)
+            elapsed_ms = (time.monotonic() - packet.started_monotonic) * 1000.0
+            robot = self._robot_message(
+                packet.frame_id,
+                packet.started_timestamp,
+                None,
+                elapsed_ms,
+                packet.request_id,
+                packet.trigger_task_id,
+                fault_code=fault_code,
+                fault_type=fault_type,
+            )
+            decision = {
+                "schema_version": "1.0",
+                "message_type": "app_decision",
+                "status": "error",
+                "task_id": str(self.config.get("task_id") or "detergent_grasp"),
+                "timestamp_ms": _timestamp_ms(),
+                "robot_message": robot,
+                "visualization_result": None,
+                "error": {"code": type(raw_error).__name__, "message": str(raw_error)},
+                "producer": self.producer_metadata(),
+                "app_timing": timing,
+            }
+            if dispatch:
+                robot["latency_ms"] = round(
+                    (time.monotonic() - packet.started_monotonic) * 1000.0, 3
+                )
+                send_ms, sent = self._dispatch_packet(packet, robot)
+                timing["websocket_send_ms"] = send_ms
+                timing["websocket_clients_sent"] = sent
+            debug_started = time.perf_counter()
+            self._save_debug_async(decision)
+            timing["debug_enqueue_ms"] = round((time.perf_counter() - debug_started) * 1000.0, 3)
+            timing["postprocess_stage_ms"] = round((time.perf_counter() - postprocess_started) * 1000.0, 3)
+            final_latency_ms = self.state.failure(
+                decision, robot, raw_error, packet.started_monotonic, timing
+            )
+            robot["latency_ms"] = round(final_latency_ms, 3)
+            return decision
+        finally:
+            self.state.end_postprocess()
+
     def evaluate_once(
         self,
         request_id: Optional[object] = None,
         trigger_task_id: Optional[object] = None,
     ) -> Dict[str, Any]:
-        frame_id = self.state.next_frame_id()
-        started_timestamp = time.time()
-        started_monotonic = time.monotonic()
-        self.state.begin()
+        # HTTP/manual requests remain synchronous.  Only Runtime access is
+        # serialized with the continuous producer, while CPU postprocess may
+        # overlap the next production inference.
         with self.execution_lock:
-            try:
-                # Runtime already rejects stale/disconnected frames.  Avoid a
-                # separate Bridge /health HTTP request per frame so the App FPS
-                # reflects model inference rather than health polling overhead.
-                runtime_result = self.runtime.infer_once()
-                camera_health = {"connected": True, "source": "runtime_inference"}
-                self._validate_runtime(runtime_result)
-                result = self.algorithm.evaluate(runtime_result)
-                latency_ms = (time.monotonic() - started_monotonic) * 1000.0
-                try:
-                    capture_timestamp_ms = int(runtime_result.get("capture_timestamp_ms") or 0)
-                except (TypeError, ValueError, OverflowError):
-                    capture_timestamp_ms = 0
-                capture_timestamp = capture_timestamp_ms / 1000.0 if capture_timestamp_ms > 0 else started_timestamp
-                robot = self._robot_message(
-                    frame_id,
-                    capture_timestamp,
-                    result,
-                    latency_ms,
-                    request_id,
-                    trigger_task_id,
-                    runtime_result=runtime_result,
-                )
-                diagnostics = {
-                    "matched_bottle_count": len([item for item in result.items if item.get("target_type") != "box"]),
-                    "box_count": len(result.boxes),
-                    "detected_bottle_count": len(result.bottles),
-                    "detected_grasp_point_count": len(result.grasp_points),
-                    "unmatched_bottles": result.unmatched_bottles,
-                    "unmatched_grasp_points": result.unmatched_grasp_points,
-                    "ignored_detections": result.ignored,
-                    "camera_health": camera_health,
-                }
-                visualization = deepcopy(dict(runtime_result))
-                visualization["detergent_grasp"] = {
-                    "robot_items": deepcopy(result.items),
-                    "diagnostics": diagnostics,
-                    "video_url": self.config["video"]["public_url"],
-                }
-                visualization["producer"] = self.producer_metadata()
-                decision: Dict[str, Any] = {
-                    "schema_version": "1.0",
-                    "message_type": "app_decision",
-                    "status": "ok",
-                    "task_id": str(self.config.get("task_id") or "detergent_grasp"),
-                    "timestamp_ms": _timestamp_ms(),
-                    "robot_message": robot,
-                    "visualization_result": visualization,
-                    "producer": self.producer_metadata(),
-                }
-                self.state.success(decision, robot, runtime_result, latency_ms)
-                self._save_debug_async(decision)
-                return decision
-            except Exception as error:
-                latency_ms = (time.monotonic() - started_monotonic) * 1000.0
-                fault_code, fault_type = self._fault_for_error(error)
-                robot = self._robot_message(
-                    frame_id,
-                    started_timestamp,
-                    None,
-                    latency_ms,
-                    request_id,
-                    trigger_task_id,
-                    fault_code=fault_code,
-                    fault_type=fault_type,
-                )
-                decision = {
-                    "schema_version": "1.0",
-                    "message_type": "app_decision",
-                    "status": "error",
-                    "task_id": str(self.config.get("task_id") or "detergent_grasp"),
-                    "timestamp_ms": _timestamp_ms(),
-                    "robot_message": robot,
-                    "visualization_result": None,
-                    "error": {"code": type(error).__name__, "message": str(error)},
-                    "producer": self.producer_metadata(),
-                }
-                self.state.failure(decision, robot, error, latency_ms)
-                self._save_debug_async(decision)
-                return decision
+            packet = self._run_inference_stage(
+                request_id=request_id, trigger_task_id=trigger_task_id, continuous=False
+            )
+            return self._complete_packet(packet, dispatch=False)
 
-    def _worker_loop(self) -> None:
+    def _enqueue_trigger_packet(self, packet: InferencePacket) -> None:
+        # A trigger must not be discarded.  Prefer evicting a queued continuous
+        # result; if another trigger is queued, wait until postprocess consumes it.
+        while not self.stop_event.is_set():
+            try:
+                self.result_queue.put_nowait(packet)
+                return
+            except queue.Full:
+                pass
+            try:
+                previous = self.result_queue.get_nowait()
+            except queue.Empty:
+                previous = None
+            if previous is None:
+                continue
+            if previous.trigger is None:
+                self.state.counters["pipeline_results_dropped"] += 1
+                self.state.counters["pipeline_continuous_evicted_for_trigger"] += 1
+                continue
+            try:
+                self.result_queue.put_nowait(previous)
+            except queue.Full:
+                pass
+            self.state.counters["pipeline_trigger_waits"] += 1
+            try:
+                self.result_queue.put(packet, timeout=0.1)
+                return
+            except queue.Full:
+                continue
+
+    def _enqueue_packet(self, packet: InferencePacket) -> None:
+        if packet.trigger is not None:
+            self._enqueue_trigger_packet(packet)
+            return
+        try:
+            self.result_queue.put_nowait(packet)
+            return
+        except queue.Full:
+            pass
+        try:
+            previous = self.result_queue.get_nowait()
+        except queue.Empty:
+            previous = None
+        if previous is not None and previous.trigger is not None:
+            # Never discard an explicit robot trigger to make room for a
+            # continuous frame.  Restore it and drop the new continuous result.
+            try:
+                self.result_queue.put_nowait(previous)
+            except queue.Full:
+                pass
+            self.state.counters["pipeline_results_dropped"] += 1
+            self.state.counters["pipeline_continuous_dropped_for_trigger"] += 1
+            return
+        if previous is not None:
+            self.state.counters["pipeline_results_dropped"] += 1
+        try:
+            self.result_queue.put_nowait(packet)
+        except queue.Full:
+            self.state.counters["pipeline_results_dropped"] += 1
+
+    def _inference_loop(self) -> None:
         next_continuous = time.monotonic()
         while not self.stop_event.is_set():
             try:
@@ -642,18 +1063,16 @@ class DetergentGraspVisionService:
             now = time.monotonic()
             due = continuous and now >= next_continuous
             if trigger is not None or due:
-                decision = self.evaluate_once(
+                packet = self._run_inference_stage(
                     request_id=trigger.request_id if trigger is not None else None,
                     trigger_task_id=trigger.trigger_task_id if trigger is not None else None,
+                    trigger=trigger,
+                    continuous=trigger is None,
                 )
-                robot = decision.get("robot_message") if isinstance(decision.get("robot_message"), Mapping) else {}
-                if trigger is not None:
-                    try:
-                        trigger.session.send_json(robot)
-                    except OSError:
-                        pass
-                elif self.websocket.client_count() > 0:
-                    self.websocket.broadcast_json(robot)
+                if self.pipeline_enabled:
+                    self._enqueue_packet(packet)
+                else:
+                    self._complete_packet(packet, dispatch=True)
                 if due:
                     period_s = 1.0 / self.production_fps()
                     next_continuous = max(next_continuous + period_s, time.monotonic())
@@ -665,6 +1084,18 @@ class DetergentGraspVisionService:
                 next_continuous = time.monotonic()
             elif signaled:
                 next_continuous = min(next_continuous, time.monotonic())
+
+    def _postprocess_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                packet = self.result_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            age_ms = (time.monotonic() - packet.started_monotonic) * 1000.0
+            if packet.trigger is None and age_ms > self.pipeline_max_result_age_ms:
+                self.state.counters["pipeline_stale_results_dropped"] += 1
+                continue
+            self._complete_packet(packet, dispatch=True)
 
     def _status_message(self) -> Dict[str, Any]:
         snapshot = self.state.snapshot(self.websocket)
@@ -829,6 +1260,7 @@ class StatusHandler(BaseHTTPRequestHandler):
         elif path in {"/api/app/status", "/api/gateway/status", "/api/ws/status"}:
             snapshot["external_status"] = self.service._status_message()
             snapshot["inference_settings"] = self.service.inference_settings()
+            snapshot["pipeline"] = self.service.pipeline_status()
             self._send(200, snapshot)
         elif path == "/api/ws/clients":
             self._send(200, {"status": "ok", "clients": self.service.websocket.client_snapshot()})

@@ -222,3 +222,11 @@ Orbbec Bridge 的 `/api/coordinate/sample_deproject` 在内存中完成 7 点深
 反投影，避免逐帧传输和解码整幅 Depth PNG。生产 FPS 由
 `/api/app/inference_settings` 统一控制，WebSocket 对每个完成结果立即推送，不再读取
 `box_grasp.websocket.detection_hz`。诊断字段见任务 README。
+
+### M32.8.2 Collector Raw Runtime Proxy
+
+工厂模式模型验证的 Collector→Runtime 高频代理在 localhost 下改用
+`TCP_NODELAY` raw HTTP，避免 RK3576 上 urllib 小 POST 的固定延迟。仅 Runtime
+客户端启用该路径；Gateway 与 Business App 代理保持原实现。诊断信息见
+`/api/collector/status` 的 `proxy.runtime_transport`，详细说明见
+`docs/M32.8.2_COLLECTOR_RAW_RUNTIME_PROXY.md`。

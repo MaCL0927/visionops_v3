@@ -5,6 +5,9 @@
 核心文件：
 
 - `algorithm.py`：OBB 解析、长轴角度和瓶体/抓取点一对一匹配；
-- `service.py`：Runtime 调用、HTTP、WebSocket、故障码和生产 FPS；
+- `service.py`：双线程 Runtime/后处理流水线、全链路 p50/p95 计时、HTTP、WebSocket、故障码和生产 FPS；
 - `PROTOCOL.md`：机器人端字段契约；
 - `mock_robot_client.py`：无第三方依赖的联调客户端。
+
+
+默认流水线使用容量 1 的 latest-only 连续结果队列。显式机器人 trigger 不允许被覆盖；连续旧结果超过最大年龄会被丢弃。详见 `docs/M32.7_APP_FULL_CHAIN_TIMING.md` 和 `docs/M32.8_DETERGENT_DUAL_THREAD_PIPELINE.md`。

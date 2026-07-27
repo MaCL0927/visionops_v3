@@ -81,6 +81,21 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "trigger_queue_size": 32,
         "trigger_task_ids": ["detergent_grasp", "detergent_pick", "1", 1],
     },
+    "pipeline": {
+        # M32.8 default production architecture: Runtime producer and CPU
+        # postprocess run in parallel through a latest-only queue.
+        "enabled": True,
+        "result_queue_size": 1,
+        "max_result_age_ms": 500,
+    },
+    "runtime_ipc": {
+        # Local Runtime requests use TCP_NODELAY and one combined header/body
+        # send.  The inference producer enqueues raw bytes; JSON decoding is
+        # intentionally deferred to the postprocess thread.
+        "raw_http_enabled": True,
+        "raw_http_fallback_urllib": True,
+        "max_response_bytes": 32 * 1024 * 1024,
+    },
     "video": {
         "type": "mjpeg",
         "public_url": "http://192.168.20.20:18181/stream.mjpeg",
@@ -117,7 +132,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
         "output": {
             # Bottle angle_deg is resolved to a directed handle orientation in
-            # [-180, 180) without changing the robot-facing field name.
+            # [0, 360) without changing the robot-facing field name.
             "include_obb_points": True,
             "include_class_name": True,
         },
@@ -221,6 +236,20 @@ def _validate(config: Dict[str, Any]) -> None:
     websocket["read_timeout_s"] = max(1.0, float(websocket.get("read_timeout_s", 30.0)))
     websocket["status_interval_s"] = max(0.5, float(websocket.get("status_interval_s", 2.0)))
     websocket["max_payload_bytes"] = max(1024, int(websocket.get("max_payload_bytes", 1048576)))
+
+    pipeline = config["pipeline"]
+    pipeline["enabled"] = bool(pipeline.get("enabled", True))
+    pipeline["result_queue_size"] = max(1, int(pipeline.get("result_queue_size", 1)))
+    pipeline["max_result_age_ms"] = max(1, int(pipeline.get("max_result_age_ms", 500)))
+
+    runtime_ipc = config["runtime_ipc"]
+    runtime_ipc["raw_http_enabled"] = bool(runtime_ipc.get("raw_http_enabled", True))
+    runtime_ipc["raw_http_fallback_urllib"] = bool(
+        runtime_ipc.get("raw_http_fallback_urllib", True)
+    )
+    runtime_ipc["max_response_bytes"] = max(
+        1024, int(runtime_ipc.get("max_response_bytes", 32 * 1024 * 1024))
+    )
 
     video = config["video"]
     video["public_url"] = _url(video["public_url"], "video.public_url")

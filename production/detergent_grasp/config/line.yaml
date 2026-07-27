@@ -56,6 +56,22 @@ websocket:
   trigger_queue_size: 32
   trigger_task_ids: [detergent_grasp, detergent_pick, "1", 1]
 
+# 已验证的生产默认架构：推理线程持续请求 Runtime，CPU 后处理线程
+# 处理上一帧。连续结果使用容量 1 的 latest-only 队列；显式机器人
+# trigger 结果受到保护，不会为了连续帧而丢弃。
+pipeline:
+  enabled: true
+  result_queue_size: 1
+  max_result_age_ms: 500
+
+# M32.8.1：localhost Runtime 使用 raw HTTP socket，避免 urllib 在嵌入式
+# TCP 栈上的固定小包延迟。推理线程只读取原始响应 bytes，JSON 解码由
+# 后处理线程完成；raw 路径异常时可自动回退 urllib。
+runtime_ipc:
+  raw_http_enabled: true
+  raw_http_fallback_urllib: true
+  max_response_bytes: 33554432
+
 video:
   type: mjpeg
   # load_config 会保留这个主机地址，并按 active_camera 自动替换端口和路径。
@@ -94,7 +110,7 @@ algorithm:
     output_order: row_major
   output:
     # 瓶体 angle_deg 会根据 head 中心所在半边消除 180° 歧义：
-    # 沿瓶体长轴距离 head 更远的一端定义为把手方向，输出范围 [-180, 180)。
+    # 沿瓶体长轴距离 head 更远的一端定义为把手方向，输出范围 [0, 360)。
     include_obb_points: true
     include_class_name: true
 
