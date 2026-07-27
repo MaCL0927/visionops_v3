@@ -40,7 +40,7 @@ const captureStage = document.querySelector(".capture-stage");
 const captureRoiModal = document.getElementById("capture-roi-modal");
 const captureRoiImage = document.getElementById("capture-roi-image");
 const captureRoiCanvas = document.getElementById("capture-roi-canvas");
-const captureRoiStage = document.querySelector(".capture-roi-editor-stage");
+const captureRoiStage = document.getElementById("capture-roi-stage");
 const captureRoiEmpty = document.getElementById("capture-roi-empty");
 const captureRoiCoordinates = document.getElementById("capture-roi-coordinates");
 
