@@ -312,6 +312,13 @@ bool StreamWorkerMock::frame_is_fresh_locked(std::uint64_t now_ms) const {
   return now_ms - timestamp <= static_cast<std::uint64_t>(config_.stale_frame_timeout_ms);
 }
 
+bool StreamWorkerMock::jpeg_cache_is_fresh_locked(std::uint64_t now_ms) const {
+  if (latest_jpeg_.empty() || latest_jpeg_timestamp_ms_ == 0) return false;
+  if (now_ms < latest_jpeg_timestamp_ms_) return true;
+  return now_ms - latest_jpeg_timestamp_ms_ <=
+      static_cast<std::uint64_t>(config_.stale_frame_timeout_ms);
+}
+
 ImageBuffer StreamWorkerMock::make_mock_image_for_sequence(std::uint64_t sequence) const {
   ImageBuffer image;
   image.width = 1920;
@@ -396,19 +403,19 @@ bool StreamWorkerMock::latest_frame(ImageBuffer& image) const {
 }
 
 bool StreamWorkerMock::latest_snapshot_jpeg(std::vector<std::uint8_t>& jpeg) const {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!latest_jpeg_.empty() &&
-        frame_is_fresh_locked(static_cast<std::uint64_t>(now_timestamp_ms()))) {
-      jpeg = latest_jpeg_;
-      return true;
-    }
-  }
+  const auto now = static_cast<std::uint64_t>(now_timestamp_ms());
 
-  // The shared-memory inference path intentionally carries raw RGB only.  For
-  // browser snapshots, proxy the Bridge's already-encoded JPEG cache on demand
-  // instead of running Runtime's software JPEG encoder on every UI refresh.
-  // This preserves zero-decode inference while keeping snapshot requests cheap.
+  // Shared-memory inference does not continuously encode JPEG in Runtime.  A
+  // temporary shared-memory outage can, however, populate latest_jpeg_ through
+  // the HTTP fallback path.  Once RGB shared memory recovers, latest_image_ is
+  // fresh again while that fallback JPEG remains unchanged.  The old code used
+  // latest_image_'s timestamp to validate latest_jpeg_, so one fallback frame
+  // could be treated as fresh forever and every Web page appeared frozen after
+  // an Orbbec USB reconnect.
+  //
+  // For shared-memory sources always ask the Bridge for its current cached JPEG
+  // first.  Only use Runtime's fallback cache when the Bridge is temporarily
+  // unreachable, and validate it with its own JPEG timestamp.
   if (is_shared_memory_source(config_.type) && config_.shared_memory_fallback_http) {
     std::vector<std::uint8_t> body;
     int status_code = 0;
@@ -426,6 +433,19 @@ bool StreamWorkerMock::latest_snapshot_jpeg(std::vector<std::uint8_t>& jpeg) con
       jpeg = std::move(body);
       return true;
     }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (jpeg_cache_is_fresh_locked(now)) {
+      jpeg = latest_jpeg_;
+      return true;
+    }
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (jpeg_cache_is_fresh_locked(now)) {
+    jpeg = latest_jpeg_;
+    return true;
   }
   return false;
 }
@@ -711,7 +731,16 @@ bool StreamWorkerMock::read_frame_once(
   capture_ms = 0.0;
   decode_ms = 0.0;
   if (is_shared_memory_source(config_.type)) {
-    if (read_shared_memory_frame(image, capture_ms, error)) return true;
+    if (read_shared_memory_frame(image, capture_ms, error)) {
+      // A JPEG may have been cached while shared memory was unavailable.  It no
+      // longer represents the current RGB frame once the zero-copy path has
+      // recovered, so discard it rather than letting snapshot requests reuse a
+      // frozen fallback image.
+      std::lock_guard<std::mutex> lock(mutex_);
+      latest_jpeg_.clear();
+      latest_jpeg_timestamp_ms_ = 0;
+      return true;
+    }
     if (config_.shared_memory_fallback_http) {
       return read_hp60c_bridge_frame(image, capture_ms, decode_ms, error);
     }

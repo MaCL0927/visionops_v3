@@ -98,6 +98,7 @@ class StreamWorkerMock {
   void set_error(std::string error, bool mark_closed = true);
   void clear_error();
   bool frame_is_fresh_locked(std::uint64_t now_ms) const;
+  bool jpeg_cache_is_fresh_locked(std::uint64_t now_ms) const;
   ImageBuffer make_mock_image_for_sequence(std::uint64_t sequence) const;
   bool open_source(std::string& error);
   void close_source();

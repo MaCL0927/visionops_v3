@@ -1,5 +1,8 @@
 # VisionOps v3 端到端视觉 AI 平台
 
+
+> M32.8.3：修复 Orbbec USB 重连后 Runtime 将 HTTP fallback JPEG 误判为持续新鲜，导致采集、验证和生产 Web 画面冻结的问题。共享内存恢复后会清理 fallback JPEG，并由 Runtime 快照优先代理 Bridge 当前 JPEG。详见 `docs/M32.8.3_ORBBEC_RECONNECT_WEB_SNAPSHOT_FIX.md`。
+
 ## 1. 项目定位
 
 VisionOps v3 面向 `RK3576 / LB3576 / RK3588` 工业视觉盒子，覆盖数据采集、服务端标注与训练、模型转换发布、边缘端 RKNN 推理、Web 管理以及 PLC / 上位机通信。
