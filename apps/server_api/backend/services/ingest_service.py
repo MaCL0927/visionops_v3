@@ -27,6 +27,7 @@ MANIFEST_NAMES = {"manifest.json", "collector_manifest.json"}
 CAPTURE_MANIFEST_NAME = "capture_manifest.json"
 IMAGE_DIR_NAMES = {"images", "all_images", "positive", "negative"}
 LABEL_DIR_NAMES = {"labels", "labels_auto"}
+AUX_CAPTURE_DIR_NAMES = {"depth", "meta"}
 
 
 def _now_ms() -> int:
@@ -204,7 +205,7 @@ class BatchService:
                             "input_roi": capture_metadata.get("input_roi", {"enabled": False}),
                         }
                     )
-                    for folder in IMAGE_DIR_NAMES | LABEL_DIR_NAMES:
+                    for folder in IMAGE_DIR_NAMES | LABEL_DIR_NAMES | AUX_CAPTURE_DIR_NAMES:
                         if (dataset_root / folder).is_dir():
                             _copy_dir_contents(dataset_root / folder, raw_dir / folder)
                     for filename in MANIFEST_NAMES | {"collector_meta.jsonl"}:
@@ -223,6 +224,18 @@ class BatchService:
                 "capture_roi": common_input_roi,
                 "source_package_count": len(sources),
                 "source_packages": [item.get("package_name") for item in sources],
+                "rgbd_count": sum(
+                    int((item.get("capture_manifest") or {}).get("rgbd_count") or 0)
+                    for item in sources
+                ),
+                "depth_count": sum(
+                    int((item.get("capture_manifest") or {}).get("depth_count") or 0)
+                    for item in sources
+                ),
+                "meta_count": sum(
+                    int((item.get("capture_manifest") or {}).get("meta_count") or 0)
+                    for item in sources
+                ),
             }
             _write_json(raw_dir / CAPTURE_MANIFEST_NAME, merged_capture_manifest)
 
@@ -504,7 +517,9 @@ def _count_dataset_files(root: Path) -> tuple[int, int, int]:
             continue
         total_files += 1
         suffix = path.suffix.lower()
-        if suffix in IMAGE_EXTENSIONS:
+        relative_parts = path.relative_to(root).parts
+        top_level = relative_parts[0] if relative_parts else ""
+        if suffix in IMAGE_EXTENSIONS and top_level in IMAGE_DIR_NAMES:
             image_count += 1
         elif suffix in LABEL_EXTENSIONS or any(part in LABEL_DIR_NAMES for part in path.parts):
             label_count += 1

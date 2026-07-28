@@ -372,8 +372,14 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         send_json(self, 200, payload)
 
     def _capture_dataset_image(self) -> None:
+        payload_body = self._read_json_body()
+        if payload_body is None:
+            return
         try:
-            payload = save_runtime_snapshot(self.server.runtime_client)
+            payload = save_runtime_snapshot(
+                self.server.runtime_client,
+                save_depth=payload_body.get("save_depth") is True,
+            )
         except RuntimeUnavailable as error:
             self._send_collector_error(502, "RUNTIME_SNAPSHOT_UNREACHABLE", "无法从 Runtime 获取快照", True, detail=str(error))
             return
@@ -393,7 +399,8 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             enabled = bool(payload.get("enabled", True))
             if enabled:
                 result = self.server.timed_capture.start(
-                    float(payload.get("interval_seconds", 10))
+                    float(payload.get("interval_seconds", 10)),
+                    save_depth=payload.get("save_depth") is True,
                 )
             else:
                 result = self.server.timed_capture.stop()

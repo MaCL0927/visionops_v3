@@ -56,16 +56,16 @@
             <aside class="left-steps">
               <button class="step-btn active" data-capture-step="shoot"><span class="step-num">1</span><span><b>拍照采集</b><em>保存到边缘端数据集</em></span></button>
               <button class="step-btn" data-capture-step="upload"><span class="step-num">2</span><span><b>确认上传</b><em>分页预览、打包与上传</em></span></button>
-              <div class="tip-card"><b>数据说明</b><p>采集图片保存到 /opt/visionops_v3/data/images；打包文件保存到 /opt/visionops_v3/data/upload_packages。</p></div>
+              <div class="tip-card"><b>数据说明</b><p>RGB 保存到 data/images；勾选同步深度后，16 位深度与元数据分别保存到 data/depth、data/meta；上传包会包含这些目录。</p></div>
             </aside>
             <section class="content-card">
               <section id="capture-shoot" class="subscreen active">
-                <div class="screen-head"><div><div class="kicker">采集上传 / 第 1 步</div><h1>拍照采集</h1><p>使用 Runtime 当前快照进行预览；启用采集 ROI 后，手动采集、定时采图和本地下载只保存 ROI 内图像。</p></div><div class="head-actions"><button id="capture-refresh">刷新快照</button><button id="capture-roi-btn">采集 ROI</button><button id="capture-shoot-btn" class="primary">拍照采集并保存</button><button id="capture-timed-btn">定时采图</button><button id="capture-download">本地下载</button></div></div>
+                <div class="screen-head"><div><div class="kicker">采集上传 / 第 1 步</div><h1>拍照采集</h1><p>使用 Runtime 当前快照进行预览；启用采集 ROI 后，RGB 与同步深度会使用同一 ROI 保存。深度以 16 位 PNG 保存，并附带相机内参与帧同步元数据。</p></div><div class="head-actions"><label class="capture-depth-toggle" title="默认关闭。开启后，手动采集和新启动的定时采图会同步保存 RGB、16位深度 PNG 与 meta JSON。"><input id="capture-save-depth" type="checkbox"><span>同步保存深度</span></label><button id="capture-refresh">刷新快照</button><button id="capture-roi-btn">采集 ROI</button><button id="capture-shoot-btn" class="primary">拍照采集并保存</button><button id="capture-timed-btn">定时采图</button><button id="capture-download">本地下载</button></div></div>
                 <div class="camera-stage capture-stage"><img id="capture-image" class="stage-image" alt="采集快照"><canvas id="capture-roi-overlay" aria-hidden="true"></canvas><div id="capture-empty" class="stage-empty">等待 Runtime snapshot</div><div class="camera-label"><b>实时预览 / 当前快照</b><span id="capture-message">尚未刷新</span></div></div>
               </section>
               <section id="capture-upload" class="subscreen">
                 <div class="screen-head"><div><div class="kicker">采集上传 / 第 2 步</div><h1>采集记录与上传</h1><p>分页读取边缘端已保存图片，避免图片过多导致 Web 卡顿。</p></div><div class="head-actions"><button id="capture-refresh-list">刷新列表</button><button id="capture-clear">删除当前页</button><button id="capture-upload-server" class="primary">上传服务器</button></div></div>
-                <div class="folder-card-strip"><div class="folder-card active"><b>已保存图片</b><em><span id="capture-count">0</span> 张</em></div><div class="folder-card"><b>导出状态</b><em id="capture-export-status">等待打包</em></div><div class="folder-card"><b>上传状态</b><em id="capture-upload-status">等待上传</em></div></div>
+                <div class="folder-card-strip"><div class="folder-card active"><b>已保存 RGB</b><em><span id="capture-count">0</span> 张 · RGB-D <span id="capture-depth-count">0</span> 组</em></div><div class="folder-card"><b>导出状态</b><em id="capture-export-status">等待打包</em></div><div class="folder-card"><b>上传状态</b><em id="capture-upload-status">等待上传</em></div></div>
                 <div class="capture-list-toolbar"><span id="capture-page-info">0-0 / 0</span><div><button id="capture-prev-page">上一页</button><button id="capture-next-page">下一页</button></div></div>
                 <div id="capture-records" class="preview-grid"><div class="empty-copy">暂无采集记录</div></div>
               </section>

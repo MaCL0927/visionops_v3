@@ -20,6 +20,7 @@ class TimedCaptureController:
         self._enabled = False
         self._closed = False
         self._interval_seconds = 10.0
+        self._save_depth = False
         self._generation = 0
         self._capture_count = 0
         self._failure_count = 0
@@ -35,13 +36,14 @@ class TimedCaptureController:
         )
         self._thread.start()
 
-    def start(self, interval_seconds: float) -> dict[str, Any]:
+    def start(self, interval_seconds: float, save_depth: bool = False) -> dict[str, Any]:
         interval = float(interval_seconds)
         if not 0.5 <= interval <= 86400:
             raise ValueError("定时采图间隔必须位于 0.5 到 86400 秒")
         with self._condition:
             self._enabled = True
             self._interval_seconds = interval
+            self._save_depth = bool(save_depth)
             self._generation += 1
             self._started_at_ms = timestamp_ms()
             self._next_capture_at_ms = self._started_at_ms + int(interval * 1000)
@@ -73,6 +75,7 @@ class TimedCaptureController:
                 "timestamp_ms": timestamp_ms(),
                 "enabled": self._enabled,
                 "interval_seconds": self._interval_seconds,
+                "save_depth": self._save_depth,
                 "started_at_ms": self._started_at_ms,
                 "next_capture_at_ms": self._next_capture_at_ms,
                 "last_capture_at_ms": self._last_capture_at_ms,
@@ -91,6 +94,7 @@ class TimedCaptureController:
                     return
                 generation = self._generation
                 interval = self._interval_seconds
+                save_depth = self._save_depth
                 deadline = time.monotonic() + interval
                 while not self._closed and self._enabled and generation == self._generation:
                     remaining = deadline - time.monotonic()
@@ -103,7 +107,11 @@ class TimedCaptureController:
                     continue
 
             try:
-                payload = save_runtime_snapshot(self._runtime_client, prefix="visionops_auto")
+                payload = save_runtime_snapshot(
+                    self._runtime_client,
+                    prefix="visionops_auto",
+                    save_depth=save_depth,
+                )
                 image = payload.get("image") if isinstance(payload, dict) else None
                 with self._condition:
                     self._capture_count += 1

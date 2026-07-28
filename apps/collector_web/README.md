@@ -434,3 +434,23 @@ Runtime 同时兼容历史 PyYAML 生成的 `pixel_xyxy` / `normalized_xyxy` 块
 画面 FPS。通用 Runtime 模式的统一推理 FPS 会持久化到
 `config/vision_box_settings.json`，不再只依赖浏览器 localStorage。完整说明见
 `docs/M32.4.2_GENERIC_RUNTIME_FPS_DECOUPLING.md`。
+
+## M32.8 同步 RGB-D 采集
+
+拍照采集页新增“同步保存深度”开关，默认关闭。开启后：
+
+- 手动拍照以及新启动的定时采图保存一组同名记录；
+- RGB：`data/images/<capture_id>.jpg`；
+- 深度：`data/depth/<capture_id>.png`，16 位 `16UC1`，单位毫米；
+- 元数据：`data/meta/<capture_id>.json`，包含帧时间戳、RGB/Depth sequence、相机内参、ROI、有效深度比例和同步方式；
+- Orbbec Bridge 通过 POSIX shared memory 发布同一 SDK FrameSet 的 RGB 与 D2C 深度。Collector 仅接受 `timestamp_epoch_ms` 完全相同且 sequence 读取稳定的帧对；无法验证同步时本次采集失败，不会退化为相邻帧拼接；
+- 启用采集 ROI 后，RGB 与深度按相同 normalized ROI 裁剪，meta 内同时保存原始内参与裁剪后的有效内参；
+- 删除 RGB 记录时会同步删除对应 depth/meta；
+- `tar.gz` 包含 `images/`、`depth/`、`meta/`、`manifest.json` 与 `capture_manifest.json`。仅 RGB 的旧数据仍保持兼容。
+
+环境变量可覆盖共享内存路径：
+
+```bash
+VISIONOPS_CAPTURE_SHARED_RGB_PATH=/dev/shm/visionops_orbbec336l_rgb
+VISIONOPS_CAPTURE_SHARED_DEPTH_PATH=/dev/shm/visionops_orbbec336l_depth
+```

@@ -7,6 +7,7 @@ let records = [];
 let offset = 0;
 const limit = 24;
 let total = 0;
+let totalDepth = 0;
 let busy = false;
 let previewRecord = null;
 let timedStatusTimer = null;
@@ -43,6 +44,7 @@ const captureRoiCanvas = document.getElementById("capture-roi-canvas");
 const captureRoiStage = document.getElementById("capture-roi-stage");
 const captureRoiEmpty = document.getElementById("capture-roi-empty");
 const captureRoiCoordinates = document.getElementById("capture-roi-coordinates");
+const saveDepthCheckbox = document.getElementById("capture-save-depth");
 
 function formatBytes(value) {
   const n = Number(value);
@@ -62,14 +64,16 @@ function updateStatusCards(extra = {}) {
   const countNode = document.getElementById("capture-count");
   const exportNode = document.getElementById("capture-export-status");
   const uploadNode = document.getElementById("capture-upload-status");
+  const depthCountNode = document.getElementById("capture-depth-count");
   if (countNode) countNode.textContent = String(total || records.length);
+  if (depthCountNode) depthCountNode.textContent = String(totalDepth || 0);
   if (exportNode && extra.exportText) exportNode.textContent = extra.exportText;
   if (uploadNode && extra.uploadText) uploadNode.textContent = extra.uploadText;
 }
 
 function setBusy(nextBusy) {
   busy = nextBusy;
-  for (const id of ["capture-shoot-btn", "capture-roi-btn", "capture-refresh-list", "capture-prev-page", "capture-next-page", "capture-upload-server", "capture-upload-confirm"]) {
+  for (const id of ["capture-shoot-btn", "capture-roi-btn", "capture-save-depth", "capture-refresh-list", "capture-prev-page", "capture-next-page", "capture-upload-server", "capture-upload-confirm"]) {
     const node = document.getElementById(id);
     if (node) node.disabled = busy;
   }
@@ -83,6 +87,8 @@ function toCaptureRecord(imageRecord) {
     time: imageRecord.mtime_text || "--",
     size_bytes: imageRecord.size_bytes,
     server_saved: true,
+      has_depth: imageRecord.has_depth === true,
+      has_meta: imageRecord.has_meta === true,
   };
 }
 
@@ -435,7 +441,8 @@ function renderRecords() {
       preview.alt = record.filename || "采集图片";
       preview.addEventListener("click", () => previewSavedImage(record));
       meta.className = "capture-record-meta";
-      meta.innerHTML = `<b>${record.filename || "采集图片"}</b><span>${record.mtime_text || "--"} · ${formatBytes(record.size_bytes)}</span>`;
+      const rgbdBadge = record.has_depth && record.has_meta ? '<i class="rgbd-badge">RGB-D</i>' : "";
+      meta.innerHTML = `<b>${record.filename || "采集图片"}${rgbdBadge}</b><span>${record.mtime_text || "--"} · ${formatBytes(record.size_bytes)}</span>`;
       actions.className = "capture-record-actions";
       openBtn.type = "button";
       openBtn.textContent = "预览";
@@ -466,6 +473,7 @@ async function loadRecords(nextOffset = offset) {
     const payload = await requestJson(`${endpoints.datasetImages}?offset=${nextOffset}&limit=${limit}`);
     records = Array.isArray(payload.images) ? payload.images : [];
     total = Number(payload.total || 0);
+    totalDepth = Number(payload.depth_count || 0);
     offset = Number(payload.offset || 0);
     renderRecords();
     updateStatusCards({ exportText: "上传时自动打包", uploadText: "等待上传" });
@@ -522,11 +530,15 @@ async function downloadCapture() {
 async function shoot() {
   setBusy(true);
   try {
-    const payload = await postJson(endpoints.datasetCapture, {});
+    const saveDepth = saveDepthCheckbox?.checked === true;
+    const payload = await postJson(endpoints.datasetCapture, { save_depth: saveDepth });
     const item = payload.image;
     const crop = payload.capture_roi?.crop_resolution;
     const suffix = payload.images_are_cropped ? `（ROI ${crop?.width || "--"}×${crop?.height || "--"}）` : "（完整画面）";
-    setMessage(`已保存到边缘端：${item?.filename || "采集图片"}${suffix}`, "ok");
+    const depthSuffix = payload.depth_saved
+      ? `，同步保存 ${payload.depth?.filename || "depth.png"} 与 ${payload.meta?.filename || "meta.json"}`
+      : "";
+    setMessage(`已保存到边缘端：${item?.filename || "采集图片"}${suffix}${depthSuffix}`, "ok");
     await refreshCapture();
     await loadRecords(0);
   } catch (error) {
@@ -547,7 +559,7 @@ function previewSavedImage(record) {
 
 async function deleteSavedImage(record, options = {}) {
   if (!record?.filename) return;
-  if (!options.skipConfirm && !window.confirm(`确定删除图片 ${record.filename}？`)) return;
+  if (!options.skipConfirm && !window.confirm(`确定删除图片 ${record.filename} 及其对应的 depth/meta（如有）？`)) return;
   setBusy(true);
   try {
     const response = await fetch(record.delete_url || `${endpoints.datasetImages}/${encodeURIComponent(record.filename)}`, { method: "DELETE", cache: "no-store" });
@@ -579,6 +591,7 @@ function formatTimestamp(value) {
 
 function renderTimedStatus(payload) {
   const enabled = payload?.enabled === true;
+  const saveDepth = payload?.save_depth === true;
   const button = document.getElementById("capture-timed-btn");
   const count = Number(payload?.capture_count || 0);
   timedCaptureEnabled = enabled;
@@ -598,7 +611,7 @@ function renderTimedStatus(payload) {
   }
   if (timedStatusNode) {
     if (enabled) {
-      timedStatusNode.textContent = `运行中：已自动保存 ${count} 张；下次 ${formatTimestamp(payload.next_capture_at_ms)}；最近错误：${payload.last_error || "无"}`;
+      timedStatusNode.textContent = `运行中：已自动保存 ${count} 张；模式 ${saveDepth ? "RGB+Depth+Meta" : "仅RGB"}；下次 ${formatTimestamp(payload.next_capture_at_ms)}；最近错误：${payload.last_error || "无"}`;
       timedStatusNode.dataset.kind = payload.last_error ? "error" : "ok";
     } else {
       timedStatusNode.textContent = `当前未启用。累计自动保存 ${count} 张；上次采图 ${formatTimestamp(payload.last_capture_at_ms)}。`;
@@ -652,10 +665,11 @@ async function startTimedCapture() {
     const payload = await postJson(endpoints.timedCapture, {
       enabled: true,
       interval_seconds: interval,
+      save_depth: saveDepthCheckbox?.checked === true,
     });
     renderTimedStatus(payload);
     hideModal(timedModal);
-    setMessage(`定时采图已启动，间隔 ${interval} 秒`, "ok");
+    setMessage(`定时采图已启动，间隔 ${interval} 秒，${payload.save_depth ? "同步保存深度" : "仅保存RGB"}`, "ok");
   } catch (error) {
     timedStatusNode.textContent = error.body?.error?.message || error.message || "启动定时采图失败";
     timedStatusNode.dataset.kind = "error";
@@ -697,7 +711,7 @@ function openUploadConfirm() {
   if (remarkInput) remarkInput.value = remarkInput.value || "";
   const msg = document.getElementById("capture-upload-confirm-message");
   if (msg) {
-    msg.textContent = `当前本地图片 ${total} 张；确认后会先生成 tar.gz，再上传服务器。`;
+    msg.textContent = `当前本地 RGB ${total} 张，其中 RGB-D ${totalDepth} 组；确认后会将 images、depth、meta 一起打包为 tar.gz 并上传服务器。`;
     msg.dataset.kind = "";
   }
   showModal(uploadModal);
@@ -726,6 +740,7 @@ function showUploadResult(payload, ok) {
       ["压缩包大小", formatBytes(pack.size_bytes)],
       ["远端路径", payload?.upload?.remote_path || "--"],
       ["图片数量", String(payload?.image_count ?? payload?.manifest?.counts?.all ?? "--")],
+      ["RGB-D组数", String(payload?.rgbd_count ?? payload?.manifest?.counts?.rgbd ?? "0")],
       ["耗时", payload?.elapsed_ms != null ? `${payload.elapsed_ms} ms` : "--"],
     ];
     if (!ok) rows.push(["失败原因", payload?.upload?.error || payload?.error?.message || payload?.message || "unknown"]);
@@ -781,7 +796,7 @@ async function confirmUpload() {
 }
 
 function clearRecords() {
-  if (!window.confirm("该操作会删除当前页显示的采集图片，确定继续？")) return;
+  if (!window.confirm("该操作会删除当前页显示的 RGB 图片及对应 depth/meta，确定继续？")) return;
   Promise.all(records.map((record) => fetch(record.delete_url || `${endpoints.datasetImages}/${encodeURIComponent(record.filename)}`, { method: "DELETE", cache: "no-store" }).catch(() => null)))
     .then(() => loadRecords(0))
     .then(() => setMessage("已删除当前页采集图片", "ok"));

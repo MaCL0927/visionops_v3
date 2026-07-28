@@ -14,19 +14,24 @@ class _FakeRuntimeClient:
 def test_timed_capture_saves_repeated_snapshots_and_stops(monkeypatch) -> None:
     calls: list[float] = []
 
-    def fake_save(_client, prefix: str = "visionops"):
+    depth_flags: list[bool] = []
+
+    def fake_save(_client, prefix: str = "visionops", save_depth: bool = False):
         calls.append(time.monotonic())
+        depth_flags.append(save_depth)
         return {"image": {"filename": f"{prefix}_{len(calls)}.jpg"}}
 
     monkeypatch.setattr(module, "save_runtime_snapshot", fake_save)
     controller = module.TimedCaptureController(_FakeRuntimeClient())
     try:
-        started = controller.start(0.5)
+        started = controller.start(0.5, save_depth=True)
         assert started["enabled"] is True
+        assert started["save_depth"] is True
         deadline = time.monotonic() + 2.0
         while len(calls) < 2 and time.monotonic() < deadline:
             time.sleep(0.05)
         assert len(calls) >= 2
+        assert all(depth_flags)
         status = controller.status()
         assert status["capture_count"] >= 2
         assert status["last_image"]["filename"].startswith("visionops_auto_")
