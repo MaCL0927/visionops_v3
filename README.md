@@ -1,7 +1,7 @@
 # VisionOps v3 端到端视觉 AI 平台
 
 
-> M32.8.3：修复 Orbbec USB 重连后 Runtime 将 HTTP fallback JPEG 误判为持续新鲜，导致采集、验证和生产 Web 画面冻结的问题。共享内存恢复后会清理 fallback JPEG，并由 Runtime 快照优先代理 Bridge 当前 JPEG。详见 `docs/M32.8.3_ORBBEC_RECONNECT_WEB_SNAPSHOT_FIX.md`。
+> M33.1：服务端标注器新增 SAM 智能框选，支持用粗框生成可编辑的 segmentation 多边形；同时修正少样本快速学习的嵌套掩膜、掩膜分辨率和批量预标注参数。详见 `docs/M33.1_SAM_ASSISTED_ANNOTATION.md`。
 
 ## 1. 项目定位
 
@@ -50,7 +50,7 @@ visionops_v3/
 
 ### `apps/server_api`
 
-负责服务端上传包接收、标注审核、数据集构建、训练任务、模型包发布和设备部署。
+负责服务端上传包接收、标注审核、数据集构建、训练任务、模型包发布和设备部署。Segmentation 标注器可选使用 SAM 智能框选：用户只需粗框单个目标，服务端生成可编辑多边形；SAM 权重不进入仓库，默认从 `models/pretrained/sam2.1_s.pt` 或 `models/pretrained/mobile_sam.pt` 加载。
 
 ### `edge/runtime_cpp`
 

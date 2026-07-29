@@ -285,6 +285,10 @@ class ServerRequestHandler(BaseHTTPRequestHandler):
             job_id = path.rsplit("/", 1)[-1]
             self._send_json(200, service.jobs.get(service.quick_root(batch_id), job_id))
             return True
+        if path == "/api/annotator/sam/status":
+            self._require_batch_id()
+            self._send_json(200, service.sam_status(self._project_root()))
+            return True
         if path == "/api/annotator/classification/session":
             batch_id = self._require_batch_id()
             self._send_json(200, service.classification_info(batch_id))
@@ -350,6 +354,10 @@ class ServerRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/annotator/auto-label-remaining":
             batch_id = self._require_batch_id()
             self._send_json(200, service.start_auto_label(batch_id, self._read_json_body(default={}), self._project_root()))
+            return True
+        if path == "/api/annotator/sam/predict-box":
+            batch_id = self._require_batch_id()
+            self._send_json(200, service.sam_predict_box(batch_id, self._read_json_body(default={}), self._project_root()))
             return True
         if path == "/api/annotator/roi-cls/classes":
             batch_id = self._require_batch_id()  # noqa: F841 - batch id keeps API scoped to current task.

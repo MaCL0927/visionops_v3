@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 from .ingest_service import BatchService
 from .label_io import list_images, parse_yolo_label, save_yolo_label
+from .sam_annotation_service import SamAnnotationEngine
 
 try:  # Pillow 是标注器读取尺寸/裁剪 ROI 的唯一额外依赖。
     from PIL import Image, ImageDraw
@@ -36,8 +37,16 @@ QUICK_DET_MODEL = os.environ.get("VISIONOPS_QUICK_DET_MODEL", "models/pretrained
 QUICK_OBB_MODEL = os.environ.get("VISIONOPS_QUICK_OBB_MODEL", "models/pretrained/yolov8n-obb.pt")
 QUICK_SEG_MODEL = os.environ.get("VISIONOPS_QUICK_SEG_MODEL", "models/pretrained/yolov8n-seg.pt")
 QUICK_YOLO_CMD = os.environ.get("VISIONOPS_QUICK_YOLO_CMD", "yolo")
-AUTO_LABEL_CONF = float(os.environ.get("VISIONOPS_QUICK_AUTO_CONF", "0.25"))
+AUTO_LABEL_CONF = float(os.environ.get("VISIONOPS_QUICK_AUTO_CONF", "0.15"))
+AUTO_LABEL_IOU = float(os.environ.get("VISIONOPS_QUICK_AUTO_IOU", "0.50"))
+AUTO_LABEL_MAX_DET = int(os.environ.get("VISIONOPS_QUICK_AUTO_MAX_DET", "300"))
 QUICK_TRAIN_MIN_PER_CLASS = int(os.environ.get("VISIONOPS_QUICK_TRAIN_MIN_PER_CLASS", "3"))
+QUICK_TRAIN_MIN_INSTANCES_PER_CLASS = int(os.environ.get("VISIONOPS_QUICK_TRAIN_MIN_INSTANCES_PER_CLASS", "10"))
+QUICK_SEG_OVERLAP_MASK = str(os.environ.get("VISIONOPS_QUICK_SEG_OVERLAP_MASK", "false")).strip().lower() in {"1", "true", "yes", "on"}
+QUICK_SEG_MASK_RATIO = max(1, int(os.environ.get("VISIONOPS_QUICK_SEG_MASK_RATIO", "2")))
+QUICK_SEG_RETINA_MASKS = str(os.environ.get("VISIONOPS_QUICK_SEG_RETINA_MASKS", "true")).strip().lower() in {"1", "true", "yes", "on"}
+QUICK_TRAIN_DEGREES = float(os.environ.get("VISIONOPS_QUICK_TRAIN_DEGREES", "12.0"))
+QUICK_TRAIN_AMP = str(os.environ.get("VISIONOPS_QUICK_TRAIN_AMP", "true")).strip().lower() in {"1", "true", "yes", "on"}
 ROI_CLS_DEFAULT_CONF = float(os.environ.get("VISIONOPS_ROI_CLS_DEFAULT_CONF", "0.35"))
 ROI_CLS_DEFAULT_PADDING = float(os.environ.get("VISIONOPS_ROI_CLS_DEFAULT_PADDING", "0.05"))
 ROI_CLS_DEFAULT_DET_MODEL = os.environ.get("VISIONOPS_ROI_CLS_DEFAULT_DET_MODEL", "models/checkpoints_detection/best.pt")
@@ -198,6 +207,7 @@ class AnnotationService:
         self.batch_service = batch_service
         self.data_root = Path(data_root)
         self.jobs = AnnotationJobManager()
+        self._sam_engine: SamAnnotationEngine | None = None
 
     # ----------------------------- batch paths -----------------------------
     def batch_dir(self, batch_id: str) -> Path:
@@ -506,6 +516,49 @@ class AnnotationService:
                 counts[cid] += 1
         return counts
 
+    def class_instance_counts(self, batch_id: str, num_classes: int) -> dict[int, int]:
+        counts = {i: 0 for i in range(num_classes)}
+        for label_path in self.labels_dir(batch_id).glob("*.txt"):
+            text = label_path.read_text(encoding="utf-8", errors="ignore").strip()
+            if not text:
+                continue
+            for line in text.splitlines():
+                parts = line.strip().split()
+                if not parts:
+                    continue
+                try:
+                    cid = int(float(parts[0]))
+                except Exception:
+                    continue
+                if 0 <= cid < num_classes:
+                    counts[cid] += 1
+        return counts
+
+    def _sam(self, project_root: Path) -> SamAnnotationEngine:
+        if self._sam_engine is None or self._sam_engine.project_root.resolve() != Path(project_root).resolve():
+            self._sam_engine = SamAnnotationEngine(project_root)
+        return self._sam_engine
+
+    def sam_status(self, project_root: Path) -> dict[str, Any]:
+        return {"status": "ok", "sam": self._sam(project_root).status()}
+
+    def sam_predict_box(self, batch_id: str, payload: dict[str, Any], project_root: Path) -> dict[str, Any]:
+        if self.load_task(batch_id) != "segmentation":
+            raise ValueError("SAM 智能框选仅支持 Segmentation 任务")
+        filename = Path(str(payload.get("filename") or "")).name
+        if not filename:
+            raise ValueError("filename 不能为空")
+        image_path = self.images_dir(batch_id) / filename
+        if not image_path.is_file():
+            raise FileNotFoundError(f"图片不存在: {filename}")
+        bbox = payload.get("bbox")
+        if not isinstance(bbox, list):
+            raise ValueError("bbox 必须是 [x1,y1,x2,y2]")
+        width, height = self.image_size(image_path)
+        result = self._sam(project_root).predict_box(image_path, bbox, image_size=(width, height))
+        result.update({"filename": filename, "image_w": width, "image_h": height})
+        return result
+
     def _build_quick_dataset(self, batch_id: str, classes: list[str], task_type: str) -> tuple[Path, int]:
         images = list_images(self.images_dir(batch_id))
         labels_dir = self.labels_dir(batch_id)
@@ -514,10 +567,29 @@ class AnnotationService:
             raise RuntimeError(f"labels 下非空人工标注只有 {len(usable)} 张，至少需要 {QUICK_TRAIN_MIN_IMAGES} 张。")
         if not classes:
             raise RuntimeError("还没有类别信息，请先标注至少一个框并选择/新建类别。")
-        counts = self.class_image_counts(batch_id, len(classes))
-        insufficient = [f"{i}:{classes[i]}={counts.get(i, 0)}张" for i in range(len(classes)) if counts.get(i, 0) < QUICK_TRAIN_MIN_PER_CLASS]
-        if insufficient:
-            raise RuntimeError(f"快速学习前类别覆盖不足。请先为每个已创建类别至少人工确认 {QUICK_TRAIN_MIN_PER_CLASS} 张。当前不足: " + "，".join(insufficient))
+        image_counts = self.class_image_counts(batch_id, len(classes))
+        instance_counts = self.class_instance_counts(batch_id, len(classes))
+        insufficient_images = [
+            f"{i}:{classes[i]}={image_counts.get(i, 0)}张"
+            for i in range(len(classes))
+            if image_counts.get(i, 0) < QUICK_TRAIN_MIN_PER_CLASS
+        ]
+        insufficient_instances = [
+            f"{i}:{classes[i]}={instance_counts.get(i, 0)}个"
+            for i in range(len(classes))
+            if instance_counts.get(i, 0) < QUICK_TRAIN_MIN_INSTANCES_PER_CLASS
+        ]
+        if insufficient_images or insufficient_instances:
+            details: list[str] = []
+            if insufficient_images:
+                details.append(
+                    f"每类至少覆盖 {QUICK_TRAIN_MIN_PER_CLASS} 张图片，当前不足: " + "，".join(insufficient_images)
+                )
+            if insufficient_instances:
+                details.append(
+                    f"每类至少有 {QUICK_TRAIN_MIN_INSTANCES_PER_CLASS} 个实例，当前不足: " + "，".join(insufficient_instances)
+                )
+            raise RuntimeError("快速学习样本覆盖不足。" + "；".join(details))
         dataset_dir = self.quick_root(batch_id) / "dataset"
         if dataset_dir.exists():
             shutil.rmtree(dataset_dir)
@@ -578,15 +650,22 @@ class AnnotationService:
             shutil.rmtree(run_dir)
         runs_dir.mkdir(parents=True, exist_ok=True)
         update(25, f"开始快速学习，训练图片 {count} 张")
+        segmentation_args = ""
+        if yolo_task == "segment":
+            segmentation_args = (
+                f" overlap_mask={str(QUICK_SEG_OVERLAP_MASK)}"
+                f" mask_ratio={QUICK_SEG_MASK_RATIO}"
+            )
         cmd = (
             f"{shlex.quote(QUICK_YOLO_CMD)} {yolo_task} train "
             f"model={shlex.quote(model)} "
             f"data={shlex.quote(str(data_yaml))} "
             f"epochs={QUICK_TRAIN_EPOCHS} imgsz={QUICK_TRAIN_IMGSZ} batch={QUICK_TRAIN_BATCH} "
-            f"mosaic=0.0 mixup=0.0 copy_paste=0.0 degrees=0.0 perspective=0.0 "
-            f"translate=0.02 scale=0.5 fliplr=0.5 hsv_h=0.015 hsv_s=0.7 hsv_v=0.4 "
-            f"patience=20 amp=False "
+            f"mosaic=0.0 mixup=0.0 copy_paste=0.0 degrees={QUICK_TRAIN_DEGREES} perspective=0.0 "
+            f"translate=0.05 scale=0.35 fliplr=0.5 flipud=0.1 hsv_h=0.01 hsv_s=0.35 hsv_v=0.25 "
+            f"patience=25 amp={str(QUICK_TRAIN_AMP)} cache=ram "
             f"project={shlex.quote(str(runs_dir))} name={shlex.quote(run_name)} exist_ok=True"
+            f"{segmentation_args}"
         )
         self._run_shell(cmd, log_file, project_root)
         update(90, "正在整理快速学习模型")
@@ -595,7 +674,16 @@ class AnnotationService:
             raise RuntimeError("快速学习完成，但没有找到 best.pt")
         state_path = self.quick_root(batch_id) / "quick_state.json"
         state = _read_json(state_path, {}) or {}
-        state["quick_train"] = {"task_type": task, "model_path": str(best), "train_images": count, "updated_at": _now_text()}
+        state["quick_train"] = {
+            "task_type": task,
+            "model_path": str(best),
+            "train_images": count,
+            "updated_at": _now_text(),
+            "segmentation": {
+                "overlap_mask": QUICK_SEG_OVERLAP_MASK,
+                "mask_ratio": QUICK_SEG_MASK_RATIO,
+            } if yolo_task == "segment" else {},
+        }
         _write_json(state_path, state)
         return {"message": "快速学习完成", "model_path": str(best), "train_images": count}
 
@@ -635,7 +723,9 @@ class AnnotationService:
         update(30, "正在用快速学习模型预标注剩余图片")
         cmd = (
             f"{shlex.quote(QUICK_YOLO_CMD)} {yolo_task} predict model={shlex.quote(str(model_abs))} source={shlex.quote(str(source_dir))} "
-            f"imgsz={QUICK_TRAIN_IMGSZ} conf={AUTO_LABEL_CONF} save_txt=True save_conf=False "
+            f"imgsz={QUICK_TRAIN_IMGSZ} conf={AUTO_LABEL_CONF} iou={AUTO_LABEL_IOU} max_det={AUTO_LABEL_MAX_DET} "
+            f"save_txt=True save_conf=False "
+            f"retina_masks={str(QUICK_SEG_RETINA_MASKS) if yolo_task == 'segment' else 'False'} "
             f"project={shlex.quote(str(pred_root))} name={shlex.quote(run_name)} exist_ok=True"
         )
         self._run_shell(cmd, log_file, project_root)

@@ -22,7 +22,9 @@
     button.dark { background:#111827; }
     button.green { background:#059669; }
     button.orange { background:#d97706; }
+    button.violet { background:#7c3aed; }
     button.gray { background:#e5e7eb; color:#111827; }
+    button:disabled { opacity:.55; cursor:not-allowed; }
     button.big { width:100%; padding:14px 14px; font-size:16px; border-radius:12px; }
     select, input { background:#f3f4f6; color:#111827; width:100%; }
     .row { display:flex; gap:7px; flex-wrap:wrap; margin:9px 0; }
@@ -94,7 +96,10 @@
     .roi-class-card { background:#f8fafc; border:1px solid #e5e7eb; border-radius:14px; padding:14px; margin-bottom:14px; }
     .progress { height:14px; background:#e5e7eb; border-radius:999px; overflow:hidden; margin-top:10px; }
     .progress-inner { height:100%; width:0%; background:#2563eb; transition:width .3s ease; }
-    .quick-msg { margin-top:8px; font-size:12px; color:#475569; line-height:1.45; }
+    .quick-msg { margin-top:8px; font-size:12px; color:#475569; line-height:1.45; white-space:pre-wrap; }
+    .sam-status { margin:8px 0 12px; padding:9px 10px; border-radius:10px; border:1px solid #ddd6fe; background:#f5f3ff; color:#5b21b6; font-size:12px; line-height:1.5; white-space:pre-wrap; }
+    .sam-status.error { border-color:#fecaca; background:#fef2f2; color:#b91c1c; }
+    .sam-status.active { border-color:#a7f3d0; background:#ecfdf5; color:#047857; }
     .modal-mask { display:none; position:fixed; inset:0; background:rgba(15,23,42,.45); z-index:10; align-items:center; justify-content:center; }
     .modal { width:420px; background:#fff; border-radius:16px; padding:18px; box-shadow:0 20px 60px rgba(15,23,42,.3); }
 
@@ -207,13 +212,23 @@
       </div>
 
       <div class="hint hide-for-classification">
-        A/D：上一张/下一张。W：开始标注。Q：删除。S：保存。E：确认自动标注。Esc：取消。<br>
+        A/D：上一张/下一张。W：手动画标注。R：SAM 智能框选。Q：删除。S：保存。E：确认自动标注。Esc：取消。<br>
         Detection：W 后拖拽矩形框。OBB：W 后依次点击 4 个角点。Segmentation：W 后依次点击多边形点，双击或 Enter 完成。鼠标滚轮缩放。<br>
         人工标注保存到 labels；模型预标注保存到 labels_auto。
       </div>
 
       <div class="assist-panel hide-for-classification">
-        <h3>模型辅助</h3>
+        <h3>智能标注</h3>
+        <div class="hint">推荐先使用 SAM 智能框选：只需粗略框住一个目标，系统自动生成多边形，再选择 foam_ring 或 ring_mouth。该功能不依赖当前 batch 的少量训练样本。</div>
+        <div style="height:10px"></div>
+        <div class="muted">SAM 生成后使用的类别</div>
+        <select id="samClassSelect"><option value="">每次弹窗选择类别</option></select>
+        <div style="height:8px"></div>
+        <button id="samBoxButton" class="violet big" onclick="toggleSamBoxMode()">R SAM 智能框选</button>
+        <div id="samStatus" class="sam-status">SAM 状态：正在检查...</div>
+        <h3>快速学习与批量预标注</h3>
+        <div class="hint">快速学习仍用于批量处理。M33.1 已针对嵌套分割标签关闭 overlap_mask，并提高掩膜分辨率；建议先用 SAM 辅助完成至少 5～10 张多样化图片。</div>
+        <div style="height:10px"></div>
         <button class="green big" onclick="quickTrain()">快速学习</button>
         <div style="height:10px"></div>
         <button class="orange big" onclick="autoLabelRemaining()">预标注剩余图片</button>
@@ -384,6 +399,12 @@ let pendingAnnotation = null;
 let baseScale = 1, zoom = 1, scale = 1, offsetX = 0, offsetY = 0;
 let mouseCanvas = null;
 let quickJobTimer = null;
+let samBoxMode = false;
+let samDragging = false;
+let samStartPt = null;
+let samTempPt = null;
+let samBusy = false;
+let samAvailable = false;
 let roiJobTimer = null;
 let roiInfo = null;
 let roiSession = null;
@@ -525,6 +546,7 @@ async function init() {
   if ((session.total || 0) > 0) await loadImage(0);
   else showClassificationEmpty(isClassificationTask());
   await loadRoiClsInfo();
+  await loadSamStatus();
 }
 
 async function refreshSession() {
@@ -537,8 +559,17 @@ async function refreshSession() {
   }
 }
 
+function renderSamClassOptions() {
+  const select = document.getElementById('samClassSelect');
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = '<option value="">每次弹窗选择类别</option>' + classes.map((name, i) => `<option value="${i}">${i}: ${name}</option>`).join('');
+  if ([...select.options].some(option => option.value === previous)) select.value = previous;
+}
+
 function renderClassSummary() {
   const el = document.getElementById('classSummary');
+  renderSamClassOptions();
   if (isClassificationTask()) {
     el.textContent = classes.length ? classes.map((n, i) => `${i}: ${n}`).join('，') : '还没有分类类别，请先新增类别。';
   } else {
@@ -599,6 +630,7 @@ async function loadImage(index) {
   obbPoints = [];
   segPoints = [];
   pendingAnnotation = null;
+  cancelSamBoxMode(false);
   mouseCanvas = null;
   resetEditState();
   zoom = 1;
@@ -874,6 +906,7 @@ function draw() {
   if (img && img.naturalWidth) ctx.drawImage(img, offsetX, offsetY, img.naturalWidth*scale, img.naturalHeight*scale);
   annotations.forEach((ann,i)=>drawAnn(ann, i===selectedIndex));
   if (dragging && startPt && tempPt) drawAnn({type:'bbox', class_id:-1, x1:startPt.x, y1:startPt.y, x2:tempPt.x, y2:tempPt.y}, true, true);
+  if (samDragging && samStartPt && samTempPt) drawAnn({type:'bbox', class_id:-1, x1:samStartPt.x, y1:samStartPt.y, x2:samTempPt.x, y2:samTempPt.y}, true, true);
   if (obbPoints.length) drawAnn({type:'obb', class_id:-1, points:obbPoints}, true, true);
   if (segPoints.length) drawAnn({type:'segmentation', class_id:-1, points:segPoints}, true, true);
   if (drawingMode && mouseCanvas) drawCrosshair(mouseCanvas.x, mouseCanvas.y);
@@ -935,6 +968,7 @@ function markDirty(){
 }
 function startDraw(){
   if (isClassificationTask()) { alert('Classification 分类任务不需要画框，请点击类别按钮把当前图片移动到对应类别文件夹。'); return; }
+  cancelSamBoxMode(false);
   resetEditState();
   selectedIndex=-1;
   drawingMode=true; dragging=false; startPt=null; tempPt=null; obbPoints=[]; segPoints=[]; pendingAnnotation=null;
@@ -949,6 +983,7 @@ function stopDraw(){
   draw();
 }
 async function onTaskChange(){
+  cancelSamBoxMode(false);
   stopDraw();
   await fetch(withBatch('/api/annotator/task'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_type:currentTask()})});
   await refreshSession();
@@ -957,6 +992,131 @@ async function onTaskChange(){
   if ((session.total || 0) > 0) await loadImage(Math.min(currentIndex, session.total - 1));
   else showClassificationEmpty(isClassificationTask());
 }
+async function loadSamStatus() {
+  const el = document.getElementById('samStatus');
+  const button = document.getElementById('samBoxButton');
+  if (!el || !button) return;
+  try {
+    const res = await fetch(withBatch('/api/annotator/sam/status'));
+    const data = await res.json();
+    const sam = data.sam || {};
+    samAvailable = !!sam.available;
+    button.disabled = !samAvailable;
+    el.className = samAvailable ? 'sam-status' : 'sam-status error';
+    if (samAvailable) {
+      el.textContent = `SAM 已就绪：${sam.model_source || '-'}
+设备：${sam.device || 'auto'}；首次使用会加载模型。`;
+    } else {
+      const candidates = Array.isArray(sam.model_candidates) ? sam.model_candidates.join('，') : '-';
+      const reasons = [];
+      if (!sam.ultralytics_installed) reasons.push('服务端环境未安装 ultralytics');
+      if (!sam.model_source) reasons.push('未找到 SAM 权重');
+      el.textContent = `SAM 暂不可用：${reasons.join('；') || '配置不完整'}
+候选位置：${candidates}`;
+    }
+  } catch (error) {
+    samAvailable = false;
+    button.disabled = true;
+    el.className = 'sam-status error';
+    el.textContent = 'SAM 状态读取失败：' + error;
+  }
+}
+
+function updateSamUi(message='', isError=false) {
+  const button = document.getElementById('samBoxButton');
+  const el = document.getElementById('samStatus');
+  if (button) button.textContent = samBoxMode ? '退出 SAM 智能框选' : 'R SAM 智能框选';
+  if (el && message) {
+    el.className = isError ? 'sam-status error' : (samBoxMode ? 'sam-status active' : 'sam-status');
+    el.textContent = message;
+  }
+}
+
+function cancelSamBoxMode(redraw=true) {
+  samBoxMode = false;
+  samDragging = false;
+  samStartPt = null;
+  samTempPt = null;
+  if (!drawingMode) canvas.classList.remove('draw-ready');
+  if (!drawingMode) canvas.style.cursor = 'default';
+  const button = document.getElementById('samBoxButton');
+  if (button) button.textContent = 'R SAM 智能框选';
+  if (redraw) draw();
+}
+
+async function toggleSamBoxMode() {
+  if (samBoxMode) {
+    cancelSamBoxMode();
+    await loadSamStatus();
+    return;
+  }
+  if (currentTask() !== 'segmentation') {
+    alert('SAM 智能框选仅用于 Segmentation 多边形任务。');
+    return;
+  }
+  if (!samAvailable) {
+    await loadSamStatus();
+    if (!samAvailable) return;
+  }
+  stopDraw();
+  resetEditState();
+  selectedIndex = -1;
+  samBoxMode = true;
+  samDragging = false;
+  canvas.classList.add('draw-ready');
+  canvas.style.cursor = 'crosshair';
+  updateSamUi('SAM 智能框选已开启。拖拽一个略大于目标的矩形框，等待自动生成多边形。');
+  renderBoxList();
+  draw();
+}
+
+async function runSamBoxPrompt(start, end) {
+  if (!currentMeta || samBusy) return;
+  const bbox = [Math.min(start.x,end.x), Math.min(start.y,end.y), Math.max(start.x,end.x), Math.max(start.y,end.y)];
+  if (bbox[2]-bbox[0] < 4 || bbox[3]-bbox[1] < 4) {
+    updateSamUi('提示框过小，请重新框选完整目标。', true);
+    return;
+  }
+  samBusy = true;
+  const button = document.getElementById('samBoxButton');
+  if (button) button.disabled = true;
+  updateSamUi('SAM 正在生成目标轮廓，首次加载模型可能需要数秒...');
+  try {
+    const res = await fetch(withBatch('/api/annotator/sam/predict-box'), {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({filename: currentMeta.filename, bbox})
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || data.detail || 'SAM 预测失败');
+    if (!Array.isArray(data.polygon) || data.polygon.length < 3) throw new Error('SAM 返回的多边形无效');
+    pendingAnnotation = {type:'segmentation', class_id:-1, points:data.polygon};
+    const classSelect = document.getElementById('samClassSelect');
+    const selectedClass = classSelect && classSelect.value !== '' ? Number(classSelect.value) : -1;
+    if (Number.isInteger(selectedClass) && selectedClass >= 0 && selectedClass < classes.length) {
+      pendingAnnotation.class_id = selectedClass;
+      annotations.push(pendingAnnotation);
+      selectedIndex = annotations.length - 1;
+      pendingAnnotation = null;
+      markDirty();
+      renderBoxList();
+      updateSamUi(`SAM 已生成 ${data.point_count || data.polygon.length} 个轮廓点，并添加为 ${selectedClass}: ${classes[selectedClass]}。可继续框选下一个目标。`);
+    } else {
+      updateSamUi(`SAM 已生成 ${data.point_count || data.polygon.length} 个轮廓点。请选择类别；选择后可继续框选下一个目标。`);
+      openClassModal(pendingAnnotation);
+    }
+  } catch (error) {
+    updateSamUi('SAM 预测失败：' + (error.message || error), true);
+  } finally {
+    samBusy = false;
+    if (button) button.disabled = !samAvailable;
+    samDragging = false;
+    samStartPt = null;
+    samTempPt = null;
+    draw();
+  }
+}
+
 function finishSegmentationPolygon(){
   if (currentTask() !== 'segmentation' || segPoints.length < 3) { return; }
   pendingAnnotation={type:'segmentation', class_id:-1, points:segPoints.map(p=>[p[0],p[1]])};
@@ -967,6 +1127,15 @@ canvas.addEventListener('mousedown', e => {
   // 左键编辑，避免右键/中键误触。
   if (e.button !== 0) return;
   const p = toImgPt(e);
+
+  // 0. SAM 智能框选：拖拽粗框，不进入普通标注编辑。
+  if (samBoxMode && !samBusy) {
+    samDragging = true;
+    samStartPt = p;
+    samTempPt = p;
+    draw();
+    return;
+  }
 
   // 1. W 开始标注后的新建标注逻辑。
   if (drawingMode) {
@@ -1015,6 +1184,12 @@ canvas.addEventListener('mousemove', e => {
   mouseCanvas = toCanvasPt(e);
   const p = toImgPt(e);
 
+  if (samDragging) {
+    samTempPt = p;
+    draw();
+    return;
+  }
+
   if (dragging) {
     tempPt = p;
     draw();
@@ -1055,17 +1230,27 @@ canvas.addEventListener('mousemove', e => {
     }
   }
 
-  if (!drawingMode) canvas.style.cursor = cursorForHit(hitTestAnn(p));
-  if (drawingMode) draw();
+  if (!drawingMode && !samBoxMode) canvas.style.cursor = cursorForHit(hitTestAnn(p));
+  if (drawingMode || samBoxMode) draw();
 });
 
 canvas.addEventListener('mouseleave', () => {
   mouseCanvas=null;
-  if (!editMode) canvas.style.cursor = drawingMode ? 'crosshair' : 'default';
-  if (drawingMode || dragging || editMode) draw();
+  if (!editMode) canvas.style.cursor = (drawingMode || samBoxMode) ? 'crosshair' : 'default';
+  if (drawingMode || samBoxMode || dragging || samDragging || editMode) draw();
 });
 
 function handleCanvasMouseUp(e) {
+  // 0. 结束 SAM 粗框并请求掩膜。
+  if (samDragging && samStartPt) {
+    const start = samStartPt;
+    const end = toImgPt(e);
+    samTempPt = end;
+    samDragging = false;
+    runSamBoxPrompt(start, end);
+    return;
+  }
+
   // 1. 结束已有标注编辑。
   if (editMode) {
     const changed = editHasChanged;
@@ -1084,7 +1269,7 @@ function handleCanvasMouseUp(e) {
   } else { dragging=false; draw(); }
 }
 canvas.addEventListener('mouseup', handleCanvasMouseUp);
-window.addEventListener('mouseup', e => { if (editMode) handleCanvasMouseUp(e); });
+window.addEventListener('mouseup', e => { if (editMode || samDragging) handleCanvasMouseUp(e); });
 canvas.addEventListener('wheel', e => {
   e.preventDefault(); if (!img || !img.naturalWidth) return;
   const p = toCanvasPt(e); const before = toImgPtFromCanvas(p); const factor = e.deltaY < 0 ? 1.12 : 0.89;
@@ -1677,11 +1862,12 @@ window.addEventListener('keydown', async e => {
   if(k==='a') await prevImage();
   if(k==='d') await nextImage();
   if(k==='w') startDraw();
+  if(k==='r') await toggleSamBoxMode();
   if(k==='s') await saveCurrent(true);
   if(k==='q') deleteSelected();
   if(k==='e') await confirmAutoLabel();
   if(k==='enter') finishSegmentationPolygon();
-  if(k==='escape'){ pendingAnnotation=null; closeClassModal(); closeRoiModal(); stopDraw(); }
+  if(k==='escape'){ pendingAnnotation=null; closeClassModal(); closeRoiModal(); cancelSamBoxMode(false); stopDraw(); }
 });
 window.addEventListener('resize', resizeCanvas);
 init();
