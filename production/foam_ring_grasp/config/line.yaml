@@ -1,0 +1,411 @@
+schema_version: "6.0"
+task: foam_ring_rim_pinch_m35_2_pregrasp_motion_sweep
+
+classes:
+  foam_ring: foam_ring
+  ring_mouth: ring_mouth
+
+inference:
+  confidence: 0.20
+  iou: 0.50
+  image_size: 640
+  max_detections: 300
+  retina_masks: true
+  device: auto
+
+association:
+  # Reuse the robust lesson from the first M34 experiments: PT/RKNN can split
+  # one physical ring into several visible components. Pair the mouth against a
+  # filled envelope instead of requiring raw-mask overlap.
+  use_filled_outer_envelope: true
+  envelope_close_px: 3
+  envelope_dilate_px: 4
+  minimum_component_area_ratio: 0.03
+  minimum_envelope_containment: 0.55
+  minimum_center_inside: true
+  maximum_normalized_center_distance: 0.55
+  minimum_mouth_to_ring_area_ratio: 0.025
+  maximum_mouth_to_ring_area_ratio: 0.70
+
+  fallback_bbox_enabled: true
+  fallback_bbox_expand_px: 10
+  fallback_minimum_containment: 0.30
+  fallback_maximum_normalized_center_distance: 0.70
+  fallback_score_penalty: 0.30
+
+depth:
+  minimum_mm: 150
+  maximum_mm: 3000
+  mask_erode_px: 2
+  mouth_exclusion_px: 2
+  front_band_expand_ratio: 0.40
+  minimum_front_band_px: 6
+  maximum_front_band_px: 26
+  minimum_valid_points: 80
+
+  # Local depth check for each clock position. It is only a stage-1 warning;
+  # M34_new does not claim complete gripper/body collision safety.
+  local_obstacle_margin_mm: 8.0
+  maximum_front_obstacle_ratio: 0.18
+  local_obstacle_observable_max_tilt_deg: 25.0
+
+plane:
+  ransac_iterations: 420
+  inlier_threshold_mm: 5.0
+  minimum_inlier_ratio: 0.34
+  random_seed: 3401
+  refine_with_svd: true
+
+pose:
+  # The foam rim is rounded. Use the mouth ellipse to stabilize the ring axis
+  # when the largest RANSAC plane is a tangent patch or side wall.
+  normal_mode: auto
+  trust_depth_plane_min_inlier_ratio: 0.82
+  trust_depth_plane_max_residual_p95_mm: 4.0
+  trust_depth_plane_max_disagreement_deg: 12.0
+  ellipse_azimuth_ambiguous_below_deg: 8.0
+
+  # When both cues say the mouth is nearly frontal, a low-tilt depth plane is
+  # more stable than the fitted ellipse azimuth. This avoids visibly skewed
+  # axes on almost circular mouths.
+  near_frontal_depth_override_enabled: true
+  near_frontal_max_ellipse_tilt_deg: 28.0
+  near_frontal_max_depth_tilt_deg: 20.0
+  near_frontal_min_depth_inlier_ratio: 0.25
+  near_frontal_max_depth_residual_p95_mm: 8.0
+
+  boundary_inner_ratio: 0.95
+  boundary_outer_ratio: 1.35
+  minimum_boundary_support_points: 40
+  stabilized_inlier_threshold_mm: 8.0
+  depth_direction_tiebreak_weight: 0.15
+  normal_disagreement_warning_deg: 20.0
+
+object_geometry:
+  # New measured foam-ring dimensions. The local RGB-D estimate remains the
+  # primary value; these nominal values are used for plausibility checks.
+  nominal_inner_diameter_mm: 60.0
+  nominal_outer_diameter_mm: 85.0
+  nominal_wall_thickness_mm: 14.0
+  axial_length_mm: 70.0
+  minimum_inner_diameter_mm: 50.0
+  maximum_inner_diameter_mm: 70.0
+  minimum_wall_thickness_mm: 10.0
+  maximum_wall_thickness_mm: 17.0
+  maximum_outer_search_radius_ratio: 1.35
+  maximum_ring_mask_gap_px: 2
+  physical_size_hard_reject: false
+
+gripper:
+  # One finger enters the mouth and the other remains outside. The gripper then
+  # closes and pinches one local section of the foam wall.
+  mode: rim_pinch
+
+  # M34 local finger sweep now follows the newest measured moving-finger
+  # envelope: 16 mm in the closing direction and 20 mm laterally.
+  finger_thickness_mm: 16.0
+  finger_width_mm: 20.0
+
+  # Measured distance between the two inward-facing finger surfaces.
+  opening_reference: inner_gap
+  minimum_opening_mm: 10.0
+  maximum_opening_mm: 75.0
+  # Closing near the mechanical minimum is allowed for a soft foam wall.
+  # The desired gap is clamped to the usable mechanical range, then the actual
+  # compression is checked. Keep the approach opening farther from the limit.
+  closing_limit_margin_mm: 0.5
+  approach_limit_margin_mm: 3.0
+
+  # Desired compression per side and the acceptable actual range after the
+  # command gap is clamped to the gripper's physical opening range.
+  wall_compression_mm: 1.5
+  minimum_contact_compression_mm: 0.5
+  maximum_contact_compression_mm: 3.0
+
+  # The fingers straddle the wall while open, descend below the front rim, then
+  # close. 15-25 mm is a practical tuning range; start at 20 mm.
+  rim_insert_depth_mm: 20.0
+  pregrasp_offset_mm: 90.0
+  preopen_clearance_mm: 6.0
+
+  # Twelve fixed clock positions: 12, 1, ..., 11 o'clock.
+  clock_position_count: 12
+  clock_zero: image_up
+  clock_direction: clockwise
+
+  geometry_candidate_max_tilt_deg: 45.0
+  robot_safe_max_tilt_deg: 30.0
+  top_layer_tolerance_mm: 15.0
+
+# M35.1 measured complete end-effector geometry. The local origin used by the
+# model is the midpoint between the two fingertips at the final inserted pose;
+# +X is closing, +Y is lateral, and +Z points toward the object. Upstream parts
+# therefore have negative local Z.
+gripper_geometry_3d:
+  frame_origin: fingertip_midpoint_at_final_inserted_pose
+  opening_reference: inner_contact_surface_gap
+
+  contact_block:
+    width_x_mm: 15.0
+    thickness_y_mm: 20.0
+    length_z_mm: 35.0
+    intended_ring_engagement_mm: 20.0
+
+  moving_finger:
+    pivot_to_tip_mm: 90.0
+    width_x_mm: 16.0
+    thickness_y_mm: 20.0
+
+  finger_kinematics:
+    mode: symmetric_pivot_arc
+    pivot_center_separation_mm: 36.0
+    pivot_center_from_disk_lower_mm: 55.0
+    measured_minimum_gap_mm: 10.0
+    measured_maximum_gap_mm: 75.0
+
+  palm:
+    length_z_mm: 60.0
+    width_x_mm: 50.0
+    thickness_y_mm: 35.0
+
+  mounting_disk:
+    diameter_mm: 70.0
+    length_z_mm: 20.0
+    disk_lower_to_tip_nominal_mm: 145.0
+    disk_upper_to_tip_nominal_mm: 165.0
+
+  pneumatic_fitting:
+    enabled: true
+    axis: positive_x
+    center_from_disk_lower_mm: 25.0
+    protrusion_length_mm: 30.0
+    diameter_mm: 10.0
+    count: 2
+    center_spacing_y_mm: 20.0
+
+  robot_wrist:
+    enabled: true
+    diameter_mm: 100.0
+    length_z_mm: 200.0
+
+# M35.1-compatible final closed-pose check. M35.2 retains this fast final
+# validation and adds the complete motion from pregrasp until the wall is pinched.
+full_gripper_static_collision:
+  enabled: true
+  static_final_pose_only: true
+
+  obb_surface_resolution: 4
+  cylinder_radial_samples: 24
+  cylinder_axial_samples: 5
+  front_entry_tolerance_mm: 2.0
+
+  # Extra modelling/measurement margin added on top of the calibrated box
+  # model's wall-specific margins. The wrist is approximate, so it is largest.
+  component_extra_margin_mm:
+    contact_block: 2.0
+    moving_finger: 4.0
+    palm: 6.0
+    mounting_disk: 8.0
+    pneumatic_fitting: 8.0
+    robot_wrist: 10.0
+
+  minimum_points_per_instance: 12
+  minimum_collision_points: 4
+  intersection_tolerance_mm: 1.5
+  minimum_clearance_mm: 4.0
+
+  hard_reject_box_intersection: false
+  hard_reject_box_clearance: false
+  hard_reject_neighbor_intersection: true
+  hard_reject_neighbor_clearance: true
+  hard_reject_neighbor_unknown: false
+  hard_reject_on_unconfigured: true
+
+  include_instance_checks_in_json: false
+  include_component_details_in_json: false
+  score_weight: 0.20
+  score_saturation_mm: 40.0
+
+# M35.2 checks the complete end effector only until the target wall has been
+# pinched. Post-grasp lift/transport is intentionally omitted: the next grasp
+# cycle will acquire a new RGB-D frame and re-plan from the changed scene.
+full_gripper_motion_collision:
+  enabled: true
+  motion_scope: pregrasp_to_grasp_only
+  check_post_grasp_lift: false
+
+  # Start at the configured pregrasp point with a small opening, open near the
+  # target, approach the rim while open, insert, then close on the foam wall.
+  travel_opening_mm: 10.5
+  open_start_offset_mm: 25.0
+
+  travel_sample_count: 7
+  open_sample_count: 6
+  approach_sample_count: 7
+  insert_sample_count: 5
+  close_sample_count: 7
+
+  # Dynamic checks reuse the measured geometry, component margins and depth
+  # collision thresholds from full_gripper_static_collision unless overridden.
+  obb_surface_resolution: 3
+  cylinder_radial_samples: 16
+  cylinder_axial_samples: 4
+  front_entry_tolerance_mm: 2.0
+  minimum_points_per_instance: 12
+  minimum_collision_points: 4
+  intersection_tolerance_mm: 1.5
+  minimum_clearance_mm: 4.0
+
+  hard_reject_box_intersection: false
+  hard_reject_box_clearance: false
+  hard_reject_neighbor_intersection: true
+  hard_reject_neighbor_clearance: true
+  hard_reject_neighbor_unknown: false
+  hard_reject_on_unconfigured: true
+
+  # Skip expensive path sampling when an earlier local/static hard condition has
+  # already rejected the clock point. Stop at the first confirmed path hazard.
+  skip_if_prerequisite_failed: true
+  stop_on_first_hard_reject: true
+
+  include_pose_details_in_json: false
+  include_pose_component_details_in_json: false
+  score_weight: 0.20
+  score_saturation_mm: 40.0
+
+box_wall:
+  # M34_new.4 uses a calibrated 3-D cuboid in camera optical coordinates.
+  # The front opening is not a wall; side/top/bottom/rear planes become active
+  # only after a swept finger volume enters the box-local Z >= 0 region.
+  enabled: true
+  model: calibrated_3d_cuboid
+  calibration_file: box_model.json
+  hard_reject: false
+
+  # Reject use of a stale model when ROI resolution or camera intrinsics change.
+  resolution_tolerance_px: 0
+  intrinsics_relative_tolerance: 0.02
+
+  # Sample finger cross-section corners along approach, insertion and closing.
+  sweep_sample_count: 18
+  front_entry_tolerance_mm: 2.0
+
+  # Clearance participates in clock-position scoring after hard collision checks.
+  score_saturation_mm: 35.0
+
+  # Legacy 2-D polygon mode is intentionally disabled. Recalibrate the 3-D
+  # model if the camera, ROI, or box fixture moves.
+  fallback_2d_enabled: false
+
+neighbor_3d:
+  # Use the aligned depth points of all other foam_ring instances instead of
+  # treating 2-D mask overlap as a physical collision.
+  enabled: true
+  minimum_depth_mm: 150
+  maximum_depth_mm: 3000
+
+  # Build visible per-instance point clouds. Excluding each matched ring_mouth
+  # prevents the background seen through a hole from becoming a fake obstacle.
+  mask_erode_px: 1
+  neighbor_mouth_exclusion_px: 1
+  point_stride: 2
+  minimum_points_per_instance: 12
+  minimum_total_points: 20
+  maximum_points_per_instance: 3000
+
+  # PT masks can overlap. If a neighbor-mask point agrees with the current
+  # target front-pose plane, regard it as duplicated target surface, not a
+  # separate obstacle.
+  target_surface_exclusion_enabled: true
+  target_surface_exclusion_dilate_px: 2
+  target_surface_exclusion_mm: 12.0
+
+  # Reject only when a small cluster, rather than one flying depth point,
+  # enters the finger volume. The K-th nearest point is also used for robust
+  # clearance.
+  minimum_collision_points: 4
+  intersection_tolerance_mm: 1.5
+  minimum_clearance_mm: 3.0
+  hard_reject_on_intersection: true
+  hard_reject_on_clearance: true
+  hard_reject_on_unknown: false
+
+  score_saturation_mm: 30.0
+  unknown_score: 0.35
+
+  # Full stage-by-instance checks are kept under _debug and stripped from the
+  # normal JSON. Set true only for detailed diagnosis because files grow fast.
+  include_instance_checks_in_json: false
+
+candidate:
+  # Local cross-section checks. These do not replace the next-stage full 3D
+  # swept-volume collision test of the fingers, palm and wrist.
+  minimum_inner_finger_mouth_containment: 0.65
+  # M34_new.4 keeps these 2-D metrics only for warnings/scoring diagnostics.
+  # The neighbor_3d section performs the hard collision decision.
+  maximum_other_ring_overlap_ratio: 0.10
+  neighbor_2d_overlap_mode: warning_only
+  minimum_image_border_margin_px: 3
+  minimum_neighbor_clearance_mm: 2.0
+  neighbor_2d_clearance_mode: warning_only
+  hard_reject_front_obstacle: false
+
+  score_weights:
+    box_wall_clearance: 0.22
+    inner_containment: 0.18
+    neighbor_clearance: 0.16
+    opening_margin: 0.14
+    local_depth_clearance: 0.10
+    lower_tilt: 0.10
+    segmentation_confidence: 0.06
+    image_border: 0.04
+
+quality:
+  minimum_depth_valid_ratio: 0.32
+  minimum_ellipse_points: 12
+  minimum_mouth_area_px: 80
+  minimum_ring_area_px: 300
+
+robot_interface:
+  # Optical-frame convention normally used by the aligned color image:
+  # +X right, +Y down, +Z forward.
+  camera_frame_id: camera_color_optical_frame
+  length_unit: mm
+  orientation_format: axes_rotation_matrix_quaternion
+
+  # Visual grasp frame:
+  #   +X: closing axis, from the inner finger/contact toward the outer one.
+  #   +Z: approach axis, from pregrasp toward the ring.
+  #   +Y: Z cross X, completing a right-handed frame.
+  closing_axis_name: x
+  approach_axis_name: z
+
+axis_direction:
+  # M35.4 diagnostic master switch. When false, skip fixed-length 3-D rod
+  # endpoint calculation, 2-D projection, overlay drawing and diagnostic JSON.
+  # The core pose normal remains enabled because grasp geometry depends on it.
+  enabled: true
+
+  # Total physical length of the centered 3-D rod before projection. Keeping
+  # this fixed makes the 2-D projected length reflect the ring tilt.
+  rod_length_mm: 80.0
+  minimum_projected_rod_px: 1.0
+
+  # Near end: solid red arrow/filled endpoint. Far end: cyan dashed line/open endpoint.
+  mask_alpha: 0.18
+  line_thickness: 3
+  far_dash_length_px: 9.0
+  far_gap_length_px: 6.0
+  endpoint_radius_px: 7
+  draw_vector_values: true
+  draw_depth_values: true
+
+output:
+  pointcloud_stride: 4
+  local_pointcloud_stride: 1
+  save_scene_pointcloud: true
+  save_local_pointclouds: true
+  save_depth_colormap: true
+  save_overlay: true
+  save_paired_axis_overlay: true
+  save_robot_candidate: true

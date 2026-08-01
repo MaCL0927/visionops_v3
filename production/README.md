@@ -23,3 +23,4 @@ production/<line_id>/
 - `carton_line/`：纸隔板、纸筒检测和纸筒抓取；
 - `carton_palletizing/`：纸箱码垛与箱体抓取；
 - `detergent_grasp/`：俯拍 OBB 洗衣液抓取和目标纸箱定位（M30.1）。
+- `foam_ring_grasp/`：M34_new 泡沫圆环 12 点位 `rim_pinch` 离线 RGB-D 几何验证。
