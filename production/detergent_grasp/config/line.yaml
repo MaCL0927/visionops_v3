@@ -2,7 +2,7 @@ schema_version: "1.0"
 task_id: detergent_grasp
 device_id: lb3576-detergent-grasp
 
-# 图像源仍由 Web“设置 → 相机设置”写入 config/active_camera.json。
+# 图像源仍由 Web“设置 → 相机设置”写入运行态 active_camera.json。
 # 当前任务建议选择 hp60c；如果现场使用 336L RGB，也无需改业务代码。
 camera_bridge:
   fps: 30
@@ -30,7 +30,7 @@ app:
   listen_host: 127.0.0.1
   listen_port: 19212
   request_timeout_ms: 5000
-  inference_settings_path: /opt/visionops_v3/config/detergent_grasp_inference_settings.json
+  inference_settings_path: /opt/visionops_v3/configs/runtime/generated/detergent_grasp_inference_settings.json
   default_production_inference_fps: 15.0
 
 collector:

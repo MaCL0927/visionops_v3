@@ -19,7 +19,7 @@ fi
 
 RUNTIME_SERVICE="${VISIONOPS_PICK_RUNTIME_SERVICE:-visionops-v3-runtime-pick.service}"
 RUNTIME_URL="${VISIONOPS_PICK_RUNTIME_URL:-http://127.0.0.1:28083}"
-SELECTION_FILE="${VISIONOPS_CAMERA_SELECTION_FILE:-/opt/visionops_v3/config/active_camera.json}"
+SELECTION_FILE="${VISIONOPS_CAMERA_SELECTION_FILE:-/opt/visionops_v3/configs/runtime/generated/active_camera.json}"
 active_camera="$(sed -nE 's/.*"active_camera"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$SELECTION_FILE" 2>/dev/null | head -n1)"
 if [[ "$active_camera" == "hp60c" ]]; then
   SELECTED_BRIDGE_SERVICE="visionops-hp60c-sdk-bridge.service"

@@ -11,7 +11,7 @@
 | Orbbec Gemini 336L | `visionops-orbbec336l-bridge.service` | 18182 | `http://127.0.0.1:18182` |
 | HP60C / HP60CN | `visionops-hp60c-sdk-bridge.service` | 18181 | `http://127.0.0.1:18181` |
 
-两款 Bridge 可以同时运行，但 VisionOps Runtime、采集、模型验证和生产任务统一使用 `config/active_camera.json` 中选中的一款相机。
+两款 Bridge 可以同时运行，但 VisionOps Runtime、采集、模型验证和生产任务统一使用运行态相机选择文件中选中的一款相机。默认路径为 `configs/runtime/generated/active_camera.json`，也可以通过 `VISIONOPS_CAMERA_SELECTION_FILE` 指向设备本地路径。
 
 ## 2. 图像切换原理
 
@@ -28,7 +28,7 @@ Web 页面不直接访问 18181 或 18182，而是始终请求当前 Runtime：
 
 1. 写入对应 Bridge 的 env；
 2. 重启并等待所选 Bridge 产生新 RGB/Depth 帧；
-3. Bridge 健康后更新 `config/active_camera.json`；
+3. Bridge 健康后更新运行态 `active_camera.json`；
 4. 重启所有正在运行的 Runtime；
 5. 重启依赖相机配置的产线服务，例如 `visionops-v3-ws-pick.service`、Robot Gateway 或托盘任务 App；
 6. 采集、模型验证和生产页面继续访问原有 Runtime URL，显示内容自动切换到新相机。
@@ -178,7 +178,7 @@ curl -s http://127.0.0.1:18181/health | python3 -m json.tool
 5. 检查：
 
 ```bash
-cat /opt/visionops_v3/config/active_camera.json
+cat /opt/visionops_v3/configs/runtime/generated/active_camera.json
 curl -s http://127.0.0.1:28083/api/runtime/status | python3 -m json.tool
 ```
 

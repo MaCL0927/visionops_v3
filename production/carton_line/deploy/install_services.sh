@@ -154,14 +154,18 @@ log_info "仓库目录: ${ROOT}"
 log_info "配置目录: ${CONFIG_DIR}"
 
 install -d -m 0755 "${CONFIG_DIR}" "${UNIT_DIR}"
-install -d -m 0775 "${ROOT}/config"
-if [[ ! -f "${ROOT}/config/active_camera.json" ]]; then
-  cat > "${ROOT}/config/active_camera.json" <<'EOF_CAMERA'
+CAMERA_SELECTION_FILE="${ROOT}/configs/runtime/generated/active_camera.json"
+OLD_CAMERA_SELECTION_FILE="${ROOT}/config/active_camera.json"
+install -d -m 0775 "$(dirname "${CAMERA_SELECTION_FILE}")"
+if [[ ! -f "${CAMERA_SELECTION_FILE}" && -f "${OLD_CAMERA_SELECTION_FILE}" ]]; then
+  install -m 0664 "${OLD_CAMERA_SELECTION_FILE}" "${CAMERA_SELECTION_FILE}"
+elif [[ ! -f "${CAMERA_SELECTION_FILE}" ]]; then
+  cat > "${CAMERA_SELECTION_FILE}" <<'EOF_CAMERA'
 {"schema_version":"1.0","active_camera":"orbbec336l"}
 EOF_CAMERA
 fi
-chmod 0664 "${ROOT}/config/active_camera.json" || true
-chown "${VISIONOPS_SERVICE_USER:-neardi}:${VISIONOPS_SERVICE_GROUP:-neardi}" "${ROOT}/config/active_camera.json" 2>/dev/null || true
+chmod 0664 "${CAMERA_SELECTION_FILE}" || true
+chown "${VISIONOPS_SERVICE_USER:-neardi}:${VISIONOPS_SERVICE_GROUP:-neardi}" "${CAMERA_SELECTION_FILE}" 2>/dev/null || true
 
 VENV_DIR="${VISIONOPS_VENV:-${ROOT}/venv}"
 PYTHON_BIN="${VENV_DIR}/bin/python3"
@@ -185,7 +189,7 @@ if [[ ! -f "${ENV_FILE}" ]]; then
 VISIONOPS_V3_ROOT=${ROOT}
 VISIONOPS_VENV=${ROOT}/venv
 VISIONOPS_CARTON_LINE_CONFIG=${LINE_CONFIG}
-VISIONOPS_CAMERA_SELECTION_FILE=${ROOT}/config/active_camera.json
+VISIONOPS_CAMERA_SELECTION_FILE=${CAMERA_SELECTION_FILE}
 VISIONOPS_PARTITION_MODEL_DIR=${ROOT}/models/carton_partition_check/current
 VISIONOPS_TUBE_MODEL_DIR=${ROOT}/models/carton_tube_check/current
 VISIONOPS_PICK_MODEL_DIR=${ROOT}/models/tube_pick_vision/current
@@ -218,6 +222,10 @@ if grep -q '^VISIONOPS_VENV=/opt/visionops/venv$' "${ENV_FILE}"; then
   sed -i "s|^VISIONOPS_VENV=/opt/visionops/venv\$|VISIONOPS_VENV=${ROOT}/venv|" "${ENV_FILE}"
   log_info "已迁移 VISIONOPS_VENV 到 ${ROOT}/venv"
 fi
+if grep -q '^VISIONOPS_CAMERA_SELECTION_FILE=.*/config/active_camera.json$' "${ENV_FILE}"; then
+  sed -i "s|^VISIONOPS_CAMERA_SELECTION_FILE=.*config/active_camera.json\$|VISIONOPS_CAMERA_SELECTION_FILE=${CAMERA_SELECTION_FILE}|" "${ENV_FILE}"
+  log_info "已迁移 VISIONOPS_CAMERA_SELECTION_FILE 到 ${CAMERA_SELECTION_FILE}"
+fi
 
 append_env_default() {
   local key="$1"
@@ -227,7 +235,7 @@ append_env_default() {
   fi
 }
 append_env_default VISIONOPS_PICK_RUNTIME_URL http://127.0.0.1:28083
-append_env_default VISIONOPS_CAMERA_SELECTION_FILE ${ROOT}/config/active_camera.json
+append_env_default VISIONOPS_CAMERA_SELECTION_FILE ${CAMERA_SELECTION_FILE}
 append_env_default VISIONOPS_PICK_RUNTIME_SERVICE visionops-v3-runtime-pick.service
 append_env_default VISIONOPS_PICK_WS_SERVICE visionops-v3-ws-pick.service
 append_env_default VISIONOPS_PICK_WATCHDOG_STALE_MS 5000

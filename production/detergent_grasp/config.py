@@ -55,7 +55,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "listen_host": "127.0.0.1",
         "listen_port": 19212,
         "request_timeout_ms": 5000,
-        "inference_settings_path": "/opt/visionops_v3/config/detergent_grasp_inference_settings.json",
+        "inference_settings_path": "/opt/visionops_v3/configs/runtime/generated/detergent_grasp_inference_settings.json",
         "default_production_inference_fps": 15.0,
     },
     "collector": {

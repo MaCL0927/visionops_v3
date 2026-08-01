@@ -164,7 +164,7 @@ GET  /api/app/registers
 - Collector 不直接保存真实模型或现场私密配置。
 - 浏览器侧刷新间隔、部分页面状态仍保存在 `localStorage`。
 - Orbbec Bridge 设置会写入对应 bridge env 并触发服务重启。
-- 视觉盒子设置会写入 `/opt/visionops_v3/config/vision_box_settings.json`。
+- 视觉盒子设置会写入 `/opt/visionops_v3/configs/runtime/generated/vision_box_settings.json`。
 - 算法阈值会写回当前模型目录下的 `model.yaml`。
 - M32.1 已完成边缘端采集 ROI；服务端继承 ROI 元数据和 Runtime 输入 ROI 仍属于后续阶段。
 
@@ -223,7 +223,7 @@ Collector Web 增加视觉盒子设置 API：
 curl -s http://127.0.0.1:18091/api/settings/vision_box | python3 -m json.tool
 ```
 
-配置默认保存到 `/opt/visionops_v3/config/vision_box_settings.json`，可通过 `VISIONOPS_VISION_BOX_SETTINGS_FILE` 覆盖。Runtime/Gateway/Business App URL、Device ID、目录和端口为启动参数/部署固定值，页面只展示；可写字段包括默认启动模式、状态刷新 FPS、磁盘告警阈值和服务端上传配置。
+配置默认保存到 `/opt/visionops_v3/configs/runtime/generated/vision_box_settings.json`，可通过 `VISIONOPS_VISION_BOX_SETTINGS_FILE` 覆盖。Runtime/Gateway/Business App URL、Device ID、目录和端口为启动参数/部署固定值，页面只展示；可写字段包括默认启动模式、状态刷新 FPS、磁盘告警阈值和服务端上传配置。
 
 ## 采集上传 API
 
@@ -432,7 +432,7 @@ Runtime 同时兼容历史 PyYAML 生成的 `pixel_xyxy` / `normalized_xyxy` 块
 
 生产页面显示“实际推理 FPS / 设定推理 FPS · 画面 FPS”；模型验证页也分别显示推理和
 画面 FPS。通用 Runtime 模式的统一推理 FPS 会持久化到
-`config/vision_box_settings.json`，不再只依赖浏览器 localStorage。完整说明见
+`configs/runtime/generated/vision_box_settings.json`，不再只依赖浏览器 localStorage。完整说明见
 `docs/M32.4.2_GENERIC_RUNTIME_FPS_DECOUPLING.md`。
 
 ## M32.8 同步 RGB-D 采集

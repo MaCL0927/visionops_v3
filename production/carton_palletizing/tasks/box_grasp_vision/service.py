@@ -672,7 +672,7 @@ class BoxGraspVisionService:
         self.inference_settings_path = Path(
             str(self.settings["app"].get(
                 "inference_settings_path",
-                "/opt/visionops_v3/config/box_grasp_inference_settings.json",
+                "/opt/visionops_v3/configs/runtime/generated/box_grasp_inference_settings.json",
             ))
         )
         self.production_fps_lock = threading.Lock()

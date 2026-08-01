@@ -7,7 +7,7 @@ HP60C/HP60CN uses the Angstrong SDK and runs independently from the Orbbec Gemin
 | HP60C / HP60CN | `visionops-hp60c-sdk-bridge.service` | `18181` |
 | Orbbec Gemini 336L | `visionops-orbbec336l-bridge.service` | `18182` |
 
-Both services may run concurrently. `config/active_camera.json` determines which bridge the Runtime and Web pages consume.
+Both services may run concurrently. The runtime-generated `configs/runtime/generated/active_camera.json` determines which bridge the Runtime and Web pages consume. `VISIONOPS_CAMERA_SELECTION_FILE` may point to another device-local path when needed.
 
 Endpoints: `/health`, `/stream/profiles`, `/stream/snapshot.jpg`, `/stream/depth.png`, `/stream/depth_vis.jpg`, `/stream/depth_meta`, `/stream.mjpeg`, `/stream/camera_info`.
 

@@ -242,7 +242,7 @@ DEFAULT_CONFIG["box_grasp"] = {
         "listen_host": "127.0.0.1",
         "listen_port": 19211,
         "request_timeout_ms": 5000,
-        "inference_settings_path": "/opt/visionops_v3/config/box_grasp_inference_settings.json",
+        "inference_settings_path": "/opt/visionops_v3/configs/runtime/generated/box_grasp_inference_settings.json",
     },
     "pipeline": {
         "enabled": True,
@@ -594,7 +594,7 @@ def _validate_box_grasp(config: Dict[str, Any]) -> None:
     if app["request_timeout_ms"] <= 0:
         raise ValueError("box_grasp.app.request_timeout_ms 必须大于0")
     app["inference_settings_path"] = _path(
-        app.get("inference_settings_path", "/opt/visionops_v3/config/box_grasp_inference_settings.json")
+        app.get("inference_settings_path", "/opt/visionops_v3/configs/runtime/generated/box_grasp_inference_settings.json")
     )
 
     pipeline = profile.get("pipeline")

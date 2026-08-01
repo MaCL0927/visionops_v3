@@ -140,6 +140,15 @@ yolo26n.pt
 - 保留 `models/pretrained/` 规范目录。
 - 防止 `models/pretrained/yolo26n.pt` 之外的同类权重被提交。
 
+补充整理：
+
+- 新增 `/config/` 忽略规则，避免设备本地运行态配置重新污染仓库根目录。
+- 将已跟踪的 `config/active_camera.json` 迁移为 `configs/runtime/active_camera.example.json`。
+- 运行态相机选择文件默认改为 `configs/runtime/generated/active_camera.json`，由 Collector Web 或部署脚本生成，仍可用 `VISIONOPS_CAMERA_SELECTION_FILE` 覆盖到 `/etc/visionops_v3/` 等设备本地路径。
+- 视觉盒子设置默认路径从 `config/vision_box_settings.json` 改为 `configs/runtime/generated/vision_box_settings.json`，仍可用 `VISIONOPS_VISION_BOX_SETTINGS_FILE` 覆盖。
+- 纸箱抓取和洗衣液抓取的运行态推理设置默认路径也迁到 `configs/runtime/generated/`，避免新部署再次创建根目录 `config/`。
+- 相关启动脚本、产线 env 示例和双相机文档已同步新路径。
+
 ## 8. 保留但疑似历史残留的文件
 
 以下内容保留，原因是它们仍可能作为任务文档、部署记录或硬件诊断依据：

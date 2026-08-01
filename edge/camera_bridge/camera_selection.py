@@ -1,8 +1,8 @@
 """Shared active-camera selection for VisionOps edge services.
 
 Both SDK bridges may stay online at the same time. The selected camera only decides
-which bridge URL Runtime/business services consume. Collector Web writes this file,
-and launchers read it on every service start.
+which bridge URL Runtime/business services consume. Collector Web writes the
+runtime-generated selection file, and launchers read it on every service start.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from typing import Any, Mapping
 from urllib.parse import urlparse, urlunparse
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SELECTION_PATH = PROJECT_ROOT / "config" / "active_camera.json"
+DEFAULT_SELECTION_PATH = PROJECT_ROOT / "configs" / "runtime" / "generated" / "active_camera.json"
 
 CAMERA_SPECS: dict[str, dict[str, Any]] = {
     "orbbec336l": {

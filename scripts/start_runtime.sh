@@ -17,7 +17,7 @@ RUNTIME_BIN="${VISIONOPS_RUNTIME_BIN:-./build-rknn/edge/runtime_cpp/visionops_ru
 DEVICE_ID="${VISIONOPS_DEVICE_ID:-lb3576-001}"
 PORT="${VISIONOPS_RUNTIME_PORT:-28081}"
 
-CAMERA_SELECTION_FILE="${VISIONOPS_CAMERA_SELECTION_FILE:-/opt/visionops_v3/config/active_camera.json}"
+CAMERA_SELECTION_FILE="${VISIONOPS_CAMERA_SELECTION_FILE:-/opt/visionops_v3/configs/runtime/generated/active_camera.json}"
 
 ACTIVE_BRIDGE_URL="$(
   VISIONOPS_CAMERA_SELECTION_FILE="${CAMERA_SELECTION_FILE}" \

@@ -3,7 +3,7 @@
 视觉盒子设置约定：
 - 启动命令固定的 URL、Device ID、端口和目录只展示，不从 Web 修改。
 - Web 可修改默认启动模式、生产/验证推理 FPS、状态刷新 FPS、磁盘告警阈值和服务端上传配置。
-- 配置持久化到 /opt/visionops_v3/config/vision_box_settings.json，可通过环境变量覆盖。
+- 配置持久化到 /opt/visionops_v3/configs/runtime/generated/vision_box_settings.json，可通过环境变量覆盖。
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from .config_loader import CollectorConfig
 from .response_utils import timestamp_ms
 
 DEFAULT_PROJECT_ROOT = Path(os.environ.get("VISIONOPS_PROJECT_ROOT", "/opt/visionops_v3"))
-DEFAULT_CONFIG_PATH = DEFAULT_PROJECT_ROOT / "config" / "vision_box_settings.json"
+DEFAULT_CONFIG_PATH = DEFAULT_PROJECT_ROOT / "configs" / "runtime" / "generated" / "vision_box_settings.json"
 CONFIG_PATH = Path(os.environ.get("VISIONOPS_VISION_BOX_SETTINGS_FILE", str(DEFAULT_CONFIG_PATH)))
 
 

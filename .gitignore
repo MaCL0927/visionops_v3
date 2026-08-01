@@ -80,6 +80,7 @@ diagnostics/
 **/debug_output/
 
 # Generated runtime configuration
+/config/
 /configs/runtime/generated/
 /configs/runtime/*.env
 *.env.bak*

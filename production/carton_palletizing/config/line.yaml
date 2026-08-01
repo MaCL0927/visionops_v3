@@ -294,7 +294,7 @@ box_grasp:
     listen_host: 127.0.0.1
     listen_port: 19211
     request_timeout_ms: 5000
-    inference_settings_path: /opt/visionops_v3/config/box_grasp_inference_settings.json
+    inference_settings_path: /opt/visionops_v3/configs/runtime/generated/box_grasp_inference_settings.json
 
   collector:
     listen_host: 0.0.0.0

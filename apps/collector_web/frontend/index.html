@@ -445,7 +445,7 @@
                 <label class="setting-field">HP60C cx<input id="setting-hp60c-cx" type="number" step="0.001" placeholder="主点 x"></label>
                 <label class="setting-field">HP60C cy<input id="setting-hp60c-cy" type="number" step="0.001" placeholder="主点 y"></label>
               </div>
-              <div id="setting-camera-apply-hint" class="settings-inline-status">两款 Bridge 可同时运行。保存相机型号后会更新 active_camera.json 并重启当前 Runtime，采集、模型验证和生产画面将统一切换。</div>
+              <div id="setting-camera-apply-hint" class="settings-inline-status">两款 Bridge 可同时运行。保存相机型号后会更新运行态 active_camera.json 并重启当前 Runtime，采集、模型验证和生产画面将统一切换。</div>
             </div>
           </section>
 
@@ -526,7 +526,7 @@
                 <label class="setting-field">服务端接收目录<input id="setting-upload-remote-dir" placeholder="/opt/visionops_uploads"></label>
                 <label class="setting-field">上传超时时间 s<input id="setting-upload-timeout" type="number" min="5" max="3600" value="60"></label>
               </div>
-              <div class="settings-inline-status">配置保存到 /opt/visionops_v3/config/vision_box_settings.json；后续采集上传确认页会读取这些参数执行同步。</div>
+              <div class="settings-inline-status">配置保存到 /opt/visionops_v3/configs/runtime/generated/vision_box_settings.json；后续采集上传确认页会读取这些参数执行同步。</div>
             </div>
           </section>
 
