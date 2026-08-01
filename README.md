@@ -1,130 +1,129 @@
 # VisionOps v3 端到端视觉 AI 平台
 
+VisionOps v3 是面向 `RK3576 / LB3576 / RK3588` 工业视觉盒子的视觉 AI 平台，覆盖服务端数据管理、标注审核、训练导出、模型发布、边缘端 RKNN 推理、Web 管理、生产业务算法以及 PLC / 机器人 / 上位机通信。
 
-> M33.1：服务端标注器新增 SAM 智能框选，支持用粗框生成可编辑的 segmentation 多边形；同时修正少样本快速学习的嵌套掩膜、掩膜分辨率和批量预标注参数。详见 `docs/M33.1_SAM_ASSISTED_ANNOTATION.md`。
+当前代码、配置和 Git 历史是事实来源。旧版 v2 只能作为功能参考，不能恢复 v2 的 Python RKNN 生产主链路，也不能把边缘端、服务端和产线业务逻辑重新混在一起。
 
-## 1. 项目定位
-
-VisionOps v3 面向 `RK3576 / LB3576 / RK3588` 工业视觉盒子，覆盖数据采集、服务端标注与训练、模型转换发布、边缘端 RKNN 推理、Web 管理以及 PLC / 上位机通信。
-
-当前生产边缘主链路固定为：
+## 1. 总体架构
 
 ```text
-Camera Bridge
-  -> C++ RKNN Runtime
-  -> Collector Web
-  -> Production Line Gateway / Modbus-TCP or task TCP client
-  -> PLC / 机器人调度系统 / 上位机
+服务端:
+  数据上传 -> 标注/审核 -> 数据集 -> 训练 -> ONNX/RKNN 导出
+    -> v3 模型包发布 -> 同步到边缘端 models/
+
+边缘端:
+  Camera Bridge / SDK Bridge
+    -> C++ RKNN Runtime
+    -> Collector Web
+    -> Production App / Gateway / Modbus / Robot Client
+    -> PLC / 机器人调度系统 / 上位机
 ```
 
-平台代码与现场业务代码严格分开：
+核心边界：
 
-- `apps/`、`edge/`、`training/` 提供可复用平台能力。
-- `production/` 保存具体产线方案、任务算法、现场配置和部署文件。
-- 新增现场任务不得继续散落到 `edge/`、`configs/`、根目录 `scripts/` 等多个位置。
+- C++ Runtime 负责取帧、预处理、RKNN 推理、后处理、标准 `inference_result`、快照和模型切换。
+- Collector Web 负责边缘端配置、展示、状态聚合、采集上传、模型验证和生产页面；不直接连接相机、不加载模型、不解析 RKNN 原始 tensor。
+- Camera Bridge 负责 HP60C、Orbbec 336L 等相机 SDK/取流差异。
+- Production App 负责具体产线业务判断，例如纸箱、洗衣液、泡沫圆环抓取。
+- Gateway / Modbus / Robot Client 负责通信协议和寄存器映射。
+- Server API 负责数据、标注、训练、模型包、设备分发管理；不做边缘端实时推理。
 
-## 2. 当前目录结构
+## 2. 顶层目录
 
 ```text
-visionops_v3/
-├── apps/                    # Collector Web 与 Server API
-├── edge/                    # 通用边缘能力：相机、Runtime、Modbus、Gateway 基础工具
-├── production/              # 实际产线方案，按产线和任务组织
-│   └── carton_line/         # 纸隔板 + 纸筒产线
-├── training/                # 训练、导出、RKNN 转换与模型打包
-├── interfaces/              # JSON Schema、协议与示例
-├── configs/                 # 通用平台示例配置，不放现场专用配置
-├── scripts/                 # 通用服务启动脚本
-├── tools/                   # 开发、校验和诊断工具
-├── tests/                   # 当前有效的自动化测试
-├── docs/                    # 当前架构、服务端说明和迁移原则
-├── models/                  # 本地模型包目录，不进入 Git
-└── server_data/             # 服务端运行数据，不进入 Git
+apps/
+  collector_web/       边缘端 Web 与后端代理
+  server_api/          服务端 API、Web 控制台、标注器
+edge/
+  runtime_cpp/         C++ RKNN Runtime，含 mock/real backend、RGA、帧源
+  camera_bridge/       HP60C 与 Orbbec 336L Bridge
+  modbus_adapter/      通用 Modbus TCP/Holding Register 基础库
+  gateway_adapter/     Gateway 消息基础结构
+production/
+  carton_line/         纸隔板、纸筒、取筒产线
+  carton_palletizing/  纸箱码垛与抓取点任务
+  detergent_grasp/     洗衣液抓取任务
+  foam_ring_grasp/     泡沫圆环 RGB-D 抓取几何任务
+training/
+  pipeline/            preprocess/train/evaluate/export/convert/package stages
+interfaces/            JSON Schema、协议和跨模块示例
+configs/               通用 example 配置
+models/                本地模型目录，权重和模型包默认不进 Git
+server_data/           服务端运行数据目录，仅保留 .gitkeep
+tools/                 配置、接口、存储和性能诊断工具
+tests/                 当前有效单元测试与集成测试
+docs/                  架构、服务端、迁移和任务说明
+scripts/               通用启动、环境和清理脚本
 ```
 
-## 3. 核心模块边界
+## 3. 支持任务类型
 
-### `apps/collector_web`
+平台层支持以下模型任务类型：
 
-负责边缘端 Web、状态聚合、配置管理、模型切换、采集上传和生产画面。它不直接读取相机、不加载 RKNN 模型，也不执行现场业务判断。
+- `detection`
+- `obb`
+- `segmentation`
+- `classification`
 
-### `apps/server_api`
+生产任务可以在 `production/<line_id>/tasks/<task_id>/` 中把标准 `inference_result` 转换为现场业务结果、机器人协议或 Modbus 寄存器。业务规则不得写入通用 Runtime。
 
-负责服务端上传包接收、标注审核、数据集构建、训练任务、模型包发布和设备部署。Segmentation 标注器可选使用 SAM 智能框选：用户只需粗框单个目标，服务端生成可编辑多边形；SAM 权重不进入仓库，默认从 `models/pretrained/sam2.1_s.pt` 或 `models/pretrained/mobile_sam.pt` 加载。
+## 4. 服务端到生产部署流程
 
-### `edge/runtime_cpp`
+典型闭环：
 
-负责真实生产推理：取帧、预处理、RKNN、后处理、标准 `inference_result`、快照与模型切换。
+1. 边缘端 Collector Web 采集图片、RGB-D 或数据包。
+2. Server API 接收上传包并登记 batch。
+3. 人工审核、标注或使用 SAM 辅助生成 segmentation 多边形。
+4. 从 accepted batches 构建 dataset。
+5. 创建 training job，执行 `preprocess -> train -> evaluate -> export_onnx -> convert_rknn -> package_v3_model`。
+6. 生成 v3 模型包，包含 `model.rknn` 和 `model.yaml`。
+7. publish 到同步目录或复制到边缘端 `models/`。
+8. Collector Web 在模型验证页扫描模型目录并请求 Runtime 切换模型。
+9. 生产模式中 Runtime 输出标准结果，Production App / Gateway / Modbus 继续处理。
 
-### `edge/camera_bridge`
+服务端详细说明见：
 
-封装厂商相机 SDK 和取流差异。当前包含 Orbbec Gemini 336L Bridge（18182）和 HP60C / HP60CN Angstrong SDK Bridge（18181）。两款 Bridge 可同时运行，`config/active_camera.json` 决定 Runtime、采集、模型验证和生产任务使用哪一款；详见 `docs/HP60C_ORBBEC_DUAL_CAMERA_INTEGRATION.md`。
+- [docs/server/README.md](docs/server/README.md)
+- [docs/server/api.md](docs/server/api.md)
+- [docs/server/workflow.md](docs/server/workflow.md)
+- [docs/server/model_package_spec.md](docs/server/model_package_spec.md)
 
-### `edge/modbus_adapter`
+## 5. 模型目录规范
 
-提供通用 Holding Register Bank 和最小 Modbus-TCP Server。具体寄存器定义由生产方案传入，不在通用适配层硬编码。
-
-### `production`
-
-保存现场方案。当前 `production/carton_line/` 内包含：
-
-- 隔板 5×8 小方格结构检测；
-- 纸筒站立/倒伏与 RGB-Depth 高度判断；
-- 双机械手坐标转换；
-- 统一 Robot Protocol Gateway；
-- 三套 Runtime、三套 Collector、一个 Modbus-TCP 服务，以及面向机器人后端的 Tube Pick WebSocket Server + MJPEG 视频接口；
-- 单一产线配置文件和 systemd 部署文件。
-
-完整说明见：
+预训练权重统一放在：
 
 ```text
-production/carton_line/README.md
+models/pretrained/
 ```
 
-## 4. 模型包规范
-
-边缘模型包固定为：
+其中 `yolo26n.pt` 是 Ultralytics AMP 检查可能使用的预训练模型，规范位置是：
 
 ```text
-models/<task>/<model_version>/
+models/pretrained/yolo26n.pt
+```
+
+仓库根目录不应出现 `yolo26n.pt`。训练 pipeline 会从 repo root 解析 `models/pretrained/yolo26n.pt`，并在 job work 目录暴露给 AMP 检查逻辑，避免第三方库在仓库根目录重新生成该文件。
+
+发布到边缘端的 Runtime 模型包采用：
+
+```text
+models/<task_or_model_name>/
 ├── model.rknn
 └── model.yaml
 ```
 
-生产默认目录：
+`model.yaml` 是边缘端模型扫描、模型切换、类别、输入尺寸、后处理阈值和任务类型的主要元信息来源。真实 `.pt`、`.onnx`、`.rknn` 和采集数据默认不进入 Git。
 
-```text
-models/carton_partition_check/current/
-models/carton_tube_check/current/
-models/tube_pick_vision/current/
-```
+## 6. 常用启动命令
 
-`model.yaml` 是模型任务类型、类别、输入尺寸和模型标识的唯一元信息来源。
-
-## 5. 创建边缘端 Python 环境
-
-新 RK3576/LB3576 板卡先将仓库克隆到 `/opt/visionops_v3`，然后执行：
+创建边缘端 Python 环境：
 
 ```bash
 cd /opt/visionops_v3
 sudo bash scripts/setup_edge_env.sh
 ```
 
-环境固定创建在：
-
-```text
-/opt/visionops_v3/venv
-```
-
-生产启动脚本不再使用 v2 的 `/opt/visionops/venv`。需要在板端运行测试时可使用：
-
-```bash
-sudo bash scripts/setup_edge_env.sh --with-dev
-```
-
-详细迁移说明见 `docs/migration/M25.3_EDGE_VENV_MIGRATION.md`。
-
-## 6. 编译 C++ Runtime
+编译 C++ Runtime（RKNN + RGA）：
 
 ```bash
 cd /opt/visionops_v3
@@ -142,94 +141,167 @@ cmake -S . -B build-rknn \
 cmake --build build-rknn -j4
 ```
 
-当前二进制名称仍为：
-
-```text
-build-rknn/edge/runtime_cpp/visionops_runtime_mock
-```
-
-名称保留是为了兼容已有部署脚本；当使用 `--backend rknn` 时实际运行真实 RKNN 路径。
-
-## 7. 通用单实例启动
+启动 Runtime：
 
 ```bash
-./scripts/start_runtime.sh /opt/visionops_v3/models/<model_dir>
-./scripts/start_collector.sh
-./scripts/start_server.sh
+MODEL_DIR=/opt/visionops_v3/models/test_rknn_model
+
+./build-rknn/edge/runtime_cpp/visionops_runtime_mock \
+  --backend rknn \
+  --preprocess-backend rga \
+  --rga-mode resize_rgb \
+  --frame-source hp60c_bridge \
+  --hp60c-url http://127.0.0.1:18182 \
+  --hp60c-snapshot-path /stream/snapshot.jpg \
+  --hp60c-health-path /health \
+  --model-dir "$MODEL_DIR" \
+  --host 0.0.0.0 \
+  --port 28081 \
+  --device-id lb3576-001
 ```
 
-这些脚本用于单实例调试。纸隔板/纸筒生产线应使用 `production/carton_line/scripts/` 下的专用启动脚本。
+二进制名称 `visionops_runtime_mock` 为兼容历史部署脚本保留；当 `--backend rknn` 时运行真实 RKNN 路径。
 
-## 8. 纸隔板与纸筒生产线启动
+启动 Collector Web：
 
 ```bash
-cd /opt/visionops_v3
+source /opt/visionops_v3/venv/bin/activate
 
-./production/carton_line/scripts/start_runtime.sh partition
-./production/carton_line/scripts/start_runtime.sh tube
-./production/carton_line/scripts/start_runtime.sh pick
-./production/carton_line/scripts/start_gateway.sh
-./production/carton_line/scripts/start_ws_pick.sh
-./production/carton_line/scripts/start_collector.sh partition
-./production/carton_line/scripts/start_collector.sh tube
-./production/carton_line/scripts/start_collector.sh pick
+python3 -m apps.collector_web.backend.main \
+  --host 0.0.0.0 \
+  --port 18091 \
+  --runtime-url http://127.0.0.1:28081 \
+  --gateway-url http://127.0.0.1:19090 \
+  --business-app-url http://127.0.0.1:19110 \
+  --models-root /opt/visionops_v3/models \
+  --device-id lb3576-dev
 ```
 
-唯一主配置：
-
-```text
-production/carton_line/config/line.yaml
-```
-
-安装 systemd：
+启动 Server API：
 
 ```bash
-sudo bash production/carton_line/deploy/install_services.sh --profile partition-tube
-# 或：sudo bash production/carton_line/deploy/install_services.sh --profile tube-pick
+source /opt/visionops_v3/venv/bin/activate
+python3 -m apps.server_api.backend.main --host 0.0.0.0 --port 18100
 ```
 
-## 9. 通用验证
+## 7. 常用检查命令
+
+Runtime：
 
 ```bash
 curl -s http://127.0.0.1:28081/health | python3 -m json.tool
+curl -s -X POST http://127.0.0.1:28081/api/runtime/start_preview | python3 -m json.tool
+curl -s http://127.0.0.1:28081/api/runtime/status | python3 -m json.tool
 curl -s -X POST http://127.0.0.1:28081/api/runtime/infer_once | python3 -m json.tool
-curl -s http://127.0.0.1:18091/health | python3 -m json.tool
-curl -s http://127.0.0.1:19090/health | python3 -m json.tool
+curl -s http://127.0.0.1:28081/api/runtime/snapshot.jpg -o /tmp/runtime_snapshot.jpg
 ```
 
-运行当前自动化测试：
+Collector Web：
 
 ```bash
-python3 -m pytest tests/unit tests/integration
+curl -s http://127.0.0.1:18091/health | python3 -m json.tool
+curl -s http://127.0.0.1:18091/api/models | python3 -m json.tool
+curl -s -X POST http://127.0.0.1:18091/api/models/switch \
+  -H "Content-Type: application/json" \
+  -d '{"package_dir":"test_rknn_model"}' | python3 -m json.tool
 ```
 
-硬件、真实 RKNN、真实相机和 PLC 结果仍必须在 LB3576 上单独验收，不能以 x86 Mock 测试代替。
+Server API：
 
-## 10. 仓库卫生
+```bash
+curl -s http://127.0.0.1:18100/api/server/health | python3 -m json.tool
+curl -s http://127.0.0.1:18100/api/server/batches | python3 -m json.tool
+curl -s http://127.0.0.1:18100/api/server/training/jobs | python3 -m json.tool
+curl -s http://127.0.0.1:18100/api/server/model-packages | python3 -m json.tool
+```
 
-以下内容不进入 Git：
+## 8. Camera Bridge
 
-- `__pycache__`、pytest 缓存、构建目录；
-- `.env`、密钥和设备私有配置；
-- `.pt`、`.onnx`、`.rknn`；
-- 数据集、采集图片、视频、日志和诊断结果；
-- `server_data`、训练输出和发布制品；
-- 压缩包及一次性调试文件。
+当前包含：
 
-实际设备配置放在 `/etc/visionops_v3/`，仓库只保留 `*.env.example` 和可审查的 YAML 模板。
+- HP60C / HP60CN Angstrong SDK Bridge：`edge/camera_bridge/hp60c_bridge/`
+- Orbbec Gemini 336L Bridge：`edge/camera_bridge/orbbec336l_bridge/`
 
-### Box Grasp FPS 优化
+相机选择与双相机说明见：
 
-`box_grasp_vision` 已采用 Runtime 推理与 CPU 几何/深度处理双线程流水线，并通过
-Orbbec Bridge 的 `/api/coordinate/sample_deproject` 在内存中完成 7 点深度采样与
-反投影，避免逐帧传输和解码整幅 Depth PNG。生产 FPS 由
-`/api/app/inference_settings` 统一控制，WebSocket 对每个完成结果立即推送，不再读取
-`box_grasp.websocket.detection_hz`。诊断字段见任务 README。
+- [docs/HP60C_ORBBEC_DUAL_CAMERA_INTEGRATION.md](docs/HP60C_ORBBEC_DUAL_CAMERA_INTEGRATION.md)
+- [edge/camera_bridge/hp60c_bridge/README.md](edge/camera_bridge/hp60c_bridge/README.md)
+- [edge/camera_bridge/orbbec336l_bridge/README.md](edge/camera_bridge/orbbec336l_bridge/README.md)
 
-### M32.8.2 Collector Raw Runtime Proxy
+硬件取流、深度采样、SDK 重连和 watchdog 行为必须在 RK 板和真实相机上验证。
 
-工厂模式模型验证的 Collector→Runtime 高频代理在 localhost 下改用
-`TCP_NODELAY` raw HTTP，避免 RK3576 上 urllib 小 POST 的固定延迟。仅 Runtime
-客户端启用该路径；Gateway 与 Business App 代理保持原实现。诊断信息见
-`/api/collector/status` 的 `proxy.runtime_transport`，详细说明见
-`docs/M32.8.2_COLLECTOR_RAW_RUNTIME_PROXY.md`。
+## 9. Production 任务索引
+
+当前主要 production 任务：
+
+- `production/carton_line/`：纸隔板、纸筒、取筒视觉与统一 Robot Gateway。
+- `production/carton_palletizing/`：纸箱码垛、first-layer placement、box grasp vision。
+- `production/detergent_grasp/`：洗衣液检测与抓取。
+- `production/foam_ring_grasp/`：泡沫圆环 RGB-D 几何、轴线、抓取点、碰撞和 M35.4 有向定长 3D 轴杆诊断。
+
+泡沫圆环任务入口：
+
+- [production/foam_ring_grasp/README.md](production/foam_ring_grasp/README.md)
+- [docs/M35.4_DIRECTED_FIXED_LENGTH_AXIS_ROD.md](docs/M35.4_DIRECTED_FIXED_LENGTH_AXIS_ROD.md)
+
+## 10. 测试与开发
+
+PC 上可运行的基础检查：
+
+```bash
+python3 -m pytest tests/unit
+python3 -m pytest tests/integration
+git diff --check
+```
+
+训练 pipeline 相关快速测试：
+
+```bash
+python3 -m pytest tests/unit/test_server_api_services.py tests/unit/test_sam_annotation_service.py
+```
+
+泡沫圆环几何相关测试：
+
+```bash
+python3 -m pytest \
+  tests/unit/test_foam_ring_rim_pinch_geometry.py \
+  tests/unit/test_foam_ring_axis_visualization.py
+```
+
+硬件相关测试需要 RK3576/LB3576、真实相机、真实 RKNN、机器人或 Modbus/PLC 环境时，可以跳过，但必须在变更报告中说明。
+
+## 11. 部署与同步
+
+通用代码同步脚本：
+
+```bash
+bash edge/deploy/push.sh --host <edge-ip> --user <ssh-user>
+```
+
+该脚本用于把代码同步到边缘端固定目录，默认不应同步 `models/`、`server_data/`、训练输出、缓存、日志和真实数据。模型同步应走发布目录、Syncthing、rsync 白名单或现场部署流程。
+
+产线 systemd 与启动入口优先放在对应 `production/<line_id>/deploy/` 和 `production/<line_id>/scripts/` 下。
+
+## 12. 仓库卫生
+
+不进入 Git：
+
+- `__pycache__/`、`*.pyc`、`.pytest_cache/`
+- CMake build 目录和编译产物
+- `.env`、密钥、设备私有配置
+- `.pt`、`.onnx`、`.rknn`
+- 数据集、采集图片、视频、日志、诊断包
+- `server_data/` 运行数据
+- `runs/`、`mlruns/`、训练中间产物和发布制品
+- 压缩包和一次性调试输出
+
+保留：
+
+- `*.env.example`
+- `*.example.yaml`
+- `interfaces/examples`
+- 测试 fixture
+- 小型模型元数据示例
+- 部署脚本和 systemd 文件
+
+本次清理记录见 [docs/REPOSITORY_CLEANUP_REPORT.md](docs/REPOSITORY_CLEANUP_REPORT.md)。

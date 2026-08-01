@@ -47,6 +47,7 @@ QUICK_SEG_MASK_RATIO = max(1, int(os.environ.get("VISIONOPS_QUICK_SEG_MASK_RATIO
 QUICK_SEG_RETINA_MASKS = str(os.environ.get("VISIONOPS_QUICK_SEG_RETINA_MASKS", "true")).strip().lower() in {"1", "true", "yes", "on"}
 QUICK_TRAIN_DEGREES = float(os.environ.get("VISIONOPS_QUICK_TRAIN_DEGREES", "12.0"))
 QUICK_TRAIN_AMP = str(os.environ.get("VISIONOPS_QUICK_TRAIN_AMP", "true")).strip().lower() in {"1", "true", "yes", "on"}
+QUICK_AMP_CHECK_MODEL = Path("models/pretrained/yolo26n.pt")
 ROI_CLS_DEFAULT_CONF = float(os.environ.get("VISIONOPS_ROI_CLS_DEFAULT_CONF", "0.35"))
 ROI_CLS_DEFAULT_PADDING = float(os.environ.get("VISIONOPS_ROI_CLS_DEFAULT_PADDING", "0.05"))
 ROI_CLS_DEFAULT_DET_MODEL = os.environ.get("VISIONOPS_ROI_CLS_DEFAULT_DET_MODEL", "models/checkpoints_detection/best.pt")
@@ -106,6 +107,13 @@ def _quick_model_for_task(task_type: str) -> str:
     if task == "obb":
         return QUICK_OBB_MODEL
     return QUICK_DET_MODEL
+
+
+def _resolve_project_path(project_root: Path, value: str | Path) -> Path:
+    path = Path(str(value)).expanduser()
+    if not path.is_absolute():
+        path = project_root / path
+    return path.resolve()
 
 
 def _non_empty_label(path: Path) -> bool:
@@ -641,14 +649,17 @@ class AnnotationService:
     def _quick_train_worker(self, log_file: Any, update: Callable[[int, str], None], batch_id: str, task: str, classes: list[str], project_root: Path) -> dict[str, Any]:
         update(10, "正在扫描 labels 下的人工标注")
         data_yaml, count = self._build_quick_dataset(batch_id, classes, task)
-        runs_dir = self.quick_root(batch_id) / "runs"
+        quick_root = self.quick_root(batch_id)
+        runs_dir = quick_root / "runs"
         yolo_task = _task_to_yolo(task)
-        model = _quick_model_for_task(task)
+        model = str(_resolve_project_path(project_root, _quick_model_for_task(task)))
         run_name = f"{yolo_task}_quick"
         run_dir = runs_dir / run_name
         if run_dir.exists():
             shutil.rmtree(run_dir)
         runs_dir.mkdir(parents=True, exist_ok=True)
+        if QUICK_TRAIN_AMP:
+            self._prepare_quick_amp_check_model(project_root, quick_root)
         update(25, f"开始快速学习，训练图片 {count} 张")
         segmentation_args = ""
         if yolo_task == "segment":
@@ -667,7 +678,7 @@ class AnnotationService:
             f"project={shlex.quote(str(runs_dir))} name={shlex.quote(run_name)} exist_ok=True"
             f"{segmentation_args}"
         )
-        self._run_shell(cmd, log_file, project_root)
+        self._run_shell(cmd, log_file, quick_root)
         update(90, "正在整理快速学习模型")
         best = self._find_best_pt(run_dir) or self._find_best_pt(runs_dir)
         if not best:
@@ -686,6 +697,28 @@ class AnnotationService:
         }
         _write_json(state_path, state)
         return {"message": "快速学习完成", "model_path": str(best), "train_images": count}
+
+    def _prepare_quick_amp_check_model(self, project_root: Path, quick_root: Path) -> Path:
+        source = _resolve_project_path(project_root, QUICK_AMP_CHECK_MODEL)
+        if not source.exists():
+            raise RuntimeError(
+                "快速学习 AMP 已开启，但缺少 AMP 检查模型: "
+                f"{QUICK_AMP_CHECK_MODEL}。请把 yolo26n.pt 放到该目录，"
+                "不要放在仓库根目录。"
+            )
+        target = quick_root / source.name
+        if target.exists() or target.is_symlink():
+            try:
+                if target.resolve() == source:
+                    return target
+            except OSError:
+                pass
+            target.unlink()
+        try:
+            target.symlink_to(os.path.relpath(source, start=quick_root))
+        except OSError:
+            shutil.copy2(source, target)
+        return target
 
     def start_auto_label(self, batch_id: str, payload: dict[str, Any], project_root: Path) -> dict[str, Any]:
         task = self.save_task(batch_id, str(payload.get("task_type") or "detection"))

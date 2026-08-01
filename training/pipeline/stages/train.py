@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 from pathlib import Path
 from typing import Any
 
 from training.pipeline.common import PipelineContext, normalize_task, run_command, write_json, yolo_task
+
+AMP_CHECK_MODEL_NAME = "yolo26n.pt"
+AMP_CHECK_MODEL_PATH = Path("models/pretrained") / AMP_CHECK_MODEL_NAME
 
 
 def run(ctx: PipelineContext, preprocess_report: dict[str, Any]) -> dict[str, Any]:
@@ -15,7 +20,7 @@ def run(ctx: PipelineContext, preprocess_report: dict[str, Any]) -> dict[str, An
     if not data_arg:
         raise RuntimeError("preprocess_report 缺少 data_path/data_yaml，无法启动训练")
 
-    model = str(ctx.job.get("pretrained_model") or _default_pretrained_model(task_type))
+    model = _resolve_pretrained_model(ctx, str(ctx.job.get("pretrained_model") or _default_pretrained_model(task_type)))
     epochs = int(ctx.job.get("epochs", 50))
     batch_size = int(ctx.job.get("batch_size", 16))
     imgsz = int(ctx.job.get("imgsz", 640))
@@ -25,6 +30,9 @@ def run(ctx: PipelineContext, preprocess_report: dict[str, Any]) -> dict[str, An
     yolo_cmd = str(ctx.job.get("yolo_cmd") or "yolo")
 
     runs_dir = ctx.work_dir / "runs"
+    ctx.work_dir.mkdir(parents=True, exist_ok=True)
+    if amp:
+        _prepare_amp_check_model(ctx)
     run_name = f"{yolo_subcommand}_train"
     if task_type == "classification":
         command = _classification_command(
@@ -58,7 +66,7 @@ def run(ctx: PipelineContext, preprocess_report: dict[str, Any]) -> dict[str, An
         )
 
     ctx.log(f"[train] start task_type={task_type} yolo_task={yolo_subcommand} model={model} data={data_arg}")
-    run_command(command, cwd=ctx.project_root, log_file=ctx.log_file)
+    run_command(command, cwd=ctx.work_dir, log_file=ctx.log_file)
 
     run_dir = runs_dir / run_name
     best_pt = _find_best_pt(run_dir) or _find_best_pt(runs_dir)
@@ -82,6 +90,38 @@ def run(ctx: PipelineContext, preprocess_report: dict[str, Any]) -> dict[str, An
     write_json(ctx.output_dir / "train_report.json", report)
     ctx.log(f"[train] best_pt={best_pt}")
     return report
+
+
+def _resolve_pretrained_model(ctx: PipelineContext, value: str) -> str:
+    path = Path(str(value)).expanduser()
+    if not path.is_absolute():
+        path = ctx.project_root / path
+    return str(path.resolve())
+
+
+def _prepare_amp_check_model(ctx: PipelineContext) -> Path:
+    """Expose the Ultralytics AMP check model from the canonical repo path."""
+    source = (ctx.project_root / AMP_CHECK_MODEL_PATH).resolve()
+    if not source.exists():
+        raise RuntimeError(
+            "AMP 已开启，但缺少 AMP 检查模型: "
+            f"{AMP_CHECK_MODEL_PATH}。请把 {AMP_CHECK_MODEL_NAME} 放到该目录，"
+            "不要放在仓库根目录。"
+        )
+    target = ctx.work_dir / AMP_CHECK_MODEL_NAME
+    if target.exists() or target.is_symlink():
+        try:
+            if target.resolve() == source:
+                return target
+        except OSError:
+            pass
+        target.unlink()
+    try:
+        relative_source = os.path.relpath(source, start=ctx.work_dir)
+        target.symlink_to(relative_source)
+    except OSError:
+        shutil.copy2(source, target)
+    return target
 
 
 def _yolo_label_command(

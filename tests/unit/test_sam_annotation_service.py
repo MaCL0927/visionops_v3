@@ -93,10 +93,14 @@ def test_quick_segmentation_command_preserves_nested_masks(tmp_path: Path, monke
     batches = BatchService(tmp_path / "batches", ("segmentation",))
     batch = batches.create_from_zip(upload, device_id="server", task_type="segmentation")
     service = AnnotationService(batches, tmp_path / "server_data")
+    (tmp_path / "models" / "pretrained").mkdir(parents=True)
+    (tmp_path / "models" / "pretrained" / "yolo26n.pt").write_bytes(b"fake-amp-check")
+    (tmp_path / "models" / "pretrained" / "yolov8n-seg.pt").write_bytes(b"fake-seg")
     captured: dict[str, str] = {}
 
     def fake_run_shell(cmd, log_file, cwd):
         captured["cmd"] = cmd
+        captured["cwd"] = str(cwd)
         weights = service.quick_root(batch["batch_id"]) / "runs" / "segment_quick" / "weights"
         weights.mkdir(parents=True, exist_ok=True)
         (weights / "best.pt").write_bytes(b"fake")
@@ -116,3 +120,6 @@ def test_quick_segmentation_command_preserves_nested_masks(tmp_path: Path, monke
     assert "mask_ratio=2" in captured["cmd"]
     assert "degrees=12.0" in captured["cmd"]
     assert "amp=True" in captured["cmd"]
+    assert captured["cwd"] == str(service.quick_root(batch["batch_id"]))
+    assert (service.quick_root(batch["batch_id"]) / "yolo26n.pt").exists()
+    assert not (tmp_path / "yolo26n.pt").exists()

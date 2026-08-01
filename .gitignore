@@ -50,6 +50,8 @@ bin/
 # -----------------------------------------------------------------------------
 /models/**
 !/models/README.md
+!/models/pretrained/
+!/models/pretrained/.gitkeep
 *.pt
 *.pth
 *.onnx

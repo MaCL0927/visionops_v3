@@ -222,6 +222,53 @@ def test_pipeline_preprocess_reuses_dataset_without_job_copy(tmp_path: Path) -> 
     assert not (work_dir / "yolo_dataset").exists()
 
 
+def test_training_stage_uses_canonical_pretrained_paths_and_workdir(monkeypatch, tmp_path: Path) -> None:
+    from training.pipeline.common import PipelineContext
+    from training.pipeline.stages import train
+
+    project_root = tmp_path / "repo"
+    pretrained_dir = project_root / "models" / "pretrained"
+    pretrained_dir.mkdir(parents=True)
+    (pretrained_dir / "yolov8n.pt").write_bytes(b"fake-yolov8n")
+    (pretrained_dir / "yolo26n.pt").write_bytes(b"fake-amp-check")
+
+    job_dir = tmp_path / "jobs" / "job-1"
+    work_dir = job_dir / "work"
+    output_dir = job_dir / "outputs"
+    output_dir.mkdir(parents=True)
+    dataset_yaml = tmp_path / "dataset.yaml"
+    dataset_yaml.write_text("path: .\n", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def fake_run_command(cmd, *, cwd, log_file=None, env=None):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        weights = work_dir / "runs" / "detect_train" / "weights"
+        weights.mkdir(parents=True)
+        (weights / "best.pt").write_bytes(b"fake-best")
+
+    monkeypatch.setattr(train, "run_command", fake_run_command)
+    ctx = PipelineContext(
+        project_root=project_root,
+        job={"job_id": "job-1", "task_type": "detection", "amp": True},
+        dataset={},
+        job_dir=job_dir,
+        work_dir=work_dir,
+        output_dir=output_dir,
+    )
+
+    report = train.run(ctx, {"task_type": "detection", "data_yaml": str(dataset_yaml)})
+
+    command = captured["cmd"]
+    assert isinstance(command, list)
+    assert captured["cwd"] == work_dir
+    assert f"model={(pretrained_dir / 'yolov8n.pt').resolve()}" in command
+    assert (work_dir / "yolo26n.pt").exists()
+    assert not (project_root / "yolo26n.pt").exists()
+    assert report["best_pt"].endswith("weights/best.pt")
+
+
 def test_active_training_reference_blocks_dataset_delete(tmp_path: Path) -> None:
     batch_service = BatchService(tmp_path / "batches", ("detection",))
     batch = batch_service.create_from_zip(_sample_zip(tmp_path / "upload.zip"), device_id="edge-dev", task_type="detection")
