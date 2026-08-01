@@ -230,7 +230,7 @@ full_gripper_static_collision:
 # pinched. Post-grasp lift/transport is intentionally omitted: the next grasp
 # cycle will acquire a new RGB-D frame and re-plan from the changed scene.
 full_gripper_motion_collision:
-  enabled: true
+  enabled: false
   motion_scope: pregrasp_to_grasp_only
   check_post_grasp_lift: false
 
@@ -384,7 +384,7 @@ axis_direction:
   # M35.4 diagnostic master switch. When false, skip fixed-length 3-D rod
   # endpoint calculation, 2-D projection, overlay drawing and diagnostic JSON.
   # The core pose normal remains enabled because grasp geometry depends on it.
-  enabled: true
+  enabled: false
 
   # Total physical length of the centered 3-D rod before projection. Keeping
   # this fixed makes the 2-D projected length reflect the ring tilt.
