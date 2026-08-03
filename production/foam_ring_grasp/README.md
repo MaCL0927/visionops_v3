@@ -141,3 +141,24 @@ python3 production/foam_ring_grasp/scripts/verify_rgb_runtime.py \
 ```
 
 正式验收要求 `frame_source.transport=posix_shared_memory`、`fallback_active=false`，且共享内存 sequence 和推理结果 `capture_timestamp_ms` 持续变化。详细说明见 `docs/M36.2_ORBBEC_SHARED_RGB_RKNN_RUNTIME.md`。
+
+## M36.3：精确同步 RGB-D 短时缓存
+
+M36.3 在 M36.2 通过后启动后台 `RgbdFrameCache`，持续复制同一 Orbbec SDK FrameSet 的 RGB 与 D2C 深度，并按 `timestamp_epoch_ms` 保存最近 12 帧。Runtime 返回分割结果后，仅允许使用：
+
+```python
+frame = cache.get_exact(result["capture_timestamp_ms"])
+```
+
+找不到完全相同的时间戳时，本次三维计算必须失败；禁止把最新或最近的深度静默拼到旧 RGB 掩膜上。
+
+真机验收：
+
+```bash
+cd /opt/visionops_v3
+python3 production/foam_ring_grasp/scripts/verify_rgbd_cache.py \
+  --samples 20 \
+  --report /tmp/m36_3_report.json
+```
+
+详细说明见 `docs/M36.3_EXACT_RGBD_FRAME_CACHE.md`。

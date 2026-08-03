@@ -380,6 +380,29 @@ robot_interface:
   closing_axis_name: x
   approach_axis_name: z
 
+online_rgbd:
+  # M36.3 caches exact RGB/D2C-depth pairs before Runtime inference returns.
+  # The Runtime capture_timestamp_ms must match this cache exactly; never use
+  # the latest or nearest depth frame as a silent fallback.
+  enabled: true
+  shared_rgb_name: /visionops_orbbec336l_rgb
+  shared_depth_name: /visionops_orbbec336l_depth
+
+  # 12 frames retain roughly 400 ms at 30 FPS. One 1280x720 RGB-D pair is
+  # about 4.6 MB, so the default cache is approximately 55 MB.
+  cache_frames: 12
+  max_age_ms: 2000
+  poll_interval_ms: 1.0
+  exact_match_timeout_ms: 500
+
+  # Keep RGB for M36.4 overlay and one-shot diagnostic capture. Set false only
+  # when memory is constrained and no exact-frame overlay is required.
+  cache_rgb: true
+
+  # Safety contract. M36.3 rejects configurations that weaken either value.
+  require_exact_timestamp: true
+  allow_nearest_fallback: false
+
 axis_direction:
   # M35.4 diagnostic master switch. When false, skip fixed-length 3-D rod
   # endpoint calculation, 2-D projection, overlay drawing and diagnostic JSON.
