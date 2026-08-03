@@ -55,9 +55,19 @@ struct FrameSourceStatus {
   std::uint64_t latest_timestamp_ms{0};
   std::string last_error;
   std::string snapshot_encoder{"mock_jpeg"};
+  // `transport` remains the compatibility field consumed by existing Web/App
+  // code, but now reports the transport that produced the latest frame rather
+  // than merely echoing the configured source type.
   std::string transport{"mock"};
+  std::string configured_transport{"mock"};
+  bool fallback_active{false};
   std::uint64_t shared_memory_sequence{0};
   std::uint64_t shared_memory_retry_count{0};
+  std::uint64_t shared_memory_fallback_count{0};
+  std::string shared_memory_last_error;
+  std::uint64_t last_transport_switch_timestamp_ms{0};
+  double capture_ms_latest{0.0};
+  double decode_ms_latest{0.0};
   std::uint64_t frames_captured{0};
   std::uint64_t latest_frame_age_ms{0};
   bool stale{false};
@@ -110,6 +120,8 @@ class StreamWorkerMock {
   bool open_shared_memory(std::string& error);
   bool read_shared_memory_frame(ImageBuffer& image, double& capture_ms, std::string& error);
   void close_shared_memory();
+  void set_active_transport(const std::string& transport);
+  std::string active_transport() const;
   bool open_v4l2(std::string& error);
   void close_v4l2();
   void update_latest(ImageBuffer image);
@@ -131,6 +143,12 @@ class StreamWorkerMock {
   std::uint64_t consecutive_read_errors_{0};
   std::uint64_t reconnect_count_{0};
   std::uint64_t last_reconnect_timestamp_ms_{0};
+  std::string active_transport_{"uninitialized"};
+  std::uint64_t shared_memory_fallback_count_{0};
+  std::string shared_memory_last_error_;
+  std::uint64_t last_transport_switch_timestamp_ms_{0};
+  double capture_ms_latest_{0.0};
+  double decode_ms_latest_{0.0};
 
 #ifdef __linux__
   int shared_memory_fd_{-1};

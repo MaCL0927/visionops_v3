@@ -303,6 +303,18 @@ void StreamWorkerMock::clear_error() {
   last_error_.clear();
 }
 
+void StreamWorkerMock::set_active_transport(const std::string& transport) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (active_transport_ == transport) return;
+  active_transport_ = transport;
+  last_transport_switch_timestamp_ms_ = static_cast<std::uint64_t>(now_timestamp_ms());
+}
+
+std::string StreamWorkerMock::active_transport() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return active_transport_;
+}
+
 bool StreamWorkerMock::frame_is_fresh_locked(std::uint64_t now_ms) const {
   if (!is_live_source(config_.type)) return true;
   const std::uint64_t timestamp =
@@ -477,17 +489,30 @@ FrameSourceStatus StreamWorkerMock::status() const {
   status.latest_timestamp_ms = latest_image_.timestamp_ms > 0 ? latest_image_.timestamp_ms : latest_jpeg_timestamp_ms_;
   status.last_error = last_error_;
   if (is_shared_memory_source(config_.type)) {
-    status.snapshot_encoder = config_.shared_memory_fallback_http ? "bridge_cached_jpeg_proxy" : "shared_memory_rgb_software_jpeg";
-    status.transport = "posix_shared_memory";
+    status.configured_transport = "posix_shared_memory";
+    status.transport = active_transport_ == "uninitialized"
+        ? status.configured_transport
+        : active_transport_;
+    status.fallback_active = status.transport == "http_jpeg_fallback";
+    status.snapshot_encoder = status.fallback_active
+        ? "bridge_cached_jpeg_proxy"
+        : "shared_memory_rgb_software_jpeg";
     status.shared_memory_sequence = shared_memory_last_sequence_;
     status.shared_memory_retry_count = shared_memory_retry_count_;
+    status.shared_memory_fallback_count = shared_memory_fallback_count_;
+    status.shared_memory_last_error = shared_memory_last_error_;
   } else if (is_hp60c_source(config_.type) && !latest_jpeg_.empty()) {
     status.snapshot_encoder = "hp60c_bridge_jpeg";
     status.transport = "http_jpeg";
+    status.configured_transport = "http_jpeg";
   } else {
     status.snapshot_encoder = image_buffer_valid_rgb(latest_image_) ? "rgb888_jpeg" : "mock_jpeg";
     status.transport = config_.type == "v4l2" ? "v4l2_mmap" : "mock";
+    status.configured_transport = status.transport;
   }
+  status.last_transport_switch_timestamp_ms = last_transport_switch_timestamp_ms_;
+  status.capture_ms_latest = capture_ms_latest_;
+  status.decode_ms_latest = decode_ms_latest_;
   status.camera_id = config_.type == "v4l2" ? config_.camera_device : config_.type + "-camera";
   if (is_shared_memory_source(config_.type)) {
     status.camera_id = config_.shared_memory_name;
@@ -574,7 +599,9 @@ FrameReadResult StreamWorkerMock::next_frame(std::uint64_t sequence) {
     set_error(error);
     return result;
   }
-  image.sequence = sequence;
+  // Preserve the camera/Bridge sequence when the source provides one.  This is
+  // required by the following M36.3 RGB-D timestamp/sequence matching stage.
+  if (image.sequence == 0) image.sequence = sequence;
   result.image = image;
   result.frame.width = image.width;
   result.frame.height = image.height;
@@ -678,7 +705,13 @@ void StreamWorkerMock::camera_loop() {
       }
       clear_error();
 
-      if (is_hp60c_source(config_.type) || is_shared_memory_source(config_.type)) {
+      // HTTP snapshots return immediately from a Bridge cache and therefore
+      // need explicit pacing. POSIX shared memory already blocks until a new
+      // sequence is published; sleeping once more would reduce a 30 FPS source
+      // to roughly 15 FPS. When shared memory temporarily falls back to HTTP,
+      // pace only that active fallback transport.
+      const std::string transport = active_transport();
+      if (is_hp60c_source(config_.type) || transport == "http_jpeg_fallback") {
         // HTTP snapshot sources return immediately from a cached Bridge frame.
         // Pace this loop to the configured camera rate so Runtime does not open
         // and decode hundreds of duplicate JPEGs per second.  The remaining
@@ -737,23 +770,66 @@ bool StreamWorkerMock::read_frame_once(
       // recovered, so discard it rather than letting snapshot requests reuse a
       // frozen fallback image.
       std::lock_guard<std::mutex> lock(mutex_);
+      shared_memory_last_error_.clear();
       latest_jpeg_.clear();
       latest_jpeg_timestamp_ms_ = 0;
+      capture_ms_latest_ = capture_ms;
+      decode_ms_latest_ = 0.0;
+      // Do not call the locking helper while mutex_ is held.
+      if (active_transport_ != "posix_shared_memory") {
+        active_transport_ = "posix_shared_memory";
+        last_transport_switch_timestamp_ms_ = static_cast<std::uint64_t>(now_timestamp_ms());
+      }
       return true;
     }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      shared_memory_last_error_ = error;
+    }
     if (config_.shared_memory_fallback_http) {
-      return read_hp60c_bridge_frame(image, capture_ms, decode_ms, error);
+      const bool ok = read_hp60c_bridge_frame(image, capture_ms, decode_ms, error);
+      if (ok) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++shared_memory_fallback_count_;
+        capture_ms_latest_ = capture_ms;
+        decode_ms_latest_ = decode_ms;
+        if (active_transport_ != "http_jpeg_fallback") {
+          active_transport_ = "http_jpeg_fallback";
+          last_transport_switch_timestamp_ms_ = static_cast<std::uint64_t>(now_timestamp_ms());
+        }
+      }
+      return ok;
     }
     return false;
   }
   if (is_hp60c_source(config_.type)) {
-    return read_hp60c_bridge_frame(image, capture_ms, decode_ms, error);
+    const bool ok = read_hp60c_bridge_frame(image, capture_ms, decode_ms, error);
+    if (ok) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      capture_ms_latest_ = capture_ms;
+      decode_ms_latest_ = decode_ms;
+      if (active_transport_ != "http_jpeg") {
+        active_transport_ = "http_jpeg";
+        last_transport_switch_timestamp_ms_ = static_cast<std::uint64_t>(now_timestamp_ms());
+      }
+    }
+    return ok;
   }
   if (config_.type != "v4l2") {
     image = make_mock_image_for_sequence(++latest_sequence_);
     return true;
   }
-  return read_v4l2_frame(image, capture_ms, error);
+  const bool ok = read_v4l2_frame(image, capture_ms, error);
+  if (ok) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    capture_ms_latest_ = capture_ms;
+    decode_ms_latest_ = 0.0;
+    if (active_transport_ != "v4l2_mmap") {
+      active_transport_ = "v4l2_mmap";
+      last_transport_switch_timestamp_ms_ = static_cast<std::uint64_t>(now_timestamp_ms());
+    }
+  }
+  return ok;
 }
 
 void StreamWorkerMock::update_latest(ImageBuffer image) {

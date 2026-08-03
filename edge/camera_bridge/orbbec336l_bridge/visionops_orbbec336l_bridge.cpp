@@ -79,6 +79,23 @@ static bool getenv_bool(const char *name, bool fallback) {
     return (s == "1" || s == "true" || s == "yes" || s == "on");
 }
 
+static mode_t getenv_mode(const char *name, mode_t fallback) {
+    const char *v = std::getenv(name);
+    if (!v || !*v) return fallback;
+    try {
+        std::size_t used = 0;
+        const unsigned long parsed = std::stoul(std::string(v), &used, 8);
+        if (used == std::strlen(v) && parsed <= 0777UL) {
+            return static_cast<mode_t>(parsed);
+        }
+    } catch (...) {
+    }
+    std::cerr << "[WARN] invalid octal mode in " << name << "=" << v
+              << ", fallback=" << std::oct << static_cast<unsigned int>(fallback)
+              << std::dec << std::endl;
+    return fallback;
+}
+
 static void prepare_runtime_workdir() {
     std::string dir = getenv_str("VISIONOPS_ORBBEC336L_RUNTIME_DIR", "/run/visionops-orbbec336l-bridge");
     if (dir.empty()) return;
@@ -189,7 +206,8 @@ public:
           shared_rgb_enabled_(getenv_bool("VISIONOPS_ORBBEC336L_SHARED_RGB_ENABLED", true)),
           shared_rgb_name_(getenv_str("VISIONOPS_ORBBEC336L_SHARED_RGB_NAME", "/visionops_orbbec336l_rgb")),
           shared_depth_enabled_(getenv_bool("VISIONOPS_ORBBEC336L_SHARED_DEPTH_ENABLED", true)),
-          shared_depth_name_(getenv_str("VISIONOPS_ORBBEC336L_SHARED_DEPTH_NAME", "/visionops_orbbec336l_depth")) {}
+          shared_depth_name_(getenv_str("VISIONOPS_ORBBEC336L_SHARED_DEPTH_NAME", "/visionops_orbbec336l_depth")),
+          shared_memory_mode_(getenv_mode("VISIONOPS_ORBBEC336L_SHARED_MEMORY_MODE", 0664)) {}
 
     bool start_camera() {
         start_ms_ = now_ms();
@@ -297,12 +315,17 @@ private:
             ::close(shared_rgb_fd_);
             shared_rgb_fd_ = -1;
         }
-        shared_rgb_fd_ = ::shm_open(shared_rgb_name_.c_str(), O_CREAT | O_RDWR, 0660);
+        shared_rgb_fd_ = ::shm_open(shared_rgb_name_.c_str(), O_CREAT | O_RDWR, shared_memory_mode_);
         if (shared_rgb_fd_ < 0) {
             shared_rgb_error_ = std::string("shm_open failed: ") + std::strerror(errno);
             return false;
         }
-        ::fchmod(shared_rgb_fd_, 0660);
+        if (::fchmod(shared_rgb_fd_, shared_memory_mode_) != 0) {
+            shared_rgb_error_ = std::string("fchmod failed: ") + std::strerror(errno);
+            ::close(shared_rgb_fd_);
+            shared_rgb_fd_ = -1;
+            return false;
+        }
         if (::ftruncate(shared_rgb_fd_, static_cast<off_t>(total_size)) != 0) {
             shared_rgb_error_ = std::string("ftruncate failed: ") + std::strerror(errno);
             ::close(shared_rgb_fd_);
@@ -460,12 +483,17 @@ private:
         shared_depth_mapping_size_ = 0;
         shared_depth_header_ = nullptr;
         if (shared_depth_fd_ >= 0) ::close(shared_depth_fd_);
-        shared_depth_fd_ = ::shm_open(shared_depth_name_.c_str(), O_CREAT | O_RDWR, 0660);
+        shared_depth_fd_ = ::shm_open(shared_depth_name_.c_str(), O_CREAT | O_RDWR, shared_memory_mode_);
         if (shared_depth_fd_ < 0) {
             shared_depth_error_ = std::string("shm_open failed: ") + std::strerror(errno);
             return false;
         }
-        ::fchmod(shared_depth_fd_, 0660);
+        if (::fchmod(shared_depth_fd_, shared_memory_mode_) != 0) {
+            shared_depth_error_ = std::string("fchmod failed: ") + std::strerror(errno);
+            ::close(shared_depth_fd_);
+            shared_depth_fd_ = -1;
+            return false;
+        }
         if (::ftruncate(shared_depth_fd_, static_cast<off_t>(total_size)) != 0) {
             shared_depth_error_ = std::string("ftruncate failed: ") + std::strerror(errno);
             ::close(shared_depth_fd_);
@@ -1834,6 +1862,8 @@ private:
            << (sample_deproject_count_ > 0 ? sample_deproject_total_ms_ / static_cast<double>(sample_deproject_count_) : 0.0) << ","
            << "\"shared_rgb_enabled\":" << (shared_rgb_enabled_ ? "true" : "false") << ","
            << "\"shared_rgb_name\":\"" << json_escape(shared_rgb_name_) << "\","
+           << "\"shared_memory_mode\":\"" << std::oct
+           << static_cast<unsigned int>(shared_memory_mode_) << std::dec << "\","
            << "\"shared_rgb_ready\":" << (shared_rgb_header_ != nullptr ? "true" : "false") << ","
            << "\"shared_rgb_publish_count\":" << shared_rgb_publish_count_ << ","
            << "\"shared_rgb_last_publish_age_ms\":"
@@ -2194,6 +2224,7 @@ private:
     std::string shared_rgb_name_;
     bool shared_depth_enabled_;
     std::string shared_depth_name_;
+    mode_t shared_memory_mode_;
 
     std::shared_ptr<ob::Context> ctx_;
     std::shared_ptr<ob::Pipeline> pipeline_;

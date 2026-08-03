@@ -116,3 +116,15 @@ add_executable(visionops_preprocess_fixture
 )
 target_include_directories(visionops_preprocess_fixture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 target_compile_options(visionops_preprocess_fixture PRIVATE -Wall -Wextra -Wpedantic)
+
+add_executable(visionops_shared_rgb_fixture
+  tests/shared_rgb_fixture.cpp
+  src/json_utils.cpp
+  src/stream_worker_mock.cpp
+)
+target_include_directories(visionops_shared_rgb_fixture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/../..)
+target_compile_options(visionops_shared_rgb_fixture PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(visionops_shared_rgb_fixture PRIVATE Threads::Threads)
+if(UNIX AND NOT APPLE)
+  target_link_libraries(visionops_shared_rgb_fixture PRIVATE rt)
+endif()

@@ -269,8 +269,19 @@ std::string frame_source_json(const FrameSourceStatus& frame_source) {
          << ",\"latest_timestamp_ms\":" << frame_source.latest_timestamp_ms
          << ",\"snapshot_encoder\":\"" << json_escape(frame_source.snapshot_encoder) << '"'
          << ",\"transport\":\"" << json_escape(frame_source.transport) << '"'
+         << ",\"configured_transport\":\"" << json_escape(frame_source.configured_transport) << '"'
+         << ",\"fallback_active\":" << json_bool(frame_source.fallback_active)
          << ",\"shared_memory_sequence\":" << frame_source.shared_memory_sequence
          << ",\"shared_memory_retry_count\":" << frame_source.shared_memory_retry_count
+         << ",\"shared_memory_fallback_count\":" << frame_source.shared_memory_fallback_count
+         << ",\"shared_memory_last_error\":"
+         << (frame_source.shared_memory_last_error.empty()
+             ? "null"
+             : '"' + json_escape(frame_source.shared_memory_last_error) + '"')
+         << ",\"last_transport_switch_timestamp_ms\":"
+         << frame_source.last_transport_switch_timestamp_ms
+         << ",\"capture_ms_latest\":" << frame_source.capture_ms_latest
+         << ",\"decode_ms_latest\":" << frame_source.decode_ms_latest
          << ",\"latest_frame_age_ms\":" << frame_source.latest_frame_age_ms
          << ",\"stale\":" << json_bool(frame_source.stale)
          << ",\"thread_alive\":" << json_bool(frame_source.thread_alive)

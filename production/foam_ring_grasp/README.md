@@ -125,3 +125,19 @@ python -m \
 - `pregrasp -> open -> approach -> insert -> close` 完整抓取前运动扫掠。
 
 离线结果仍保持 `robot_ready=false`，因为机器人关节可达性、手眼变换和在线触发链路尚未纳入当前阶段。
+
+## M36.2：3576 实时 RGB RKNN 推理
+
+M36.2 将 Orbbec 336L Bridge 的 RGB 共享内存接入 C++ RKNN Runtime，暂不读取深度：
+
+```bash
+cd /opt/visionops_v3
+bash production/foam_ring_grasp/scripts/start_rgb_runtime.sh \
+  /opt/visionops_v3/models/rk3576-001_ring_seg_20260729_100731
+
+python3 production/foam_ring_grasp/scripts/verify_rgb_runtime.py \
+  --samples 20 \
+  --report /tmp/m36_2_report.json
+```
+
+正式验收要求 `frame_source.transport=posix_shared_memory`、`fallback_active=false`，且共享内存 sequence 和推理结果 `capture_timestamp_ms` 持续变化。详细说明见 `docs/M36.2_ORBBEC_SHARED_RGB_RKNN_RUNTIME.md`。

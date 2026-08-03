@@ -463,10 +463,28 @@ When Orbbec Bridge and Runtime run on the same Linux device, Runtime may start w
 - two frame buffers;
 - release/acquire publication using `active_buffer`, `timestamp_epoch_ms` and `sequence`.
 
-This transport only replaces the internal Bridge→Runtime frame path. Existing HTTP endpoints and
-JSON response schemas remain unchanged. `GET /api/runtime/status` reports
-`frame_source.transport=posix_shared_memory`; inference results report `timing.decode_ms=0` when the
-raw path is active. If configured, Runtime may fall back to the existing HTTP JPEG snapshot path.
+This transport only replaces the internal Bridge→Runtime frame path. Existing HTTP endpoints remain
+unchanged. `GET /api/runtime/status` reports both the configured and the active transport:
+
+```json
+{
+  "frame_source": {
+    "configured_transport": "posix_shared_memory",
+    "transport": "posix_shared_memory",
+    "fallback_active": false,
+    "shared_memory_sequence": 1234,
+    "shared_memory_retry_count": 0,
+    "shared_memory_fallback_count": 0,
+    "capture_ms_latest": 1.2,
+    "decode_ms_latest": 0.0
+  }
+}
+```
+
+When shared memory is unavailable and HTTP fallback is configured, `transport` becomes
+`http_jpeg_fallback` and `fallback_active=true`. It returns to `posix_shared_memory` automatically
+after the raw path recovers. Inference results report `timing.decode_ms=0` when the raw path is
+active.
 
 ## Runtime HTTP Server 状态
 
