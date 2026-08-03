@@ -127,6 +127,21 @@
               "type": "integer",
               "minimum": 4
             },
+            "mask_decode_mode": {
+              "enum": [
+                "ultralytics_highres",
+                "legacy_proto"
+              ]
+            },
+            "mask_threshold": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "exclusiveMaximum": 1
+            },
+            "mask_polygon_epsilon_px": {
+              "type": "number",
+              "minimum": 0
+            },
             "input_roi": {
               "type": "object",
               "required": [

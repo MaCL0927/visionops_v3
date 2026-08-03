@@ -95,3 +95,36 @@ def test_obb_points_and_angle_are_restored_after_input_roi(
     assert len(obb["points"]) == 4
     assert all(850 <= point[0] <= 1277 for point in obb["points"])
     assert all(490 <= point[1] <= 719 for point in obb["points"])
+
+
+def _fixture_result(binary: Path, task: str) -> dict:
+    completed = subprocess.run(
+        [str(binary), task],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def test_ultralytics_highres_mask_breaks_legacy_proto_grid_quantization(
+    postprocess_fixture_binary: Path,
+) -> None:
+    highres = _fixture_result(postprocess_fixture_binary, "segmentation_highres")
+    legacy = _fixture_result(postprocess_fixture_binary, "segmentation_legacy")
+
+    highres_polygon = highres["detections"][0]["mask"]["polygon"][0]
+    legacy_polygon = legacy["detections"][0]["mask"]["polygon"][0]
+    assert highres["detections"][0]["mask"]["source"] == "proto"
+    assert legacy["detections"][0]["mask"]["source"] == "proto"
+    assert len(highres_polygon) > len(legacy_polygon)
+    assert all(
+        abs((value / 80.0) - round(value / 80.0)) < 1e-4
+        for point in legacy_polygon
+        for value in point
+    )
+    assert any(
+        abs((value / 80.0) - round(value / 80.0)) > 1e-3
+        for point in highres_polygon
+        for value in point
+    )

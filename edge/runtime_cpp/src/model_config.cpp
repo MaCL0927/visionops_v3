@@ -345,6 +345,32 @@ bool load_model_config_yaml(
           error_message = "模型配置 mask_max_points 不得小于4，行 " + std::to_string(line_number);
           return false;
         }
+      } else if (key == "mask_decode_mode") {
+        config.mask_decode_mode = unquote(value);
+        std::transform(
+            config.mask_decode_mode.begin(),
+            config.mask_decode_mode.end(),
+            config.mask_decode_mode.begin(),
+            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (config.mask_decode_mode != "ultralytics_highres" &&
+            config.mask_decode_mode != "legacy_proto") {
+          error_message = "模型配置 mask_decode_mode 仅支持 ultralytics_highres 或 legacy_proto，行 " +
+              std::to_string(line_number);
+          return false;
+        }
+      } else if (key == "mask_threshold") {
+        config.mask_threshold = std::stod(value);
+        if (!(config.mask_threshold > 0.0 && config.mask_threshold < 1.0)) {
+          error_message = "模型配置 mask_threshold 必须位于 (0,1)，行 " + std::to_string(line_number);
+          return false;
+        }
+      } else if (key == "mask_polygon_epsilon_px" || key == "polygon_epsilon_px") {
+        config.mask_polygon_epsilon_px = std::stod(value);
+        if (config.mask_polygon_epsilon_px < 0.0) {
+          error_message = "模型配置 mask_polygon_epsilon_px 不得小于0，行 " +
+              std::to_string(line_number);
+          return false;
+        }
       }
 
       if (path_starts_with(path_parts, {"preprocess", "input_roi"})) {

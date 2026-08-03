@@ -27,6 +27,9 @@ struct LoadedModelInfo {
   double nms_threshold{0.45};
   int max_detections{100};
   int mask_max_points{160};
+  std::string mask_decode_mode{"legacy_proto"};
+  double mask_threshold{0.5};
+  double mask_polygon_epsilon_px{0.75};
   InputRoiConfig input_roi;
   std::string model_load_error;
   // True only for model package/YAML validation errors. Runner availability

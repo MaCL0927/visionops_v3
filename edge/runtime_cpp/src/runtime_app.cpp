@@ -427,6 +427,9 @@ std::string RuntimeApp::loaded_model_json() const {
          << ",\"nms_threshold\":" << model_info_.nms_threshold
          << ",\"max_detections\":" << model_info_.max_detections
          << ",\"mask_max_points\":" << model_info_.mask_max_points
+         << ",\"mask_decode_mode\":\"" << json_escape(model_info_.mask_decode_mode) << '"'
+         << ",\"mask_threshold\":" << model_info_.mask_threshold
+         << ",\"mask_polygon_epsilon_px\":" << model_info_.mask_polygon_epsilon_px
          << ",\"input_roi\":" << input_roi_config_json(model_info_.input_roi)
          << ",\"model_load_error\":"
          << (model_info_.model_load_error.empty()
@@ -577,7 +580,10 @@ std::string RuntimeApp::infer_once() {
         static_cast<float>(model_info_.nms_threshold),
         model_info_.max_detections,
         roi_filter_.snapshot(),
-        model_info_.mask_max_points};
+        model_info_.mask_max_points,
+        model_info_.mask_decode_mode,
+        static_cast<float>(model_info_.mask_threshold),
+        static_cast<float>(model_info_.mask_polygon_epsilon_px)};
     PostprocessResult postprocess;
     if (model_info_.task_type == "detection" || model_info_.task_type == "detect") {
       postprocess = postprocess_detection(inference.tensors, postprocess_config, preprocess.letterbox);

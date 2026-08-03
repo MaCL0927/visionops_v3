@@ -1,3 +1,4 @@
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -55,7 +56,7 @@ visionops::runtime::LetterboxMeta make_letterbox_meta(
 
 int main(int argc, char* argv[]) {
   if (argc != 2) {
-    std::cerr << "用法: visionops_postprocess_fixture detection|detection_input_roi|obb|obb_input_roi|segmentation|classification\n";
+    std::cerr << "用法: visionops_postprocess_fixture detection|detection_input_roi|obb|obb_input_roi|segmentation|segmentation_highres|segmentation_legacy|classification\n";
     return 2;
   }
   const std::string task = argv[1];
@@ -171,6 +172,29 @@ int main(int argc, char* argv[]) {
         },
         config,
         meta);
+  } else if (task == "segmentation_highres" || task == "segmentation_legacy") {
+    const auto square_meta = make_letterbox_meta(640, 640, 640, 640, 640, 640, 1.0F, 0.0F, 0.0F);
+    visionops::runtime::PostprocessConfig mask_config{{"ring"}, 0.5F, 0.45F, 100, {}};
+    mask_config.mask_max_points = 256;
+    mask_config.mask_decode_mode = task == "segmentation_legacy" ? "legacy_proto" : "ultralytics_highres";
+    mask_config.mask_threshold = 0.5F;
+    mask_config.mask_polygon_epsilon_px = 0.5F;
+    std::vector<float> proto(8 * 8, 0.0F);
+    for (int y = 0; y < 8; ++y) {
+      for (int x = 0; x < 8; ++x) {
+        const float dx = static_cast<float>(x) - 3.5F;
+        const float dy = static_cast<float>(y) - 3.5F;
+        proto[y * 8 + x] = 3.2F - std::sqrt(dx * dx + dy * dy);
+      }
+    }
+    result = visionops::runtime::postprocess_segmentation(
+        {
+            make_tensor({1, 1, 6}, {320.0F, 320.0F, 600.0F, 600.0F, 0.95F, 1.0F}),
+            make_tensor({1, 1, 8, 8}, proto),
+        },
+        mask_config,
+        square_meta);
+    output_task = "segmentation";
   } else if (task == "segmentation_split") {
     const visionops::runtime::PostprocessConfig seg_config{{"person", "bag"}, 0.5F, 0.45F, 100, {}};
     auto box_head = []() {

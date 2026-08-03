@@ -410,7 +410,7 @@ bash edge/runtime_cpp/tests/smoke_test.sh
 
 Runtime segmentation 后处理支持 Rockchip YOLOv8-seg split-DFL 多输出格式。该格式通常包含 3 个尺度，每个尺度分别输出 bbox DFL、class、objectness、mask coefficients，并额外输出 proto。后处理根据 head 的 H/W 与模型输入尺寸动态推导 stride，不写死 640 或 8400。
 
-当前 segmentation mask 使用 bbox polygon 简化表示，满足 Web 可视化与基础结果查看；真正基于 proto 的实例 mask 栅格化后续再实现。
+segmentation 默认使用 `legacy_proto` mask 解码：先计算 `coeff × proto` 浮点 logits，按检测框裁剪，双线性上采样到模型输入尺寸，移除 letterbox，再恢复到原始输入 ROI 分辨率，最后执行一次阈值化并提取 polygon。该顺序避免旧实现先在低分辨率 proto 上二值化导致的规则台阶。可通过 `mask_decode_mode: legacy_proto` 临时回退旧路径。
 
 ## 模型输入 ROI（M32.3）
 
@@ -463,7 +463,10 @@ Runtime 新增模型包/命令行后处理上限：
 
 ```yaml
 max_detections: 1
-mask_max_points: 64
+mask_decode_mode: ultralytics_highres
+mask_threshold: 0.5
+mask_polygon_epsilon_px: 0.75
+mask_max_points: 160
 ```
 
 `loaded_model` 会返回实际生效值。纸箱抓取任务默认只保留 1 个候选并将 mask

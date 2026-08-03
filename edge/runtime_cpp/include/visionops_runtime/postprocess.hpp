@@ -17,6 +17,12 @@ struct PostprocessConfig {
   int max_detections{100};
   RoiFilterConfig roi;
   int mask_max_points{160};
+  // Ultralytics-compatible path keeps coeff×proto logits continuous until
+  // bilinear upsampling to the source ROI resolution, then thresholds once.
+  // legacy_proto preserves the old low-resolution threshold/contour behavior.
+  std::string mask_decode_mode{"legacy_proto"};
+  float mask_threshold{0.5F};
+  float mask_polygon_epsilon_px{0.75F};
 };
 
 struct PostprocessResult {

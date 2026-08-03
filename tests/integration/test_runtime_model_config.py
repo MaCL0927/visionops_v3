@@ -93,6 +93,9 @@ def test_runtime_uses_default_mock_model_without_config(
         assert model["task_type"] == "detection"
         assert model["backend"] == "mock"
         assert model["model_load_error"] is None
+        # Global compatibility default: non-segmentation and legacy packages do
+        # not opt into the high-resolution segmentation decoder implicitly.
+        assert model["mask_decode_mode"] == "legacy_proto"
 
 
 def test_runtime_reads_m15_model_dir(
@@ -170,6 +173,9 @@ def test_runtime_reads_postprocess_limits_and_cli_overrides(
                 'class_names: [box]',
                 'max_detections: 3',
                 'mask_max_points: 48',
+                'mask_decode_mode: legacy_proto',
+                'mask_threshold: 0.55',
+                'mask_polygon_epsilon_px: 1.25',
             ]
         ),
         encoding="utf-8",
@@ -190,6 +196,9 @@ def test_runtime_reads_postprocess_limits_and_cli_overrides(
         model = status["loaded_model"]
         assert model["max_detections"] == 1
         assert model["mask_max_points"] == 32
+        assert model["mask_decode_mode"] == "legacy_proto"
+        assert model["mask_threshold"] == pytest.approx(0.55)
+        assert model["mask_polygon_epsilon_px"] == pytest.approx(1.25)
 
 
 def test_runtime_accepts_pyyaml_block_lists_for_input_roi(

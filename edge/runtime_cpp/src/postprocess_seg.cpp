@@ -437,19 +437,192 @@ bool proto_geometry(const std::vector<std::uint32_t>& proto_shape, int& channels
   return false;
 }
 
-void attach_proto_masks(
+float probability_to_logit(float probability) {
+  const float clamped = std::clamp(probability, 1e-6F, 1.0F - 1e-6F);
+  return std::log(clamped / (1.0F - clamped));
+}
+
+std::vector<float> resize_bilinear(
+    const std::vector<float>& source,
+    int source_width,
+    int source_height,
+    int target_width,
+    int target_height) {
+  if (source_width <= 0 || source_height <= 0 || target_width <= 0 || target_height <= 0 ||
+      source.size() < static_cast<std::size_t>(source_width * source_height)) {
+    return {};
+  }
+  if (source_width == target_width && source_height == target_height) return source;
+
+  std::vector<float> target(static_cast<std::size_t>(target_width * target_height), 0.0F);
+  const float scale_x = source_width / static_cast<float>(target_width);
+  const float scale_y = source_height / static_cast<float>(target_height);
+  for (int y = 0; y < target_height; ++y) {
+    const float source_y = (static_cast<float>(y) + 0.5F) * scale_y - 0.5F;
+    const int y0_raw = static_cast<int>(std::floor(source_y));
+    const int y1_raw = y0_raw + 1;
+    const int y0 = std::clamp(y0_raw, 0, source_height - 1);
+    const int y1 = std::clamp(y1_raw, 0, source_height - 1);
+    const float wy = std::clamp(source_y - static_cast<float>(y0_raw), 0.0F, 1.0F);
+    for (int x = 0; x < target_width; ++x) {
+      const float source_x = (static_cast<float>(x) + 0.5F) * scale_x - 0.5F;
+      const int x0_raw = static_cast<int>(std::floor(source_x));
+      const int x1_raw = x0_raw + 1;
+      const int x0 = std::clamp(x0_raw, 0, source_width - 1);
+      const int x1 = std::clamp(x1_raw, 0, source_width - 1);
+      const float wx = std::clamp(source_x - static_cast<float>(x0_raw), 0.0F, 1.0F);
+      const float top = source[y0 * source_width + x0] * (1.0F - wx) +
+          source[y0 * source_width + x1] * wx;
+      const float bottom = source[y1 * source_width + x0] * (1.0F - wx) +
+          source[y1 * source_width + x1] * wx;
+      target[y * target_width + x] = top * (1.0F - wy) + bottom * wy;
+    }
+  }
+  return target;
+}
+
+std::vector<float> crop_float_image(
+    const std::vector<float>& source,
+    int source_width,
+    int source_height,
+    int x,
+    int y,
+    int width,
+    int height) {
+  if (source_width <= 0 || source_height <= 0 || width <= 0 || height <= 0 ||
+      source.size() < static_cast<std::size_t>(source_width * source_height)) {
+    return {};
+  }
+  x = std::clamp(x, 0, source_width - 1);
+  y = std::clamp(y, 0, source_height - 1);
+  width = std::min(width, source_width - x);
+  height = std::min(height, source_height - y);
+  if (width <= 0 || height <= 0) return {};
+
+  std::vector<float> cropped(static_cast<std::size_t>(width * height), 0.0F);
+  for (int row = 0; row < height; ++row) {
+    const auto source_begin = source.begin() + static_cast<std::ptrdiff_t>((y + row) * source_width + x);
+    std::copy_n(source_begin, width, cropped.begin() + static_cast<std::ptrdiff_t>(row * width));
+  }
+  return cropped;
+}
+
+std::vector<float> compose_mask_logits(
+    const SegItem& detection,
+    const FloatTensorView& proto,
+    int channels,
+    int proto_width,
+    int proto_height) {
+  const int proto_area = proto_width * proto_height;
+  std::vector<float> logits(static_cast<std::size_t>(proto_area), 0.0F);
+  for (int channel = 0; channel < channels; ++channel) {
+    const float coefficient = detection.mask_coeffs[channel];
+    const int channel_offset = channel * proto_area;
+    for (int index = 0; index < proto_area; ++index) {
+      logits[index] += coefficient * proto[channel_offset + index];
+    }
+  }
+  return logits;
+}
+
+void crop_logits_to_detection_box(
+    std::vector<float>& logits,
+    int proto_width,
+    int proto_height,
+    const SegItem& detection,
+    const LetterboxMeta& letterbox) {
+  const float x1 = std::min(detection.input_x1, detection.input_x2) *
+      proto_width / static_cast<float>(std::max(1, letterbox.input_width));
+  const float y1 = std::min(detection.input_y1, detection.input_y2) *
+      proto_height / static_cast<float>(std::max(1, letterbox.input_height));
+  const float x2 = std::max(detection.input_x1, detection.input_x2) *
+      proto_width / static_cast<float>(std::max(1, letterbox.input_width));
+  const float y2 = std::max(detection.input_y1, detection.input_y2) *
+      proto_height / static_cast<float>(std::max(1, letterbox.input_height));
+
+  for (int y = 0; y < proto_height; ++y) {
+    const bool inside_y = static_cast<float>(y) >= y1 && static_cast<float>(y) < y2;
+    for (int x = 0; x < proto_width; ++x) {
+      if (!inside_y || static_cast<float>(x) < x1 || static_cast<float>(x) >= x2) {
+        logits[y * proto_width + x] = -1.0e6F;
+      }
+    }
+  }
+}
+
+std::vector<std::uint8_t> highres_binary_mask(
+    const SegItem& detection,
+    const FloatTensorView& proto,
+    int channels,
+    int proto_width,
+    int proto_height,
+    const LetterboxMeta& letterbox,
+    float mask_threshold) {
+  auto proto_logits = compose_mask_logits(detection, proto, channels, proto_width, proto_height);
+  crop_logits_to_detection_box(proto_logits, proto_width, proto_height, detection, letterbox);
+
+  auto input_logits = resize_bilinear(
+      proto_logits,
+      proto_width,
+      proto_height,
+      letterbox.input_width,
+      letterbox.input_height);
+  if (input_logits.empty()) return {};
+
+  const int left = std::clamp(
+      static_cast<int>(std::round(letterbox.pad_x - 0.1F)),
+      0,
+      std::max(0, letterbox.input_width - 1));
+  const int top = std::clamp(
+      static_cast<int>(std::round(letterbox.pad_y - 0.1F)),
+      0,
+      std::max(0, letterbox.input_height - 1));
+  const int content_width = std::min(letterbox.resized_width, letterbox.input_width - left);
+  const int content_height = std::min(letterbox.resized_height, letterbox.input_height - top);
+  auto content_logits = crop_float_image(
+      input_logits,
+      letterbox.input_width,
+      letterbox.input_height,
+      left,
+      top,
+      content_width,
+      content_height);
+  if (content_logits.empty()) return {};
+
+  auto source_logits = resize_bilinear(
+      content_logits,
+      content_width,
+      content_height,
+      letterbox.roi_width,
+      letterbox.roi_height);
+  if (source_logits.empty()) return {};
+
+  const float logit_threshold = probability_to_logit(mask_threshold);
+  std::vector<std::uint8_t> binary(source_logits.size(), 0);
+  for (std::size_t index = 0; index < source_logits.size(); ++index) {
+    binary[index] = source_logits[index] > logit_threshold ? 1 : 0;
+  }
+  return binary;
+}
+
+void attach_proto_masks_legacy(
     std::vector<SegItem>& detections,
     const FloatTensorView& proto,
     const std::vector<std::uint32_t>& proto_shape,
     const LetterboxMeta& letterbox,
     int mask_max_points,
-    float mask_threshold = 0.5F) {
+    float /*mask_threshold*/,
+    float /*polygon_epsilon_px*/) {
   int channels = 0;
   int proto_h = 0;
   int proto_w = 0;
   if (!proto_geometry(proto_shape, channels, proto_h, proto_w)) return;
   const int proto_area = proto_h * proto_w;
   if (proto.size() < static_cast<std::size_t>(channels * proto_area)) return;
+  // Preserve the pre-M36.1.1 legacy implementation exactly: sigmoid >= 0.5
+  // and a fixed 2 px RDP epsilon. This keeps legacy_proto performance and
+  // output compatible with previously deployed segmentation tasks.
+  constexpr float kLegacyMaskThreshold = 0.5F;
 
   for (auto& detection : detections) {
     if (detection.mask_coeffs.size() < static_cast<std::size_t>(channels)) continue;
@@ -475,8 +648,7 @@ void attach_proto_masks(
         for (int channel = 0; channel < channels; ++channel) {
           logit += detection.mask_coeffs[channel] * proto[channel * proto_area + index];
         }
-        const float value = sigmoid(logit);
-        if (value >= mask_threshold) {
+        if (sigmoid(logit) >= kLegacyMaskThreshold) {
           binary[index] = 1;
           ++active_count;
         }
@@ -500,6 +672,86 @@ void attach_proto_masks(
         std::max(4, mask_max_points));
     if (polygon.size() >= 3) detection.mask_polygon = std::move(polygon);
   }
+}
+
+void attach_proto_masks_highres(
+    std::vector<SegItem>& detections,
+    const FloatTensorView& proto,
+    const std::vector<std::uint32_t>& proto_shape,
+    const LetterboxMeta& letterbox,
+    int mask_max_points,
+    float mask_threshold,
+    float polygon_epsilon_px) {
+  int channels = 0;
+  int proto_h = 0;
+  int proto_w = 0;
+  if (!proto_geometry(proto_shape, channels, proto_h, proto_w)) return;
+  const int proto_area = proto_h * proto_w;
+  if (proto.size() < static_cast<std::size_t>(channels * proto_area) ||
+      letterbox.roi_width <= 0 || letterbox.roi_height <= 0) {
+    return;
+  }
+
+  for (auto& detection : detections) {
+    if (detection.mask_coeffs.size() < static_cast<std::size_t>(channels)) continue;
+    const auto binary = highres_binary_mask(
+        detection,
+        proto,
+        channels,
+        proto_w,
+        proto_h,
+        letterbox,
+        mask_threshold);
+    if (binary.empty() ||
+        std::count(binary.begin(), binary.end(), static_cast<std::uint8_t>(1)) < 3) {
+      continue;
+    }
+
+    const auto loop = largest_boundary_loop(binary, letterbox.roi_width, letterbox.roi_height);
+    if (loop.size() < 3) continue;
+
+    std::vector<PointF> polygon;
+    polygon.reserve(loop.size());
+    const float max_x = static_cast<float>(std::max(letterbox.roi_x, letterbox.roi_x + letterbox.roi_width - 1));
+    const float max_y = static_cast<float>(std::max(letterbox.roi_y, letterbox.roi_y + letterbox.roi_height - 1));
+    for (const auto& point : loop) {
+      polygon.push_back({
+          std::clamp(static_cast<float>(letterbox.roi_x + point.x), static_cast<float>(letterbox.roi_x), max_x),
+          std::clamp(static_cast<float>(letterbox.roi_y + point.y), static_cast<float>(letterbox.roi_y), max_y)});
+    }
+    polygon = simplify_polygon(
+        std::move(polygon),
+        polygon_epsilon_px,
+        std::max(4, mask_max_points));
+    if (polygon.size() >= 3) detection.mask_polygon = std::move(polygon);
+  }
+}
+
+void attach_proto_masks(
+    std::vector<SegItem>& detections,
+    const FloatTensorView& proto,
+    const std::vector<std::uint32_t>& proto_shape,
+    const LetterboxMeta& letterbox,
+    const PostprocessConfig& config) {
+  if (config.mask_decode_mode == "legacy_proto") {
+    attach_proto_masks_legacy(
+        detections,
+        proto,
+        proto_shape,
+        letterbox,
+        config.mask_max_points,
+        config.mask_threshold,
+        config.mask_polygon_epsilon_px);
+    return;
+  }
+  attach_proto_masks_highres(
+      detections,
+      proto,
+      proto_shape,
+      letterbox,
+      config.mask_max_points,
+      config.mask_threshold,
+      config.mask_polygon_epsilon_px);
 }
 
 std::string segmentation_json(const std::vector<SegItem>& detections, const LetterboxMeta& letterbox) {
@@ -770,14 +1022,19 @@ PostprocessResult postprocess_segmentation(
         proto_values,
         proto_shape,
         letterbox,
-        config.mask_max_points);
+        config);
     result.success = true;
     result.result_count = static_cast<int>(decoded.size());
     result.roi_filtered_count = result.raw_result_count - result.result_count;
     result.mask_count = static_cast<int>(decoded.size());
     result.proto_shape = proto_shape;
     result.payload_json = segmentation_json(decoded, letterbox);
-    result.warning = "segmentation 使用 Rockchip YOLOv8-seg split DFL 多输出后处理；mask 已由 coeff×proto 栅格化并转为 polygon，若 mask 为空则回退 bbox polygon";
+    result.warning = "segmentation 使用 Rockchip YOLOv8-seg split DFL 多输出后处理；mask_decode=" +
+        config.mask_decode_mode +
+        (config.mask_decode_mode == "legacy_proto"
+             ? "，使用原低分辨率 proto 轮廓路径"
+             : "，coeff×proto 浮点 mask 高分辨率解码后转为 polygon") +
+        "，若 mask 为空则回退 bbox polygon";
     return result;
   }
 
@@ -794,14 +1051,18 @@ PostprocessResult postprocess_segmentation(
         proto_values,
         proto_shape,
         letterbox,
-        config.mask_max_points);
+        config);
     result.success = true;
     result.result_count = static_cast<int>(decoded.size());
     result.roi_filtered_count = result.raw_result_count - result.result_count;
     result.mask_count = static_cast<int>(decoded.size());
     result.proto_shape = proto_shape;
     result.payload_json = segmentation_json(decoded, letterbox);
-    result.warning = "segmentation fused 输出后处理；mask 已由 coeff×proto 栅格化并转为 polygon，若 mask 为空则回退 bbox polygon";
+    result.warning = "segmentation fused 输出后处理；mask_decode=" + config.mask_decode_mode +
+        (config.mask_decode_mode == "legacy_proto"
+             ? "，使用原低分辨率 proto 轮廓路径"
+             : "，coeff×proto 浮点 mask 高分辨率解码后转为 polygon") +
+        "，若 mask 为空则回退 bbox polygon";
     return result;
   }
 

@@ -36,6 +36,7 @@ fi
 
 echo "[INFO] camera selection file: ${CAMERA_SELECTION_FILE}"
 echo "[INFO] active camera bridge: ${CAMERA_BRIDGE_URL}"
+echo "[INFO] model dir: ${MODEL_DIR}"
 
 exec "${RUNTIME_BIN}" \
   --backend rknn \

@@ -191,6 +191,16 @@ def _make_model_yaml(
             "conf_threshold": conf_threshold,
             "iou_threshold": iou_threshold,
             "max_det": max_det,
+            **(
+                {
+                    "mask_decode_mode": "legacy_proto",
+                    "mask_threshold": 0.5,
+                    "mask_polygon_epsilon_px": 0.75,
+                    "mask_max_points": 160,
+                }
+                if runtime_task == "segmentation"
+                else {}
+            ),
         },
         "runtime": {
             "preprocess": "resize" if runtime_task == "classification" else "letterbox",
@@ -313,6 +323,16 @@ def _write_model_yaml(path: Path, doc: dict[str, Any]) -> None:
         f"  conf_threshold: {float(post.get('conf_threshold', 0.25))}",
         f"  iou_threshold: {float(post.get('iou_threshold', 0.45))}",
         f"  max_det: {int(post.get('max_det', 100))}",
+        *(
+            [
+                f"  mask_decode_mode: {_yaml_scalar(post.get('mask_decode_mode', 'legacy_proto'))}",
+                f"  mask_threshold: {float(post.get('mask_threshold', 0.5))}",
+                f"  mask_polygon_epsilon_px: {float(post.get('mask_polygon_epsilon_px', 0.75))}",
+                f"  mask_max_points: {int(post.get('mask_max_points', 160))}",
+            ]
+            if str(doc.get("task_type", "")).strip().lower() == "segmentation"
+            else []
+        ),
         "runtime:",
         f"  preprocess: {_yaml_scalar(runtime.get('preprocess', 'letterbox'))}",
         f"  color: {_yaml_scalar(runtime.get('color', 'rgb'))}",
