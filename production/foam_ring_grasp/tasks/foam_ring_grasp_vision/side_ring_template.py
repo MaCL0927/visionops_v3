@@ -7,9 +7,10 @@ stack and SciPy/Open3D dependencies so it remains deployable in the existing
 RK3576 Python environment.
 
 The fitted axis is directed from the farther endpoint toward the endpoint that
-is closer to the depth-camera origin.  A near-side upper-rim point is then
-computed from the fitted 3-D template, rather than from the highest pixel of the
-2-D segmentation contour.
+is closer to the depth-camera origin.  M37.1 computes the grasp point on the
+camera-visible cylindrical crown, slightly inset from the near opening.  This
+is intentionally different from the old M37 diagnostic point on the highest
+projected near-opening rim pixel.
 """
 
 from __future__ import annotations
@@ -140,6 +141,15 @@ class SideRingTemplateConfig:
     top_arc_sample_count: int
     grasp_radius_mode: str
     grasp_axial_inset_mm: float
+    visible_crown_enabled: bool
+    visible_crown_axial_band_start_mm: float
+    visible_crown_axial_band_end_mm: float
+    visible_crown_minimum_points: int
+    visible_crown_angular_trim_quantile: float
+    visible_crown_upper_fraction: float
+    visible_crown_minimum_span_deg: float
+    visible_crown_maximum_span_deg: float
+    visible_crown_fallback_mode: str
     random_seed: int
 
     @classmethod
@@ -217,10 +227,48 @@ class SideRingTemplateConfig:
                 section.get("near_endpoint_metric") or "euclidean_camera_distance"
             ),
             top_arc_sample_count=max(72, _int(section, "top_arc_sample_count", 720)),
-            grasp_radius_mode=str(section.get("grasp_radius_mode") or "wall_midline"),
+            grasp_radius_mode=str(section.get("grasp_radius_mode") or "outer_surface"),
             grasp_axial_inset_mm=max(
                 0.0,
-                _float(section, "grasp_axial_inset_mm", 0.0),
+                _float(section, "grasp_axial_inset_mm", 11.0),
+            ),
+            visible_crown_enabled=bool(section.get("visible_crown_enabled", True)),
+            visible_crown_axial_band_start_mm=max(
+                0.0,
+                _float(section, "visible_crown_axial_band_start_mm", 5.0),
+            ),
+            visible_crown_axial_band_end_mm=max(
+                1.0,
+                _float(section, "visible_crown_axial_band_end_mm", 22.0),
+            ),
+            visible_crown_minimum_points=max(
+                20,
+                _int(section, "visible_crown_minimum_points", 80),
+            ),
+            visible_crown_angular_trim_quantile=min(
+                0.20,
+                max(
+                    0.0,
+                    _float(section, "visible_crown_angular_trim_quantile", 0.01),
+                ),
+            ),
+            visible_crown_upper_fraction=min(
+                1.0,
+                max(0.0, _float(section, "visible_crown_upper_fraction", 0.44)),
+            ),
+            visible_crown_minimum_span_deg=max(
+                5.0,
+                _float(section, "visible_crown_minimum_span_deg", 35.0),
+            ),
+            visible_crown_maximum_span_deg=min(
+                355.0,
+                max(
+                    30.0,
+                    _float(section, "visible_crown_maximum_span_deg", 175.0),
+                ),
+            ),
+            visible_crown_fallback_mode=str(
+                section.get("visible_crown_fallback_mode") or "camera_facing"
             ),
             random_seed=_int(section, "random_seed", 3701),
         )
@@ -457,6 +505,180 @@ def _top_arc_point(
     return points[selected], (float(pixels[selected, 0]), float(pixels[selected, 1]))
 
 
+def _camera_facing_radial_direction(
+    center: np.ndarray,
+    axis: np.ndarray,
+) -> np.ndarray:
+    """Return the radial direction on the cylinder that faces the camera.
+
+    The camera origin is ``[0, 0, 0]`` in the color optical frame.  Removing
+    the component parallel to the cylinder axis leaves a vector in the local
+    cross-section plane.
+    """
+
+    axis = _unit(axis)
+    to_camera = -np.asarray(center, dtype=np.float64).reshape(3)
+    radial = to_camera - axis * float(np.dot(to_camera, axis))
+    return _unit(radial)
+
+
+def _visible_crown_direction(
+    points: np.ndarray,
+    radial_inlier_mask: np.ndarray,
+    near_center: np.ndarray,
+    axis_toward_camera: np.ndarray,
+    grasp_circle_center: np.ndarray,
+    grasp_radius_mm: float,
+    intrinsics: Mapping[str, float],
+    config: SideRingTemplateConfig,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Estimate the camera-visible upper cylindrical crown direction.
+
+    The visible cylinder points form a contiguous angular interval in a plane
+    perpendicular to the fitted axis.  We recover that interval using the
+    largest circular gap, robustly trim its two endpoints, identify the endpoint
+    that projects higher in the image, then move a configurable fraction toward
+    the lower endpoint.  The fraction is deliberately configurable because it
+    describes the desired physical contact location on the visible arc, not a
+    mathematical property of the cylinder.
+    """
+
+    axis = _unit(axis_toward_camera)
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    radial_inlier_mask = np.asarray(radial_inlier_mask, dtype=bool).reshape(-1)
+    if len(points) != len(radial_inlier_mask):
+        raise ValueError("radial inlier mask length does not match point count")
+
+    fallback_direction = _camera_facing_radial_direction(grasp_circle_center, axis)
+    fallback_debug: Dict[str, Any] = {
+        "direction_source": "camera_facing_fallback",
+        "visible_point_count": 0,
+        "visible_angular_span_deg": None,
+        "upper_fraction": float(config.visible_crown_upper_fraction),
+        "angular_trim_quantile": float(config.visible_crown_angular_trim_quantile),
+    }
+    if not config.visible_crown_enabled:
+        fallback_debug["fallback_reason"] = "visible_crown_disabled"
+        return fallback_direction, fallback_debug
+
+    start_mm = float(config.visible_crown_axial_band_start_mm)
+    end_mm = max(start_mm + 1.0, float(config.visible_crown_axial_band_end_mm))
+    axial_inset_mm = np.dot(near_center[None, :] - points, axis)
+    selected_mask = (
+        radial_inlier_mask
+        & (axial_inset_mm >= start_mm)
+        & (axial_inset_mm <= end_mm)
+    )
+    selected_points = points[selected_mask]
+    selected_axial = axial_inset_mm[selected_mask]
+    fallback_debug["visible_point_count"] = int(len(selected_points))
+    fallback_debug["axial_band_start_mm"] = start_mm
+    fallback_debug["axial_band_end_mm"] = end_mm
+    if len(selected_points) < config.visible_crown_minimum_points:
+        fallback_debug["fallback_reason"] = "insufficient_visible_crown_points"
+        return fallback_direction, fallback_debug
+
+    axis_points = near_center[None, :] - selected_axial[:, None] * axis[None, :]
+    radial_vectors = selected_points - axis_points
+    radial_norms = np.linalg.norm(radial_vectors, axis=1)
+    valid = radial_norms > _EPS
+    radial_vectors = radial_vectors[valid] / radial_norms[valid, None]
+    if len(radial_vectors) < config.visible_crown_minimum_points:
+        fallback_debug["fallback_reason"] = "insufficient_nonzero_radial_vectors"
+        return fallback_direction, fallback_debug
+
+    basis_u, basis_v = _basis_perpendicular(axis)
+    angles = np.mod(
+        np.arctan2(radial_vectors @ basis_v, radial_vectors @ basis_u),
+        2.0 * math.pi,
+    )
+    sorted_angles = np.sort(angles)
+    circular_gaps = np.diff(
+        np.concatenate((sorted_angles, sorted_angles[:1] + 2.0 * math.pi))
+    )
+    largest_gap_index = int(np.argmax(circular_gaps))
+    occupied_start = float(sorted_angles[(largest_gap_index + 1) % len(sorted_angles)])
+    unwrapped = np.mod(angles - occupied_start, 2.0 * math.pi)
+
+    trim = float(config.visible_crown_angular_trim_quantile)
+    lower = float(np.quantile(unwrapped, trim))
+    upper = float(np.quantile(unwrapped, 1.0 - trim))
+    angular_span = max(0.0, upper - lower)
+    angular_span_deg = math.degrees(angular_span)
+    fallback_debug["visible_angular_span_deg"] = float(angular_span_deg)
+    if angular_span_deg < config.visible_crown_minimum_span_deg:
+        fallback_debug["fallback_reason"] = "visible_angular_span_too_small"
+        return fallback_direction, fallback_debug
+    if angular_span_deg > config.visible_crown_maximum_span_deg:
+        fallback_debug["fallback_reason"] = "visible_angular_span_too_large"
+        return fallback_direction, fallback_debug
+
+    angle_a = occupied_start + lower
+    angle_b = occupied_start + upper
+    direction_a = _unit(math.cos(angle_a) * basis_u + math.sin(angle_a) * basis_v)
+    direction_b = _unit(math.cos(angle_b) * basis_u + math.sin(angle_b) * basis_v)
+    endpoint_points = np.asarray(
+        [
+            grasp_circle_center + float(grasp_radius_mm) * direction_a,
+            grasp_circle_center + float(grasp_radius_mm) * direction_b,
+        ],
+        dtype=np.float64,
+    )
+    endpoint_pixels = _project_points(endpoint_points, intrinsics)
+    finite = np.isfinite(endpoint_pixels).all(axis=1)
+    if not bool(np.all(finite)):
+        fallback_debug["fallback_reason"] = "visible_arc_endpoints_not_projectable"
+        return fallback_direction, fallback_debug
+
+    # Parameterize from the endpoint that is visually higher toward the lower
+    # endpoint.  This makes ``upper_fraction`` stable when the fitted basis or
+    # axis sign changes while preserving the requested near-end axis direction.
+    upper_fraction = float(config.visible_crown_upper_fraction)
+    if float(endpoint_pixels[0, 1]) <= float(endpoint_pixels[1, 1]):
+        selected_angle = angle_a + angular_span * upper_fraction
+        upper_endpoint_angle = angle_a
+        lower_endpoint_angle = angle_b
+        upper_endpoint_uv = endpoint_pixels[0]
+        lower_endpoint_uv = endpoint_pixels[1]
+    else:
+        selected_angle = angle_b - angular_span * upper_fraction
+        upper_endpoint_angle = angle_b
+        lower_endpoint_angle = angle_a
+        upper_endpoint_uv = endpoint_pixels[1]
+        lower_endpoint_uv = endpoint_pixels[0]
+
+    direction = _unit(
+        math.cos(selected_angle) * basis_u + math.sin(selected_angle) * basis_v
+    )
+    camera_facing = _camera_facing_radial_direction(grasp_circle_center, axis)
+    if float(np.dot(direction, camera_facing)) <= 0.0:
+        fallback_debug["fallback_reason"] = "selected_visible_arc_faces_away_from_camera"
+        return fallback_direction, fallback_debug
+
+    debug = {
+        "direction_source": "visible_surface_angular_interval",
+        "visible_point_count": int(len(radial_vectors)),
+        "axial_band_start_mm": start_mm,
+        "axial_band_end_mm": end_mm,
+        "visible_angular_span_deg": float(angular_span_deg),
+        "angular_trim_quantile": trim,
+        "upper_fraction": upper_fraction,
+        "upper_endpoint_angle_deg": float(math.degrees(upper_endpoint_angle) % 360.0),
+        "lower_endpoint_angle_deg": float(math.degrees(lower_endpoint_angle) % 360.0),
+        "selected_angle_deg": float(math.degrees(selected_angle) % 360.0),
+        "upper_endpoint_uv": [
+            float(upper_endpoint_uv[0]),
+            float(upper_endpoint_uv[1]),
+        ],
+        "lower_endpoint_uv": [
+            float(lower_endpoint_uv[0]),
+            float(lower_endpoint_uv[1]),
+        ],
+        "camera_facing_dot": float(np.dot(direction, camera_facing)),
+    }
+    return direction, debug
+
+
 def fit_side_ring_instance(
     instance: SegmentationInstance,
     depth_mm: np.ndarray,
@@ -548,21 +770,33 @@ def fit_side_ring_instance(
     else:
         grasp_radius = 0.5 * (config.outer_radius_mm + config.inner_radius_mm)
 
+    # Keep the original M37 point as a diagnostic reference.  It is not the
+    # M37.1 grasp point because it lies on the near-opening rim and is selected
+    # only by the highest projected image coordinate.
+    legacy_rim_radius = 0.5 * (config.outer_radius_mm + config.inner_radius_mm)
     near_rim_top, near_rim_top_uv = _top_arc_point(
         near_center,
         axis_toward_camera,
-        grasp_radius,
+        legacy_rim_radius,
         intrinsics,
         config.top_arc_sample_count,
     )
     grasp_circle_center = near_center - axis_toward_camera * config.grasp_axial_inset_mm
-    grasp_point, grasp_point_uv = _top_arc_point(
-        grasp_circle_center,
+    crown_direction, crown_debug = _visible_crown_direction(
+        points,
+        evaluation.radial_inlier_mask,
+        near_center,
         axis_toward_camera,
+        grasp_circle_center,
         grasp_radius,
         intrinsics,
-        config.top_arc_sample_count,
+        config,
     )
+    grasp_point = grasp_circle_center + grasp_radius * crown_direction
+    grasp_point_uv_value = project_point(grasp_point, intrinsics)
+    if grasp_point_uv_value is None:
+        raise ValueError("near-side visible crown point cannot be projected")
+    grasp_point_uv = (float(grasp_point_uv_value[0]), float(grasp_point_uv_value[1]))
 
     fitted_radius = float(
         np.median(
@@ -628,12 +862,35 @@ def fit_side_ring_instance(
         "far_endpoint_camera_distance_mm": float(
             _camera_distance(far_center, config.near_endpoint_metric)
         ),
-        "top_arc": {
-            "definition": "near_opening_rim_wall_midline_highest_projected_point",
+        "near_opening_rim_top_diagnostic": {
+            "definition": "legacy_near_opening_wall_midline_highest_projected_point",
+            "radius_mm": float(legacy_rim_radius),
+            "point_camera_mm": near_rim_top.tolist(),
+            "point_uv": [float(near_rim_top_uv[0]), float(near_rim_top_uv[1])],
+        },
+        "near_side_crown": {
+            "definition": "camera_visible_cylindrical_arc_point_inset_from_near_opening",
             "radius_mm": float(grasp_radius),
+            "radius_mode": str(config.grasp_radius_mode),
+            "grasp_axial_inset_mm": float(config.grasp_axial_inset_mm),
+            "grasp_circle_center_camera_mm": grasp_circle_center.tolist(),
+            "radial_direction_camera": crown_direction.tolist(),
+            "direction_source": str(crown_debug.get("direction_source")),
+            "visible_arc": crown_debug,
+            "grasp_point_camera_mm": grasp_point.tolist(),
+            "grasp_point_uv": [float(grasp_point_uv[0]), float(grasp_point_uv[1])],
+        },
+        # Backward-compatible alias used by the M37 CSV/CLI and any early
+        # experiments.  The grasp point now follows the M37.1 crown definition;
+        # the old rim-top point is retained above for explicit diagnostics.
+        "top_arc": {
+            "definition": "M37.1_camera_visible_cylindrical_arc_point_inset_from_near_opening",
+            "radius_mm": float(grasp_radius),
+            "radius_mode": str(config.grasp_radius_mode),
             "near_rim_top_camera_mm": near_rim_top.tolist(),
             "near_rim_top_uv": [float(near_rim_top_uv[0]), float(near_rim_top_uv[1])],
             "grasp_axial_inset_mm": float(config.grasp_axial_inset_mm),
+            "direction_source": str(crown_debug.get("direction_source")),
             "grasp_point_camera_mm": grasp_point.tolist(),
             "grasp_point_uv": [float(grasp_point_uv[0]), float(grasp_point_uv[1])],
         },
@@ -662,6 +919,13 @@ def fit_side_ring_instance(
                 config.outer_radius_mm,
                 96,
             ),
+            "grasp_outer_circle_camera_mm": _circle_points(
+                grasp_circle_center,
+                axis_toward_camera,
+                grasp_radius,
+                96,
+            ),
+            "visible_crown_direction_camera": crown_direction,
         },
     }
 

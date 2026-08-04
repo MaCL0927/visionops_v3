@@ -85,7 +85,24 @@ def test_m37_fits_side_axis_and_directs_it_to_nearer_endpoint():
     assert float(axis[0]) < 0.0
     assert result["near_endpoint_camera_distance_mm"] < result["far_endpoint_camera_distance_mm"]
     assert result["axis_view_angle_deg"] > 80.0
-    assert result["top_arc"]["grasp_point_uv"][1] < result["near_opening_center_uv"][1]
+    crown = result["near_side_crown"]
+    axis = np.asarray(result["axis_toward_camera"], dtype=np.float64)
+    near = np.asarray(result["near_opening_center_camera_mm"], dtype=np.float64)
+    grasp = np.asarray(crown["grasp_point_camera_mm"], dtype=np.float64)
+    axial_inset = float(np.dot(near - grasp, axis))
+    axis_point = near - axis * axial_inset
+    radial_distance = float(np.linalg.norm(grasp - axis_point))
+    assert abs(axial_inset - config.grasp_axial_inset_mm) < 1e-5
+    assert abs(radial_distance - config.outer_radius_mm) < 1e-5
+    assert crown["radius_mode"] == "outer_surface"
+    assert crown["direction_source"] in {
+        "visible_surface_angular_interval",
+        "camera_facing_fallback",
+    }
+    # The old near-opening projected top point remains available for diagnosis.
+    assert result["near_opening_rim_top_diagnostic"]["point_uv"][1] < result["near_opening_center_uv"][1]
+    # The compatibility alias must point to the corrected M37.1 grasp point.
+    assert result["top_arc"]["grasp_point_uv"] == crown["grasp_point_uv"]
 
 
 def test_m37_marks_mouth_matched_ring_for_m36_preference():

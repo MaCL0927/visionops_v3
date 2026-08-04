@@ -153,10 +153,13 @@ def _draw_fit_overlay(
         center = tuple(int(round(float(value))) for value in fit["center_uv"])
         near = tuple(int(round(float(value))) for value in fit["near_opening_center_uv"])
         far = tuple(int(round(float(value))) for value in fit["far_opening_center_uv"])
+        crown = fit.get("near_side_crown") or fit.get("top_arc") or {}
         grasp = tuple(
             int(round(float(value)))
-            for value in (fit.get("top_arc") or {}).get("grasp_point_uv", [0, 0])
+            for value in crown.get("grasp_point_uv", [0, 0])
         )
+        legacy_rim = fit.get("near_opening_rim_top_diagnostic") or {}
+        legacy_uv_raw = legacy_rim.get("point_uv")
         cv2.line(overlay, far, near, (255, 0, 255), 2, cv2.LINE_AA)
         cv2.arrowedLine(overlay, center, near, (0, 0, 255), 2, cv2.LINE_AA, tipLength=0.18)
         cv2.circle(overlay, near, 4, (0, 0, 255), -1, cv2.LINE_AA)
@@ -168,10 +171,28 @@ def _draw_fit_overlay(
             (0, 0, 255),
             2,
         )
+        if isinstance(legacy_uv_raw, (list, tuple)) and len(legacy_uv_raw) >= 2:
+            legacy_uv = tuple(int(round(float(value))) for value in legacy_uv_raw[:2])
+            cv2.drawMarker(
+                overlay,
+                legacy_uv,
+                (255, 255, 255),
+                markerType=cv2.MARKER_TILTED_CROSS,
+                markerSize=8,
+                thickness=1,
+                line_type=cv2.LINE_AA,
+            )
+        visible_arc = crown.get("visible_arc") or {}
+        for key in ("upper_endpoint_uv", "lower_endpoint_uv"):
+            endpoint = visible_arc.get(key)
+            if isinstance(endpoint, (list, tuple)) and len(endpoint) >= 2:
+                point = tuple(int(round(float(value))) for value in endpoint[:2])
+                cv2.circle(overlay, point, 3, (255, 0, 0), -1, cv2.LINE_AA)
         debug = fit.get("_debug") or {}
         for key, circle_color in (
             ("near_outer_circle_camera_mm", (0, 255, 255)),
             ("near_inner_circle_camera_mm", (255, 255, 0)),
+            ("grasp_outer_circle_camera_mm", (0, 165, 255)),
         ):
             points = debug.get(key)
             if points is None:
@@ -183,7 +204,7 @@ def _draw_fit_overlay(
                 cv2.polylines(overlay, [contour], True, circle_color, 1, cv2.LINE_AA)
     cv2.putText(
         overlay,
-        "M37: magenta axis, red near end/top grasp, cyan selected mask",
+        "M37.1: red box=crown grasp, white X=old rim-top, blue=visible arc ends",
         (10, 18),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.45,
@@ -207,7 +228,7 @@ def _mouth_matches(
 def _summary_rows(capture_id: str, fits: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     rows = []
     for fit in fits:
-        top_arc = fit.get("top_arc") or {}
+        top_arc = fit.get("near_side_crown") or fit.get("top_arc") or {}
         axis = fit.get("axis_toward_camera") or [None, None, None]
         point = top_arc.get("grasp_point_camera_mm") or [None, None, None]
         uv = top_arc.get("grasp_point_uv") or [None, None]
@@ -233,6 +254,10 @@ def _summary_rows(capture_id: str, fits: Sequence[Mapping[str, Any]]) -> List[Di
                 "grasp_z_mm": point[2],
                 "grasp_u": uv[0],
                 "grasp_v": uv[1],
+                "grasp_direction_source": top_arc.get("direction_source"),
+                "visible_arc_span_deg": (top_arc.get("visible_arc") or {}).get(
+                    "visible_angular_span_deg"
+                ),
                 "fit_ms": (fit.get("timing_ms") or {}).get("axis_template_fit_ms"),
             }
         )
@@ -307,6 +332,7 @@ def _process(
                 "near_outer_circle_camera_mm",
                 "near_inner_circle_camera_mm",
                 "far_outer_circle_camera_mm",
+                "grasp_outer_circle_camera_mm",
             ):
                 if debug.get(key) is not None:
                     template_parts.append(np.asarray(debug[key]))
@@ -317,9 +343,9 @@ def _process(
                 )
 
     payload = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "message_type": "side_ring_template_offline_validation_result",
-        "stage": "M37_side_laying_ring_parameterized_3d_template_offline_validation",
+        "stage": "M37.1_near_visible_cylindrical_crown_grasp_point_correction",
         "status": "ok",
         "capture_id": capture_id,
         "inputs": dict(inputs),
@@ -331,7 +357,13 @@ def _process(
             "inner_radius_mm": template_config.inner_radius_mm,
             "axial_length_mm": template_config.axial_length_mm,
             "axis_sign_rule": "choose endpoint with smaller camera-origin distance",
-            "top_arc_rule": "highest projected point on near-side wall-midline circle",
+            "grasp_point_rule": (
+                "outer cylindrical visible-arc point at configured near-opening "
+                "axial inset; old projected rim-top retained for diagnostics"
+            ),
+            "grasp_radius_mode": template_config.grasp_radius_mode,
+            "grasp_axial_inset_mm": template_config.grasp_axial_inset_mm,
+            "visible_crown_upper_fraction": template_config.visible_crown_upper_fraction,
         },
         "rings_detected": sum(1 for item in instances if item.class_name == "foam_ring"),
         "mouths_detected": sum(1 for item in instances if item.class_name == "ring_mouth"),
@@ -492,7 +524,7 @@ def main() -> int:
             )
 
     summary = {
-        "stage": "M37",
+        "stage": "M37.1",
         "status": "ok",
         "captures": len(payloads),
         "evaluated_count": sum(int(item.get("evaluated_count", 0)) for item in payloads),
@@ -501,14 +533,21 @@ def main() -> int:
             {
                 "capture_id": item.get("capture_id"),
                 "ring_instance_id": item.get("selected_ring_instance_id"),
-                "grasp_point_uv": ((item.get("selected") or {}).get("top_arc") or {}).get("grasp_point_uv"),
+                "grasp_point_uv": (
+                    ((item.get("selected") or {}).get("near_side_crown") or {}).get(
+                        "grasp_point_uv"
+                    )
+                    or ((item.get("selected") or {}).get("top_arc") or {}).get(
+                        "grasp_point_uv"
+                    )
+                ),
             }
             for item in payloads
         ],
         "output": str(output_root),
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    print("[PASS] M37 side-ring parameterized 3-D template offline validation completed.")
+    print("[PASS] M37.1 near-side visible crown grasp-point correction completed.")
     return 0
 
 

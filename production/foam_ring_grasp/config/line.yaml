@@ -584,10 +584,27 @@ side_ring_template:
   # from the far endpoint toward this near endpoint.
   near_endpoint_metric: euclidean_camera_distance
 
-  # Compute the upper-arc point in 3-D on the near opening. wall_midline places
-  # it halfway between nominal inner and outer radii. An optional axial inset can
-  # later move the physical contact slightly inside the opening without changing
-  # the fitted geometric rim point.
+  # M37.1 grasp-point definition.  The old M37 near-opening projected top point
+  # is retained only as a diagnostic marker.  The physical point is placed on
+  # the camera-visible outer cylindrical crown, inset from the near opening.
   top_arc_sample_count: 720
-  grasp_radius_mode: wall_midline   # wall_midline | outer_surface | inner_surface
-  grasp_axial_inset_mm: 0.0
+  grasp_radius_mode: outer_surface  # outer_surface | wall_midline | inner_surface
+  grasp_axial_inset_mm: 11.0
+
+  # Use radial inlier points from this near-side axial band to recover the
+  # actually visible cylindrical arc.  The largest circular gap defines the
+  # occluded side; 1% trimming suppresses isolated depth/mask outliers.
+  visible_crown_enabled: true
+  visible_crown_axial_band_start_mm: 5.0
+  visible_crown_axial_band_end_mm: 22.0
+  visible_crown_minimum_points: 80
+  visible_crown_angular_trim_quantile: 0.01
+
+  # 0 is the image-higher endpoint of the visible angular interval, 1 is the
+  # image-lower endpoint.  0.44 matches the requested upper-arc center on the
+  # real instance-7 validation frame while remaining configurable for later
+  # batch calibration.
+  visible_crown_upper_fraction: 0.44
+  visible_crown_minimum_span_deg: 35.0
+  visible_crown_maximum_span_deg: 175.0
+  visible_crown_fallback_mode: camera_facing
