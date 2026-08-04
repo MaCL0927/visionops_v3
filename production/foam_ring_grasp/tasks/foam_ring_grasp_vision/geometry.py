@@ -3192,8 +3192,28 @@ def analyze_scene(
         mouths,
         config,
     )
+    all_matches = list(matches)
+    candidate_scope = config.section("candidate_scope")
+    allowed_ring_ids_raw = candidate_scope.get("allowed_ring_instance_ids")
+    candidate_scope_enabled = isinstance(allowed_ring_ids_raw, Sequence) and not isinstance(
+        allowed_ring_ids_raw, (str, bytes)
+    )
+    allowed_ring_ids = (
+        {int(value) for value in allowed_ring_ids_raw}
+        if candidate_scope_enabled
+        else None
+    )
+    if allowed_ring_ids is not None:
+        matches = [
+            row for row in all_matches
+            if int(row[0].instance_id) in allowed_ring_ids
+        ]
     scene_timing["association_ms"] = _elapsed_ms(association_started)
-    ring_mouth_masks = {int(ring.instance_id): mouth.mask for ring, mouth, _ in matches}
+    # Keep masks for every globally associated ring so active-layer M36
+    # candidates still see all neighboring objects during collision checks.
+    ring_mouth_masks = {
+        int(ring.instance_id): mouth.mask for ring, mouth, _ in all_matches
+    }
     results: List[Dict[str, Any]] = []
     optimization_summary: Dict[str, Any] = {
         **optimization,
@@ -3827,6 +3847,17 @@ def analyze_scene(
         "rings_detected": len(rings),
         "mouths_detected": len(mouths),
         "matched_pairs": len(matches),
+        "global_matched_pairs": len(all_matches),
+        "candidate_scope": {
+            "enabled": bool(candidate_scope_enabled),
+            "allowed_ring_instance_ids": (
+                sorted(int(value) for value in allowed_ring_ids)
+                if allowed_ring_ids is not None else None
+            ),
+            "active_matched_ring_ids": [
+                int(ring.instance_id) for ring, _mouth, _metrics in matches
+            ],
+        },
         "unmatched_ring_ids": [int(item.instance_id) for item in unmatched_rings],
         "unmatched_mouth_ids": [int(item.instance_id) for item in unmatched_mouths],
         "association_debug": association_debug,

@@ -507,23 +507,39 @@ online_geometry:
   save_overlay: true
 
 hybrid_grasp:
-  # M37.3 unified trigger policy. One Runtime result and one exact RGB-D frame
-  # are shared by both branches. The caller never specifies target posture.
+  # M37.4 unified trigger policy. All rings are ranked by robust front-surface
+  # depth and grouped into layers before either branch performs expensive work.
   enabled: true
-
-  # Always prefer the established M36 mouth-visible rim-pinch result. M37 runs
-  # only when M36 has no valid robot_candidate.
   prefer_mouth_visible: true
   side_ring_fallback_enabled: true
-
-  # M37 must not reinterpret a ring already paired with ring_mouth. Only M36
-  # unmatched foam_ring instances enter the side-lying short-cylinder fitter.
   side_ring_only_unmatched: true
-
-  # M37.2 confidence-first fast fitting with conservative accurate fallback.
-  side_ring_search_profile: auto
   stop_after_first_side_eligible: true
-  maximum_side_ring_attempts: 0  # 0 = keep trying by confidence until success
+  maximum_side_ring_attempts: 0
+
+  depth_layering:
+    enabled: true
+    # Rings whose robust front-surface depths differ by no more than this value
+    # are treated as the same physical layer. Branch type is considered only
+    # inside one layer; a deeper M36 target cannot jump ahead of a shallower M37
+    # target.
+    layer_tolerance_mm: 30.0
+    surface_percentile: 25.0
+    mask_erode_px: 3
+    mouth_exclusion_dilate_px: 2
+    sample_stride: 2
+    minimum_valid_points: 20
+    minimum_valid_ratio: 0.08
+    minimum_depth_mm: 150.0
+    maximum_depth_mm: 3000.0
+
+  bounded_refinement:
+    # M37 candidates are searched with fast profile in depth order. A fast
+    # accepted candidate exits immediately. If every fast candidate in the
+    # active layer is uncertain, only the best one receives one warm-start
+    # local accurate refinement. Full global accurate search is forbidden in
+    # the online hybrid path.
+    fast_first_enabled: true
+    maximum_accurate_refinements_per_trigger: 1
 
 
 axis_direction:
@@ -576,10 +592,9 @@ side_ring_template:
   depth_upper_quantile: 0.99
   maximum_depth_behind_median_mm: 95.0
 
-  # M37.2 execution policy.  Side-ring candidates are sorted by foam_ring
-  # confidence.  The first eligible fit is returned immediately; lower-ranked
-  # instances remain explicitly marked as deferred.  Use exhaustive mode only
-  # for full offline diagnosis.
+  # Standalone/offline execution policy retained for M37.2 compatibility.
+  # The M37.4 online hybrid path ignores confidence-first ordering and performs
+  # depth-layer-first fast search at scene level.
   execution_mode: first_valid_confidence  # first_valid_confidence | exhaustive
   stop_after_first_eligible: true
   maximum_instances_to_attempt: 0  # 0 = unlimited until first success
@@ -604,16 +619,28 @@ side_ring_template:
   # about 120-135 ms on the local validation machine.
   fast_search_enabled: true
   fast_maximum_fit_points: 700
+  # The global stage uses fewer points than local refinement. The coarse winner
+  # is re-evaluated on fast_maximum_fit_points before angular refinement.
+  fast_global_maximum_fit_points: 400
   fast_global_axis_samples: 80
   fast_local_refine_angles_deg: [12.0, 4.0, 1.5]
   fast_local_refine_radial_steps: 2
   fast_local_refine_azimuth_steps: 12
   fast_fixed_radius_iterations: 6
 
-  # A fast result above this score, or one that fails a fit-quality gate, is
-  # rerun with the original accurate profile before the candidate is rejected
-  # or accepted.  This keeps poor/ambiguous masks conservative.
+  # M37.4 online acceptance threshold. The online path never immediately runs
+  # a full accurate global fallback for one uncertain candidate.
   fast_accept_max_score: 3.0
+
+  # One bounded warm-start local accurate refinement. It starts from the best
+  # fast axis and therefore does not repeat the 320-direction global search.
+  local_accurate_maximum_fit_points: 1200
+  local_accurate_refine_angles_deg: [4.0, 1.5, 0.5]
+  local_accurate_refine_radial_steps: 3
+  local_accurate_refine_azimuth_steps: 16
+  local_accurate_fixed_radius_iterations: 12
+
+  # Kept only for standalone/offline search_profile=auto compatibility.
   accurate_fallback_enabled: true
   accurate_fallback_on_quality_gate_failure: true
   random_seed: 3701

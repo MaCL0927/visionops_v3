@@ -1,4 +1,4 @@
-"""M37.3 one-shot hybrid M36/M37 exact RGB-D validation.
+"""M37.4 one-shot depth-layered hybrid M36/M37 exact RGB-D validation.
 
 M36.5 reuses the same :class:`OnlineGeometryProcessor` in a persistent service;
 this command intentionally starts and stops the processor once so the historical
@@ -58,7 +58,7 @@ def run_once(
         return processor.process(
             save_debug=None,
             generate_overlay=False,
-            stage="M37.3_hybrid_online_geometry_once",
+            stage="M37.4_depth_layered_hybrid_online_geometry_once",
         ).payload
     finally:
         processor.stop()
@@ -66,7 +66,7 @@ def run_once(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="M37.3：M36开口可见优先、M37侧躺自动回退的统一触发（兼容M36.4单次验证入口）",
+        description="M37.4：深度分层优先、同层M36优先、M37有界局部精修的统一触发（兼容 M36.4 单次验证入口）",
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--runtime-url")
@@ -106,6 +106,11 @@ def _summary(payload: Mapping[str, Any]) -> Dict[str, Any]:
         "fallback_triggered": (scene.get("hybrid_grasp") or {}).get("fallback_triggered"),
         "m37_evaluated_count": (scene.get("side_ring_branch") or {}).get("evaluated_count"),
         "m37_selected_ring_instance_id": (scene.get("side_ring_branch") or {}).get("selected_ring_instance_id"),
+        "selected_depth_layer_index": (scene.get("depth_layering") or {}).get("selected_layer_index"),
+        "selected_surface_depth_mm": (scene.get("depth_layering") or {}).get("selected_surface_depth_mm"),
+        "selected_depth_rank": (scene.get("depth_layering") or {}).get("selected_depth_rank"),
+        "m37_fast_attempt_count": (scene.get("side_ring_branch") or {}).get("fast_attempt_count"),
+        "m37_accurate_refinement_count": (scene.get("side_ring_branch") or {}).get("accurate_refinement_count"),
         "runtime_total_ms": ((payload.get("runtime") or {}).get("timing") or {}).get("total_ms"),
         "polygon_to_mask_ms": timing.get("polygon_to_mask_ms"),
         "geometry_ms": timing.get("geometry_ms"),
@@ -137,11 +142,11 @@ def main() -> int:
             geometry_mode=args.geometry_mode,
         )
     except (OnlineGeometryError, OSError, ValueError, json.JSONDecodeError) as error:
-        print(f"[FAIL] M37.3 hybrid online geometry failed: {error}", file=sys.stderr)
+        print(f"[FAIL] M37.4 hybrid online geometry failed: {error}", file=sys.stderr)
         return 2
     document = payload if args.print_full_json else _summary(payload)
     print(json.dumps(document, ensure_ascii=False, indent=2))
-    print("[PASS] M37.3 hybrid M36/M37 online geometry completed.")
+    print("[PASS] M37.4 depth-layered hybrid online geometry completed.")
     return 0
 
 

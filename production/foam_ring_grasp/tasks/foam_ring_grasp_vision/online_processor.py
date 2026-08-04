@@ -674,6 +674,43 @@ class OnlineGeometryProcessor:
                 scene,
                 prepared.intrinsics,
             )
+            layering = (
+                scene.get("depth_layering")
+                if isinstance(scene, Mapping)
+                and isinstance(scene.get("depth_layering"), Mapping)
+                else {}
+            )
+            depth_rows = {
+                int(row.get("ring_instance_id")): row
+                for row in (layering.get("candidates") or [])
+                if isinstance(row, Mapping)
+                and row.get("ring_instance_id") is not None
+            }
+            selected_depth_id = scene.get("selected_ring_instance_id") if isinstance(scene, Mapping) else None
+            for instance in prepared.adaptation.instances:
+                if instance.class_name != "foam_ring":
+                    continue
+                row = depth_rows.get(int(instance.instance_id))
+                if not row:
+                    continue
+                x1, y1, _x2, _y2 = [int(value) for value in instance.bbox_xyxy]
+                layer_value = row.get("depth_layer_index")
+                depth_value = row.get("surface_depth_mm")
+                label = "L{} z={}".format(
+                    layer_value if layer_value is not None else "?",
+                    f"{float(depth_value):.0f}" if depth_value is not None else "?",
+                )
+                color = (0, 255, 255) if selected_depth_id is not None and int(instance.instance_id) == int(selected_depth_id) else ((0, 220, 0) if layer_value == 0 else (0, 165, 255))
+                cv2.putText(
+                    overlay,
+                    label,
+                    (max(2, x1), max(14, y1 - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.38,
+                    color,
+                    1,
+                    cv2.LINE_AA,
+                )
             side_branch = (
                 scene.get("side_ring_branch")
                 if isinstance(scene, Mapping)
@@ -701,7 +738,7 @@ class OnlineGeometryProcessor:
             )
             cv2.putText(
                 overlay,
-                "M37.3 branch: " + branch_label,
+                "M37.4 branch: " + branch_label,
                 (10, max(36, overlay.shape[0] - 12)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.45,

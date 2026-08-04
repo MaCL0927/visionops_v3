@@ -225,3 +225,29 @@ def test_m372_orders_candidates_by_confidence_and_stops_after_first_valid(
     assert payload["execution"]["first_valid_early_exit_triggered"] is True
     deferred = [item for item in payload["fits"] if item["processing_status"] == "deferred"]
     assert deferred[0]["ring_instance_id"] == 1
+
+
+def test_m374_local_accurate_is_warm_started_without_global_search():
+    instance, depth, intrinsics, config = _synthetic_side_cylinder()
+    fast = fit_side_ring_instance(
+        instance,
+        depth,
+        intrinsics,
+        config,
+        search_profile="fast",
+    )
+    refined = fit_side_ring_instance(
+        instance,
+        depth,
+        intrinsics,
+        config,
+        search_profile="local_accurate",
+        initial_axis=np.asarray(fast["axis_toward_camera"], dtype=np.float64),
+    )
+    axis_search = refined["timing_ms"]["axis_search"]
+    assert refined["search_profile_used"] == "local_accurate"
+    assert refined["accurate_fallback_used"] is False
+    assert axis_search["local_accurate"]["warm_start"] is True
+    assert axis_search["local_accurate"]["global_axis_samples"] == 0
+    assert axis_search["local_accurate"]["global_search_ms"] == 0.0
+    assert axis_search["local_accurate"]["candidate_evaluations"] > 0

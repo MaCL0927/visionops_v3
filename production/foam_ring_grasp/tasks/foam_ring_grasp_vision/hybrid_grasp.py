@@ -1,22 +1,34 @@
-"""M37.3 automatic mouth-visible / side-lying foam-ring branch selection.
+"""M37.4 depth-layer-first hybrid foam-ring grasp selection.
 
-One Runtime segmentation result and one exact RGB-D frame are shared by both
-branches.  The established M36 mouth-visible rim-pinch branch always runs
-first.  Only when it produces no valid candidate does the side-ring M37.2
-parameterized short-cylinder fit run on unmatched ``foam_ring`` instances in
-confidence order, stopping at the first eligible fit.
+A single Runtime segmentation result and exact RGB-D frame feed both branches.
+All foam rings are first assigned a robust front-surface depth and grouped into
+layers.  Layers are processed from nearest to farthest.  Within one layer the
+established M36 mouth-visible branch is attempted first; only then are
+unmatched side-lying rings evaluated by M37.
+
+M37 uses a bounded fast-first policy: candidates are tried in surface-depth
+order with the fast profile.  A fast-accepted candidate returns immediately.
+When all fast candidates in the active layer are uncertain, at most one best
+fast result per trigger receives a warm-start local accurate refinement.  The
+expensive global accurate search is never repeated by the online hybrid path.
 """
 
 from __future__ import annotations
 
+import math
 import time
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Mapping, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+import cv2  # type: ignore
 import numpy as np  # type: ignore
 
-from .geometry import GeometryConfig, analyze_scene
+from .geometry import (
+    GeometryConfig,
+    _associate_ring_mouths_detailed,
+    analyze_scene,
+)
 from .segmentation import SegmentationInstance
 from .side_ring_template import SideRingTemplateConfig, fit_side_ring_instance
 
@@ -25,70 +37,384 @@ def _elapsed_ms(started: float) -> float:
     return (time.perf_counter() - started) * 1000.0
 
 
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
 @dataclass(frozen=True)
 class HybridGraspConfig:
-    """Branch policy for the M37.3 unified trigger path."""
+    """M37.4 unified depth-layer and bounded-refinement policy."""
 
     enabled: bool = False
     prefer_mouth_visible: bool = True
     side_ring_fallback_enabled: bool = True
     side_ring_only_unmatched: bool = True
-    side_ring_search_profile: str = "auto"
     stop_after_first_side_eligible: bool = True
     maximum_side_ring_attempts: int = 0
+
+    depth_layering_enabled: bool = True
+    depth_layer_tolerance_mm: float = 30.0
+    surface_depth_percentile: float = 25.0
+    surface_depth_mask_erode_px: int = 3
+    surface_depth_mouth_exclusion_px: int = 2
+    surface_depth_sample_stride: int = 2
+    surface_depth_minimum_points: int = 20
+    surface_depth_minimum_valid_ratio: float = 0.08
+    surface_depth_minimum_mm: float = 150.0
+    surface_depth_maximum_mm: float = 3000.0
+
+    m37_fast_first_enabled: bool = True
+    maximum_accurate_refinements_per_trigger: int = 1
 
     @classmethod
     def from_mapping(cls, raw_config: Mapping[str, Any]) -> "HybridGraspConfig":
         section = raw_config.get("hybrid_grasp") or {}
         if not isinstance(section, Mapping):
             raise ValueError("hybrid_grasp must be a mapping")
-        profile = str(section.get("side_ring_search_profile") or "auto").strip().lower()
-        if profile not in {"auto", "fast", "accurate"}:
-            raise ValueError("hybrid_grasp.side_ring_search_profile must be auto, fast or accurate")
+        depth = section.get("depth_layering") or {}
+        if not isinstance(depth, Mapping):
+            depth = {}
+        bounded = section.get("bounded_refinement") or {}
+        if not isinstance(bounded, Mapping):
+            bounded = {}
+        depth_cfg = raw_config.get("depth") or {}
+        if not isinstance(depth_cfg, Mapping):
+            depth_cfg = {}
         return cls(
             enabled=bool(section.get("enabled", False)),
             prefer_mouth_visible=bool(section.get("prefer_mouth_visible", True)),
-            side_ring_fallback_enabled=bool(section.get("side_ring_fallback_enabled", True)),
-            side_ring_only_unmatched=bool(section.get("side_ring_only_unmatched", True)),
-            side_ring_search_profile=profile,
+            side_ring_fallback_enabled=bool(
+                section.get("side_ring_fallback_enabled", True)
+            ),
+            side_ring_only_unmatched=bool(
+                section.get("side_ring_only_unmatched", True)
+            ),
             stop_after_first_side_eligible=bool(
                 section.get("stop_after_first_side_eligible", True)
             ),
             maximum_side_ring_attempts=max(
-                0, int(section.get("maximum_side_ring_attempts", 0))
+                0, _safe_int(section.get("maximum_side_ring_attempts"), 0)
+            ),
+            depth_layering_enabled=bool(depth.get("enabled", True)),
+            depth_layer_tolerance_mm=max(
+                1.0, _safe_float(depth.get("layer_tolerance_mm"), 30.0)
+            ),
+            surface_depth_percentile=min(
+                50.0,
+                max(1.0, _safe_float(depth.get("surface_percentile"), 25.0)),
+            ),
+            surface_depth_mask_erode_px=max(
+                0, _safe_int(depth.get("mask_erode_px"), 3)
+            ),
+            surface_depth_mouth_exclusion_px=max(
+                0, _safe_int(depth.get("mouth_exclusion_dilate_px"), 2)
+            ),
+            surface_depth_sample_stride=max(
+                1, _safe_int(depth.get("sample_stride"), 2)
+            ),
+            surface_depth_minimum_points=max(
+                5, _safe_int(depth.get("minimum_valid_points"), 20)
+            ),
+            surface_depth_minimum_valid_ratio=min(
+                1.0,
+                max(
+                    0.0,
+                    _safe_float(depth.get("minimum_valid_ratio"), 0.08),
+                ),
+            ),
+            surface_depth_minimum_mm=_safe_float(
+                depth.get("minimum_depth_mm"),
+                _safe_float(depth_cfg.get("minimum_mm"), 150.0),
+            ),
+            surface_depth_maximum_mm=_safe_float(
+                depth.get("maximum_depth_mm"),
+                _safe_float(depth_cfg.get("maximum_mm"), 3000.0),
+            ),
+            m37_fast_first_enabled=bool(bounded.get("fast_first_enabled", True)),
+            maximum_accurate_refinements_per_trigger=max(
+                0,
+                _safe_int(
+                    bounded.get("maximum_accurate_refinements_per_trigger"), 1
+                ),
             ),
         )
+
+
+def _kernel(radius: int) -> np.ndarray:
+    size = max(1, 2 * int(radius) + 1)
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+
+
+def _surface_depth_record(
+    ring: SegmentationInstance,
+    depth_mm: np.ndarray,
+    config: HybridGraspConfig,
+    *,
+    mouth: Optional[SegmentationInstance] = None,
+) -> Dict[str, Any]:
+    """Compute a robust near-surface depth inside one ring instance."""
+
+    started = time.perf_counter()
+    x1, y1, x2, y2 = [int(value) for value in ring.bbox_xyxy]
+    padding = max(
+        config.surface_depth_mask_erode_px,
+        config.surface_depth_mouth_exclusion_px,
+        1,
+    )
+    x1 = max(0, x1 - padding)
+    y1 = max(0, y1 - padding)
+    x2 = min(depth_mm.shape[1], x2 + padding)
+    y2 = min(depth_mm.shape[0], y2 + padding)
+    if x2 <= x1 or y2 <= y1:
+        return {
+            "ring_instance_id": int(ring.instance_id),
+            "surface_depth_mm": None,
+            "depth_valid_count": 0,
+            "depth_sample_count": 0,
+            "depth_valid_ratio": 0.0,
+            "depth_status": "invalid_bbox",
+            "timing_ms": _elapsed_ms(started),
+        }
+
+    local_mask = ring.mask[y1:y2, x1:x2].astype(np.uint8)
+    if config.surface_depth_mask_erode_px > 0:
+        local_mask = cv2.erode(
+            local_mask,
+            _kernel(config.surface_depth_mask_erode_px),
+            iterations=1,
+        )
+    if mouth is not None:
+        mouth_mask = mouth.mask[y1:y2, x1:x2].astype(np.uint8)
+        if config.surface_depth_mouth_exclusion_px > 0:
+            mouth_mask = cv2.dilate(
+                mouth_mask,
+                _kernel(config.surface_depth_mouth_exclusion_px),
+                iterations=1,
+            )
+        local_mask[mouth_mask > 0] = 0
+
+    stride = config.surface_depth_sample_stride
+    sampled_mask = local_mask[::stride, ::stride] > 0
+    sampled_depth = depth_mm[y1:y2, x1:x2][::stride, ::stride]
+    values = sampled_depth[sampled_mask].astype(np.float64, copy=False)
+    sample_count = int(values.size)
+    valid = values[
+        (values >= config.surface_depth_minimum_mm)
+        & (values <= config.surface_depth_maximum_mm)
+    ]
+    valid_count = int(valid.size)
+    valid_ratio = float(valid_count) / float(max(1, sample_count))
+    enough = (
+        valid_count >= config.surface_depth_minimum_points
+        and valid_ratio >= config.surface_depth_minimum_valid_ratio
+    )
+    surface_depth = (
+        float(np.percentile(valid, config.surface_depth_percentile))
+        if enough
+        else None
+    )
+    return {
+        "ring_instance_id": int(ring.instance_id),
+        "ring_confidence": float(ring.confidence),
+        "surface_depth_mm": surface_depth,
+        "surface_depth_statistic": f"p{config.surface_depth_percentile:g}",
+        "depth_median_mm": float(np.median(valid)) if valid_count else None,
+        "depth_p10_mm": float(np.percentile(valid, 10)) if valid_count else None,
+        "depth_p25_mm": float(np.percentile(valid, 25)) if valid_count else None,
+        "depth_valid_count": valid_count,
+        "depth_sample_count": sample_count,
+        "depth_valid_ratio": valid_ratio,
+        "depth_status": "ok" if enough else "insufficient_valid_depth",
+        "timing_ms": _elapsed_ms(started),
+    }
+
+
+def _build_depth_layers(
+    records: Sequence[Dict[str, Any]],
+    tolerance_mm: float,
+) -> List[Dict[str, Any]]:
+    valid = [
+        row
+        for row in records
+        if row.get("surface_depth_mm") is not None
+        and math.isfinite(float(row["surface_depth_mm"]))
+    ]
+    valid.sort(
+        key=lambda row: (
+            float(row["surface_depth_mm"]),
+            -float(row.get("depth_valid_ratio") or 0.0),
+            -float(row.get("ring_confidence") or 0.0),
+            int(row["ring_instance_id"]),
+        )
+    )
+    layers: List[Dict[str, Any]] = []
+    cursor = 0
+    depth_rank = 1
+    while cursor < len(valid):
+        anchor = float(valid[cursor]["surface_depth_mm"])
+        layer_rows: List[Dict[str, Any]] = []
+        while cursor < len(valid):
+            value = float(valid[cursor]["surface_depth_mm"])
+            if value > anchor + tolerance_mm and layer_rows:
+                break
+            row = valid[cursor]
+            row["depth_rank"] = int(depth_rank)
+            depth_rank += 1
+            layer_rows.append(row)
+            cursor += 1
+        layer_index = len(layers)
+        for row in layer_rows:
+            row["depth_layer_index"] = int(layer_index)
+        layers.append(
+            {
+                "layer_index": int(layer_index),
+                "anchor_depth_mm": float(anchor),
+                "maximum_depth_mm": float(
+                    max(float(row["surface_depth_mm"]) for row in layer_rows)
+                ),
+                "ring_instance_ids": [
+                    int(row["ring_instance_id"]) for row in layer_rows
+                ],
+                "candidate_count": len(layer_rows),
+                "depth_valid": True,
+                "records": layer_rows,
+            }
+        )
+
+    invalid = [row for row in records if row not in valid]
+    if invalid:
+        invalid.sort(
+            key=lambda row: (
+                -float(row.get("depth_valid_ratio") or 0.0),
+                -float(row.get("ring_confidence") or 0.0),
+                int(row["ring_instance_id"]),
+            )
+        )
+        layer_index = len(layers)
+        for row in invalid:
+            row["depth_layer_index"] = int(layer_index)
+            row["depth_rank"] = None
+        layers.append(
+            {
+                "layer_index": int(layer_index),
+                "anchor_depth_mm": None,
+                "maximum_depth_mm": None,
+                "ring_instance_ids": [
+                    int(row["ring_instance_id"]) for row in invalid
+                ],
+                "candidate_count": len(invalid),
+                "depth_valid": False,
+                "records": invalid,
+            }
+        )
+    return layers
+
+
+def _scoped_geometry_config(
+    geometry_config: GeometryConfig,
+    allowed_ring_ids: Sequence[int],
+) -> GeometryConfig:
+    raw = deepcopy(geometry_config.raw)
+    raw["candidate_scope"] = {
+        "allowed_ring_instance_ids": [int(value) for value in allowed_ring_ids],
+        "reason": "M37.4_depth_layer_active_m36_scope",
+    }
+    return GeometryConfig(raw)
 
 
 def _deferred_side_record(
     instance: SegmentationInstance,
     *,
-    attempt_rank: int,
+    attempt_rank: Optional[int],
     reason: str,
+    depth_record: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    return {
+    record: Dict[str, Any] = {
         "ring_instance_id": int(instance.instance_id),
         "ring_confidence": float(instance.confidence),
         "ring_bbox_xyxy": [int(value) for value in instance.bbox_xyxy],
         "mouth_matched": False,
-        "attempt_rank": int(attempt_rank),
+        "attempt_rank": int(attempt_rank) if attempt_rank is not None else None,
         "processing_status": "deferred",
         "deferred_reason": str(reason),
         "eligible": None,
         "rejection_reasons": [],
         "timing_ms": {"total_ms": 0.0},
     }
+    if depth_record:
+        record.update(
+            {
+                "surface_depth_mm": depth_record.get("surface_depth_mm"),
+                "depth_layer_index": depth_record.get("depth_layer_index"),
+                "depth_rank": depth_record.get("depth_rank"),
+                "depth_valid_ratio": depth_record.get("depth_valid_ratio"),
+            }
+        )
+    return record
+
+
+def _fit_quality_rank(fit: Mapping[str, Any]) -> Tuple[Any, ...]:
+    rejection_count = len(fit.get("rejection_reasons") or [])
+    fast_reason_count = len(fit.get("fast_acceptance_reasons") or [])
+    return (
+        rejection_count,
+        fast_reason_count,
+        _safe_float(fit.get("fit_score"), float("inf")),
+        _safe_float(fit.get("radial_residual_p90_mm"), float("inf")),
+        -_safe_float(fit.get("radial_inlier_ratio"), 0.0),
+        -_safe_float(fit.get("observed_axis_span_mm"), 0.0),
+        _safe_float(fit.get("surface_depth_mm"), float("inf")),
+        -_safe_float(fit.get("ring_confidence"), 0.0),
+    )
+
+
+def _compact_fast_seed(fit: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        key: deepcopy(fit.get(key))
+        for key in (
+            "ring_instance_id",
+            "ring_confidence",
+            "surface_depth_mm",
+            "depth_layer_index",
+            "depth_rank",
+            "eligible",
+            "rejection_reasons",
+            "fit_score",
+            "fast_acceptance_passed",
+            "fast_acceptance_reasons",
+            "radial_inlier_ratio",
+            "radial_residual_median_mm",
+            "radial_residual_p90_mm",
+            "observed_axis_span_mm",
+            "axis_toward_camera",
+            "timing_ms",
+        )
+    }
 
 
 def _m37_candidate(fit: Mapping[str, Any]) -> Dict[str, Any]:
-    crown = fit.get("near_side_crown") if isinstance(fit.get("near_side_crown"), Mapping) else {}
+    crown = (
+        fit.get("near_side_crown")
+        if isinstance(fit.get("near_side_crown"), Mapping)
+        else {}
+    )
     return {
         "schema_version": "1.0",
         "message_type": "foam_ring_side_crown_grasp_candidate",
         "status": "candidate_only_not_robot_ready",
         "robot_ready": False,
         "reason": (
-            "M37.3 side-ring camera-frame grasp point only; gripper pose, hand-eye "
+            "M37.4 side-ring camera-frame grasp point only; gripper pose, hand-eye "
             "transform, reachability and final robot protocol are not enabled"
         ),
         "grasp_branch": "m37_side_ring_near_visible_crown",
@@ -97,11 +423,18 @@ def _m37_candidate(fit: Mapping[str, Any]) -> Dict[str, Any]:
             "ring_instance_id": fit.get("ring_instance_id"),
             "ring_confidence": fit.get("ring_confidence"),
             "attempt_rank": fit.get("attempt_rank"),
+            "surface_depth_mm": fit.get("surface_depth_mm"),
+            "depth_layer_index": fit.get("depth_layer_index"),
+            "depth_rank": fit.get("depth_rank"),
             "fit_score": fit.get("fit_score"),
             "search_profile_used": fit.get("search_profile_used"),
-            "accurate_fallback_used": fit.get("accurate_fallback_used"),
+            "local_accurate_refinement_used": fit.get(
+                "local_accurate_refinement_used", False
+            ),
             "radial_inlier_ratio": fit.get("radial_inlier_ratio"),
-            "radial_residual_median_mm": fit.get("radial_residual_median_mm"),
+            "radial_residual_median_mm": fit.get(
+                "radial_residual_median_mm"
+            ),
             "radial_residual_p90_mm": fit.get("radial_residual_p90_mm"),
             "observed_axis_span_mm": fit.get("observed_axis_span_mm"),
             "axis_view_angle_deg": fit.get("axis_view_angle_deg"),
@@ -110,17 +443,28 @@ def _m37_candidate(fit: Mapping[str, Any]) -> Dict[str, Any]:
         "grasp_point_uv": crown.get("grasp_point_uv"),
         "axis_toward_camera": fit.get("axis_toward_camera"),
         "center_camera_mm": fit.get("center_camera_mm"),
-        "near_opening_center_camera_mm": fit.get("near_opening_center_camera_mm"),
+        "near_opening_center_camera_mm": fit.get(
+            "near_opening_center_camera_mm"
+        ),
         "far_opening_center_camera_mm": fit.get("far_opening_center_camera_mm"),
         "near_side_crown": deepcopy(crown),
         "fit_timing_ms": deepcopy(fit.get("timing_ms") or {}),
     }
 
 
-def _m36_candidate(candidate: Mapping[str, Any]) -> Dict[str, Any]:
+def _m36_candidate(
+    candidate: Mapping[str, Any],
+    depth_record: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
     document = deepcopy(dict(candidate))
     document["grasp_branch"] = "m36_mouth_visible_rim_pinch"
     document["grasp_mode"] = "rim_pinch"
+    target = document.get("target") if isinstance(document.get("target"), dict) else {}
+    if depth_record:
+        target["surface_depth_mm"] = depth_record.get("surface_depth_mm")
+        target["depth_layer_index"] = depth_record.get("depth_layer_index")
+        target["depth_rank"] = depth_record.get("depth_rank")
+    document["target"] = target
     return document
 
 
@@ -133,150 +477,426 @@ def run_hybrid_grasp(
     geometry_config: GeometryConfig,
     analyze_fn: Callable[..., Dict[str, Any]] = analyze_scene,
     side_fit_fn: Callable[..., Dict[str, Any]] = fit_side_ring_instance,
+    associate_fn: Callable[..., Any] = _associate_ring_mouths_detailed,
 ) -> Dict[str, Any]:
-    """Run M36 first and M37 only when M36 has no valid candidate.
-
-    The returned object is the scene document consumed by the existing online
-    processor.  Existing M36 scene keys remain at the top level for backward
-    compatibility; M37.3 adds ``hybrid_grasp`` and ``side_ring_branch``.
-    """
+    """Run depth-layer-first M36/M37 selection with bounded refinement."""
 
     hybrid_config = HybridGraspConfig.from_mapping(raw_config)
     if not hybrid_config.enabled:
         return analyze_fn(instances, depth_mm, intrinsics, geometry_config)
 
     total_started = time.perf_counter()
-    m36_started = time.perf_counter()
-    m36_scene = analyze_fn(instances, depth_mm, intrinsics, geometry_config)
-    m36_ms = _elapsed_ms(m36_started)
-    if not isinstance(m36_scene, dict):
-        raise ValueError("M36 analyze_scene must return a dict")
+    rings = [item for item in instances if item.class_name == "foam_ring"]
+    mouths = [item for item in instances if item.class_name == "ring_mouth"]
 
-    original_m36_candidate = (
-        m36_scene.get("robot_candidate")
-        if isinstance(m36_scene.get("robot_candidate"), Mapping)
-        else None
+    association_started = time.perf_counter()
+    matches, unmatched_rings, unmatched_mouths, association_debug = associate_fn(
+        rings,
+        mouths,
+        geometry_config,
     )
-    m36_candidate = _m36_candidate(original_m36_candidate) if original_m36_candidate else None
+    association_ms = _elapsed_ms(association_started)
+    matched_ids = {int(ring.instance_id) for ring, _mouth, _metrics in matches}
+    mouth_by_ring = {
+        int(ring.instance_id): mouth for ring, mouth, _metrics in matches
+    }
+    ring_by_id = {int(item.instance_id): item for item in rings}
 
+    depth_started = time.perf_counter()
+    depth_records: List[Dict[str, Any]] = []
+    for ring in rings:
+        record = _surface_depth_record(
+            ring,
+            depth_mm,
+            hybrid_config,
+            mouth=mouth_by_ring.get(int(ring.instance_id)),
+        )
+        record["mouth_matched"] = int(ring.instance_id) in matched_ids
+        record["branch_availability"] = (
+            "m36_mouth_visible"
+            if int(ring.instance_id) in matched_ids
+            else "m37_side_ring"
+        )
+        depth_records.append(record)
+    depth_preselection_ms = _elapsed_ms(depth_started)
+
+    layer_started = time.perf_counter()
+    layers = _build_depth_layers(
+        depth_records,
+        hybrid_config.depth_layer_tolerance_mm
+        if hybrid_config.depth_layering_enabled
+        else float("inf"),
+    )
+    depth_layer_build_ms = _elapsed_ms(layer_started)
+    depth_by_id = {int(row["ring_instance_id"]): row for row in depth_records}
+
+    template_config = SideRingTemplateConfig.from_mapping(raw_config)
     side_fits: List[Dict[str, Any]] = []
-    selected_side: Dict[str, Any] | None = None
-    candidate_filter_sort_ms = 0.0
-    side_fit_loop_ms = 0.0
-    selected_branch = "m36_mouth_visible_rim_pinch" if m36_candidate else "none"
-    fallback_reason: str | None = None
+    fast_attempted_ids: set[int] = set()
+    selected_side: Optional[Dict[str, Any]] = None
+    selected_m36_candidate: Optional[Dict[str, Any]] = None
+    selected_m36_scene: Optional[Dict[str, Any]] = None
+    last_m36_scene: Optional[Dict[str, Any]] = None
+    selected_branch = "none"
+    selected_layer_index: Optional[int] = None
+    m36_total_ms = 0.0
+    m36_attempt_count = 0
+    m37_fast_total_ms = 0.0
+    m37_fast_attempt_count = 0
+    local_accurate_total_ms = 0.0
+    accurate_refinement_count = 0
+    accurate_refinement_candidate_id: Optional[int] = None
+    global_side_attempt_rank = 0
+    maximum_side_attempts_reached = False
+    active_layer_summaries: List[Dict[str, Any]] = []
 
-    if m36_candidate is None and hybrid_config.side_ring_fallback_enabled:
-        fallback_reason = "m36_no_valid_candidate"
-        filter_started = time.perf_counter()
-        unmatched_ids_raw = m36_scene.get("unmatched_ring_ids") or []
-        unmatched_ids = {int(value) for value in unmatched_ids_raw}
+    for layer in layers:
+        layer_index = int(layer["layer_index"])
+        layer_ids = [int(value) for value in layer["ring_instance_ids"]]
+        layer_summary: Dict[str, Any] = {
+            "layer_index": layer_index,
+            "anchor_depth_mm": layer.get("anchor_depth_mm"),
+            "maximum_depth_mm": layer.get("maximum_depth_mm"),
+            "ring_instance_ids": layer_ids,
+            "m36_candidate_ring_ids": [],
+            "m37_candidate_ring_ids": [],
+            "m36_attempted": False,
+            "m36_candidate_found": False,
+            "m37_fast_attempted_ids": [],
+            "m37_fast_accepted_id": None,
+            "local_accurate_refined_id": None,
+            "selected_branch": "none",
+        }
+
+        m36_ids = [value for value in layer_ids if value in matched_ids]
+        layer_summary["m36_candidate_ring_ids"] = list(m36_ids)
+        if m36_ids and hybrid_config.prefer_mouth_visible:
+            m36_attempt_count += 1
+            layer_summary["m36_attempted"] = True
+            m36_started = time.perf_counter()
+            m36_scene = analyze_fn(
+                instances,
+                depth_mm,
+                intrinsics,
+                _scoped_geometry_config(geometry_config, m36_ids),
+            )
+            m36_elapsed = _elapsed_ms(m36_started)
+            m36_total_ms += m36_elapsed
+            last_m36_scene = m36_scene
+            layer_summary["m36_ms"] = float(m36_elapsed)
+            original = (
+                m36_scene.get("robot_candidate")
+                if isinstance(m36_scene.get("robot_candidate"), Mapping)
+                else None
+            )
+            if original is not None:
+                ring_id = int((original.get("target") or {}).get("ring_instance_id"))
+                selected_m36_candidate = _m36_candidate(
+                    original,
+                    depth_by_id.get(ring_id),
+                )
+                selected_m36_scene = m36_scene
+                selected_branch = "m36_mouth_visible_rim_pinch"
+                selected_layer_index = layer_index
+                layer_summary["m36_candidate_found"] = True
+                layer_summary["selected_branch"] = selected_branch
+                active_layer_summaries.append(layer_summary)
+                break
+
+        if not hybrid_config.side_ring_fallback_enabled:
+            active_layer_summaries.append(layer_summary)
+            continue
+
         side_candidates = [
-            item
-            for item in instances
-            if item.class_name == "foam_ring"
+            ring_by_id[value]
+            for value in layer_ids
+            if value in ring_by_id
             and (
                 not hybrid_config.side_ring_only_unmatched
-                or int(item.instance_id) in unmatched_ids
+                or value not in matched_ids
             )
         ]
         side_candidates.sort(
-            key=lambda item: (-float(item.confidence), int(item.instance_id))
+            key=lambda instance: (
+                _safe_float(
+                    depth_by_id[int(instance.instance_id)].get("surface_depth_mm"),
+                    float("inf"),
+                ),
+                -_safe_float(
+                    depth_by_id[int(instance.instance_id)].get("depth_valid_ratio"),
+                    0.0,
+                ),
+                -float(instance.confidence),
+                int(instance.instance_id),
+            )
         )
-        candidate_filter_sort_ms = _elapsed_ms(filter_started)
+        layer_summary["m37_candidate_ring_ids"] = [
+            int(item.instance_id) for item in side_candidates
+        ]
+        layer_fast_fits: List[Dict[str, Any]] = []
 
-        template_config = SideRingTemplateConfig.from_mapping(raw_config)
-        fit_started = time.perf_counter()
-        stop_index: int | None = None
-        for index, instance in enumerate(side_candidates):
+        for instance in side_candidates:
             if (
                 hybrid_config.maximum_side_ring_attempts > 0
-                and index >= hybrid_config.maximum_side_ring_attempts
+                and m37_fast_attempt_count >= hybrid_config.maximum_side_ring_attempts
             ):
-                stop_index = index
+                maximum_side_attempts_reached = True
                 break
+            global_side_attempt_rank += 1
+            fast_started = time.perf_counter()
             fit = side_fit_fn(
                 instance,
                 depth_mm,
                 intrinsics,
                 template_config,
                 mouth_matched=False,
-                search_profile=hybrid_config.side_ring_search_profile,
+                search_profile="fast",
             )
-            fit["attempt_rank"] = int(index + 1)
-            fit["processing_status"] = "evaluated"
+            fast_elapsed = _elapsed_ms(fast_started)
+            m37_fast_total_ms += fast_elapsed
+            m37_fast_attempt_count += 1
+            instance_id = int(instance.instance_id)
+            fast_attempted_ids.add(instance_id)
+            fit["attempt_rank"] = int(global_side_attempt_rank)
+            fit["processing_status"] = "fast_evaluated"
+            fit["surface_depth_mm"] = depth_by_id[instance_id].get(
+                "surface_depth_mm"
+            )
+            fit["depth_layer_index"] = depth_by_id[instance_id].get(
+                "depth_layer_index"
+            )
+            fit["depth_rank"] = depth_by_id[instance_id].get("depth_rank")
+            fit["depth_valid_ratio"] = depth_by_id[instance_id].get(
+                "depth_valid_ratio"
+            )
+            fit["fast_wall_ms"] = float(fast_elapsed)
             side_fits.append(fit)
-            if bool(fit.get("eligible", False)):
-                selected_side = fit
-                if hybrid_config.stop_after_first_side_eligible:
-                    stop_index = index + 1
-                    break
-        side_fit_loop_ms = _elapsed_ms(fit_started)
+            layer_fast_fits.append(fit)
+            layer_summary["m37_fast_attempted_ids"].append(instance_id)
 
-        if stop_index is not None and stop_index < len(side_candidates):
-            reason = (
-                "after_first_valid_confidence_candidate"
-                if selected_side is not None
-                else "maximum_side_ring_attempts_reached"
-            )
-            for index in range(stop_index, len(side_candidates)):
-                side_fits.append(
-                    _deferred_side_record(
-                        side_candidates[index],
-                        attempt_rank=index + 1,
-                        reason=reason,
-                    )
-                )
+            if bool(fit.get("fast_acceptance_passed", False)):
+                selected_side = fit
+                selected_branch = "m37_side_ring_near_visible_crown"
+                selected_layer_index = layer_index
+                layer_summary["m37_fast_accepted_id"] = instance_id
+                layer_summary["selected_branch"] = selected_branch
+                break
 
         if selected_side is not None:
-            selected_branch = "m37_side_ring_near_visible_crown"
+            active_layer_summaries.append(layer_summary)
+            break
 
-    selected_candidate = m36_candidate or (
-        _m37_candidate(selected_side) if selected_side is not None else None
+        if (
+            layer_fast_fits
+            and accurate_refinement_count
+            < hybrid_config.maximum_accurate_refinements_per_trigger
+        ):
+            refinable = [
+                fit
+                for fit in layer_fast_fits
+                if fit.get("axis_toward_camera") is not None
+            ]
+            if refinable:
+                best_fast = min(refinable, key=_fit_quality_rank)
+                best_id = int(best_fast["ring_instance_id"])
+                best_instance = ring_by_id[best_id]
+                local_started = time.perf_counter()
+                refined = side_fit_fn(
+                    best_instance,
+                    depth_mm,
+                    intrinsics,
+                    template_config,
+                    mouth_matched=False,
+                    search_profile="local_accurate",
+                    initial_axis=np.asarray(
+                        best_fast["axis_toward_camera"], dtype=np.float64
+                    ),
+                )
+                local_elapsed = _elapsed_ms(local_started)
+                local_accurate_total_ms += local_elapsed
+                accurate_refinement_count += 1
+                accurate_refinement_candidate_id = best_id
+                refined["attempt_rank"] = best_fast.get("attempt_rank")
+                refined["processing_status"] = "local_accurate_refined"
+                refined["surface_depth_mm"] = best_fast.get("surface_depth_mm")
+                refined["depth_layer_index"] = best_fast.get(
+                    "depth_layer_index"
+                )
+                refined["depth_rank"] = best_fast.get("depth_rank")
+                refined["depth_valid_ratio"] = best_fast.get(
+                    "depth_valid_ratio"
+                )
+                refined["local_accurate_refinement_used"] = True
+                refined["local_accurate_wall_ms"] = float(local_elapsed)
+                refined["fast_seed"] = _compact_fast_seed(best_fast)
+                for index, existing in enumerate(side_fits):
+                    if existing is best_fast:
+                        side_fits[index] = refined
+                        break
+                layer_summary["local_accurate_refined_id"] = best_id
+                if bool(refined.get("eligible", False)):
+                    selected_side = refined
+                    selected_branch = "m37_side_ring_near_visible_crown"
+                    selected_layer_index = layer_index
+                    layer_summary["selected_branch"] = selected_branch
+
+        active_layer_summaries.append(layer_summary)
+        if selected_side is not None or maximum_side_attempts_reached:
+            break
+
+    # Reuse the latest scoped M36 scene when available.  Only a scene with no
+    # M36 layer attempt needs the cheap empty-scope diagnostic pass.
+    m36_base_scene_ms = 0.0
+    if selected_m36_scene is not None:
+        result_scene = selected_m36_scene
+    elif last_m36_scene is not None:
+        result_scene = last_m36_scene
+    else:
+        base_started = time.perf_counter()
+        result_scene = analyze_fn(
+            instances,
+            depth_mm,
+            intrinsics,
+            _scoped_geometry_config(geometry_config, []),
+        )
+        m36_base_scene_ms = _elapsed_ms(base_started)
+        m36_total_ms += m36_base_scene_ms
+    if not isinstance(result_scene, dict):
+        raise ValueError("M36 analyze_scene must return a dict")
+
+    # Explicitly mark every unattempted side candidate as deferred.
+    side_candidate_ids = {
+        int(ring.instance_id)
+        for ring in rings
+        if (
+            not hybrid_config.side_ring_only_unmatched
+            or int(ring.instance_id) not in matched_ids
+        )
+    }
+    deferred_reason = (
+        "after_depth_layer_first_valid"
+        if selected_branch != "none"
+        else (
+            "maximum_side_ring_attempts_reached"
+            if maximum_side_attempts_reached
+            else "not_reached_before_search_exhaustion"
+        )
     )
+    for instance_id in sorted(side_candidate_ids - fast_attempted_ids):
+        side_fits.append(
+            _deferred_side_record(
+                ring_by_id[instance_id],
+                attempt_rank=None,
+                reason=deferred_reason,
+                depth_record=depth_by_id.get(instance_id),
+            )
+        )
+
+    selected_candidate: Optional[Dict[str, Any]]
+    original_m36_candidate = (
+        selected_m36_scene.get("robot_candidate")
+        if selected_m36_scene is not None
+        and isinstance(selected_m36_scene.get("robot_candidate"), Mapping)
+        else None
+    )
+    if selected_m36_candidate is not None:
+        selected_candidate = selected_m36_candidate
+    elif selected_side is not None:
+        selected_candidate = _m37_candidate(selected_side)
+    else:
+        selected_candidate = None
+
     evaluated_side = [
-        fit for fit in side_fits if fit.get("processing_status") == "evaluated"
+        fit
+        for fit in side_fits
+        if fit.get("processing_status")
+        in {"fast_evaluated", "local_accurate_refined"}
     ]
     deferred_side = [
         fit for fit in side_fits if fit.get("processing_status") == "deferred"
     ]
     selected_side_id = (
-        int(selected_side.get("ring_instance_id")) if selected_side is not None else None
+        int(selected_side.get("ring_instance_id"))
+        if selected_side is not None
+        else None
     )
+    selected_ring_id = None
+    if selected_candidate is not None:
+        selected_ring_id_raw = (selected_candidate.get("target") or {}).get(
+            "ring_instance_id"
+        )
+        if selected_ring_id_raw is not None:
+            selected_ring_id = int(selected_ring_id_raw)
+    selected_depth = depth_by_id.get(selected_ring_id) if selected_ring_id is not None else None
     total_ms = _elapsed_ms(total_started)
 
-    result = dict(m36_scene)
-    result["m36_eligible_count"] = m36_scene.get("eligible_count")
+    result = dict(result_scene)
+    result["rings_detected"] = len(rings)
+    result["mouths_detected"] = len(mouths)
+    result["global_matched_pairs"] = len(matches)
+    result["association_debug"] = association_debug
+    result["unmatched_ring_ids"] = [int(item.instance_id) for item in unmatched_rings]
+    result["unmatched_mouth_ids"] = [int(item.instance_id) for item in unmatched_mouths]
+    result["m36_eligible_count"] = result_scene.get("eligible_count")
     if selected_side is not None:
         result["eligible_count"] = 1
         result["selected_ring_instance_id"] = selected_side_id
         result["selected_clock_hour"] = None
         result["selected_clock_angle_deg_cw_from_12"] = None
         result["selected_clock_search_batch"] = None
-    # Preserve the unmodified M36 candidate for diagnostics and expose one
-    # branch-neutral candidate at the historical robot_candidate key.
     result["m36_robot_candidate"] = deepcopy(original_m36_candidate)
     result["robot_candidate"] = selected_candidate
     result["selected_grasp_branch"] = selected_branch
+    result["depth_layering"] = {
+        "enabled": bool(hybrid_config.depth_layering_enabled),
+        "ordering_rule": (
+            "depth_layer_ascending_then_same_layer_m36_then_m37"
+        ),
+        "surface_depth_statistic": f"p{hybrid_config.surface_depth_percentile:g}",
+        "layer_tolerance_mm": float(hybrid_config.depth_layer_tolerance_mm),
+        "candidate_count": len(depth_records),
+        "valid_depth_candidate_count": sum(
+            1 for row in depth_records if row.get("surface_depth_mm") is not None
+        ),
+        "layers": [
+            {key: deepcopy(value) for key, value in layer.items() if key != "records"}
+            for layer in layers
+        ],
+        "candidates": depth_records,
+        "processed_layers": active_layer_summaries,
+        "selected_layer_index": selected_layer_index,
+        "selected_surface_depth_mm": (
+            selected_depth.get("surface_depth_mm") if selected_depth else None
+        ),
+        "selected_depth_rank": selected_depth.get("depth_rank") if selected_depth else None,
+    }
     result["hybrid_grasp"] = {
         "enabled": True,
+        "policy_version": "M37.4",
         "branch_priority": [
-            "m36_mouth_visible_rim_pinch",
-            "m37_side_ring_near_visible_crown",
+            "nearest_depth_layer",
+            "same_layer_m36_mouth_visible_rim_pinch",
+            "same_layer_m37_side_ring_fast_first",
+            "single_warm_start_local_accurate_refinement",
+            "next_depth_layer",
         ],
         "selected_branch": selected_branch,
-        "fallback_triggered": bool(m36_candidate is None),
-        "fallback_reason": fallback_reason,
-        "m36_candidate_found": bool(m36_candidate is not None),
+        "selected_depth_layer_index": selected_layer_index,
+        "fallback_triggered": bool(selected_branch == "m37_side_ring_near_visible_crown"),
+        "m36_candidate_found": bool(selected_m36_candidate is not None),
         "m37_candidate_found": bool(selected_side is not None),
         "target_found": bool(selected_candidate is not None),
         "timing_ms": {
-            "m36_branch_ms": float(m36_ms),
-            "m37_candidate_filter_sort_ms": float(candidate_filter_sort_ms),
-            "m37_fit_loop_ms": float(side_fit_loop_ms),
+            "association_prepass_ms": float(association_ms),
+            "depth_preselection_ms": float(depth_preselection_ms),
+            "depth_layer_build_ms": float(depth_layer_build_ms),
+            "m36_branch_ms": float(m36_total_ms),
+            "m36_base_scene_ms": float(m36_base_scene_ms),
+            "m37_fast_total_ms": float(m37_fast_total_ms),
+            "m37_local_accurate_ms": float(local_accurate_total_ms),
             "m37_evaluated_instance_total_ms": float(
                 sum(
-                    float((fit.get("timing_ms") or {}).get("total_ms", 0.0))
+                    _safe_float((fit.get("timing_ms") or {}).get("total_ms"), 0.0)
                     for fit in evaluated_side
                 )
             ),
@@ -285,14 +905,39 @@ def run_hybrid_grasp(
     }
     result["side_ring_branch"] = {
         "enabled": bool(hybrid_config.side_ring_fallback_enabled),
-        "executed": bool(m36_candidate is None and hybrid_config.side_ring_fallback_enabled),
-        "candidate_order_rule": "foam_ring_confidence_descending",
+        "executed": bool(m37_fast_attempt_count > 0),
+        "candidate_order_rule": "depth_layer_then_surface_depth_ascending",
         "only_unmatched_m36_rings": bool(hybrid_config.side_ring_only_unmatched),
-        "search_profile": hybrid_config.side_ring_search_profile,
+        "search_policy": "all_fast_before_bounded_warm_start_local_accurate",
         "candidate_count": int(len(evaluated_side) + len(deferred_side)),
         "evaluated_count": int(len(evaluated_side)),
+        "fast_attempt_count": int(m37_fast_attempt_count),
         "deferred_count": int(len(deferred_side)),
         "selected_ring_instance_id": selected_side_id,
+        "accurate_refinement_count": int(accurate_refinement_count),
+        "maximum_accurate_refinements_per_trigger": int(
+            hybrid_config.maximum_accurate_refinements_per_trigger
+        ),
+        "accurate_refinement_candidate_id": accurate_refinement_candidate_id,
+        "global_accurate_search_used": False,
         "fits": side_fits,
+    }
+    result["m37_4_timing"] = {
+        "depth_preselection_ms": float(depth_preselection_ms),
+        "depth_layer_build_ms": float(depth_layer_build_ms),
+        "m36_attempt_count": int(m36_attempt_count),
+        "m36_total_ms": float(m36_total_ms),
+        "m36_base_scene_ms": float(m36_base_scene_ms),
+        "m37_fast_attempt_count": int(m37_fast_attempt_count),
+        "m37_fast_total_ms": float(m37_fast_total_ms),
+        "accurate_refine_used": bool(accurate_refinement_count > 0),
+        "accurate_refine_candidate_id": accurate_refinement_candidate_id,
+        "accurate_local_refine_ms": float(local_accurate_total_ms),
+        "selected_surface_depth_mm": (
+            selected_depth.get("surface_depth_mm") if selected_depth else None
+        ),
+        "selected_depth_layer_index": selected_layer_index,
+        "selected_depth_rank": selected_depth.get("depth_rank") if selected_depth else None,
+        "total_ms": float(total_ms),
     }
     return result

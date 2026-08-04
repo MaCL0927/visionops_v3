@@ -277,3 +277,19 @@ python3 production/foam_ring_grasp/scripts/summarize_hybrid_timing.py
 ```
 
 完整说明见 `docs/M37.3_HYBRID_REALTIME_GRASP.md`。
+
+## M37.4 深度分层抓取排序与有界高精度回退
+
+M37.4 将统一触发策略改为“深度层级优先”：全部 `foam_ring` 先计算稳健
+前表面深度并按 30 mm 分层，严格从最近层开始；同层内先尝试 M36，随后
+才尝试 M37。M37 不再对单个不确定目标立即执行完整 accurate 全局搜索，
+而是先按深度顺序执行 fast；当前层全部 fast 不确定时，只对最佳 fast 结果
+进行一次 warm-start 局部精修。
+
+```bash
+python3 production/foam_ring_grasp/scripts/summarize_hybrid_timing.py
+python3 production/foam_ring_grasp/scripts/replay_m37_4_result_set.py \
+  /path/to/foam_ring_online_geometry --output /tmp/m37_4_replay
+```
+
+完整说明见 `docs/M37.4_DEPTH_LAYERED_BOUNDED_REFINEMENT.md`。

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compatibility entry point for the M37.3 hybrid service validator."""
+"""Compatibility entry point for the M37.4 hybrid service validator."""
 from __future__ import annotations
 import runpy
 from pathlib import Path

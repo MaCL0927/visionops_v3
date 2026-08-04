@@ -139,12 +139,18 @@ class SideRingTemplateConfig:
     minimum_depth_points: int
     fast_search_enabled: bool
     fast_maximum_fit_points: int
+    fast_global_maximum_fit_points: int
     fast_global_axis_samples: int
     fast_local_refine_angles_deg: Tuple[float, ...]
     fast_local_refine_radial_steps: int
     fast_local_refine_azimuth_steps: int
     fast_fixed_radius_iterations: int
     fast_accept_max_score: float
+    local_accurate_maximum_fit_points: int
+    local_accurate_refine_angles_deg: Tuple[float, ...]
+    local_accurate_refine_radial_steps: int
+    local_accurate_refine_azimuth_steps: int
+    local_accurate_fixed_radius_iterations: int
     accurate_fallback_enabled: bool
     accurate_fallback_on_quality_gate_failure: bool
     radial_inlier_threshold_mm: float
@@ -190,6 +196,14 @@ class SideRingTemplateConfig:
         if not isinstance(fast_refine_raw, (list, tuple)):
             fast_refine_raw = [12.0, 4.0, 1.5]
         fast_refine_angles = tuple(max(0.1, float(item)) for item in fast_refine_raw)
+        local_accurate_raw = section.get(
+            "local_accurate_refine_angles_deg", [4.0, 1.5, 0.5]
+        )
+        if not isinstance(local_accurate_raw, (list, tuple)):
+            local_accurate_raw = [4.0, 1.5, 0.5]
+        local_accurate_angles = tuple(
+            max(0.1, float(item)) for item in local_accurate_raw
+        )
         return cls(
             enabled=bool(section.get("enabled", True)),
             outer_radius_mm=_float(section, "outer_radius_mm", nominal_outer / 2.0),
@@ -235,6 +249,9 @@ class SideRingTemplateConfig:
             fast_maximum_fit_points=max(
                 200, _int(section, "fast_maximum_fit_points", 700)
             ),
+            fast_global_maximum_fit_points=max(
+                120, _int(section, "fast_global_maximum_fit_points", 400)
+            ),
             fast_global_axis_samples=max(
                 32, _int(section, "fast_global_axis_samples", 80)
             ),
@@ -250,6 +267,19 @@ class SideRingTemplateConfig:
             ),
             fast_accept_max_score=max(
                 0.5, _float(section, "fast_accept_max_score", 3.0)
+            ),
+            local_accurate_maximum_fit_points=max(
+                200, _int(section, "local_accurate_maximum_fit_points", 1200)
+            ),
+            local_accurate_refine_angles_deg=local_accurate_angles,
+            local_accurate_refine_radial_steps=max(
+                1, _int(section, "local_accurate_refine_radial_steps", 3)
+            ),
+            local_accurate_refine_azimuth_steps=max(
+                4, _int(section, "local_accurate_refine_azimuth_steps", 16)
+            ),
+            local_accurate_fixed_radius_iterations=max(
+                3, _int(section, "local_accurate_fixed_radius_iterations", 12)
             ),
             accurate_fallback_enabled=bool(
                 section.get("accurate_fallback_enabled", True)
@@ -481,6 +511,19 @@ def _evaluate_axis(
     )
 
 
+def _sample_search_points(
+    points: np.ndarray,
+    maximum_points: int,
+    *,
+    random_seed: int,
+) -> np.ndarray:
+    if len(points) <= maximum_points:
+        return points
+    rng = np.random.default_rng(random_seed)
+    indexes = rng.choice(len(points), size=maximum_points, replace=False)
+    return points[indexes]
+
+
 def _fit_axis_profile(
     points: np.ndarray,
     config: SideRingTemplateConfig,
@@ -489,8 +532,12 @@ def _fit_axis_profile(
 ) -> Tuple[_AxisEvaluation, Dict[str, Any]]:
     profile = str(profile).strip().lower()
     fast = profile == "fast"
-    maximum_fit_points = (
+    local_maximum_fit_points = (
         config.fast_maximum_fit_points if fast else config.maximum_fit_points
+    )
+    global_maximum_fit_points = (
+        min(config.fast_global_maximum_fit_points, local_maximum_fit_points)
+        if fast else local_maximum_fit_points
     )
     global_axis_samples = (
         config.fast_global_axis_samples if fast else config.global_axis_samples
@@ -518,7 +565,8 @@ def _fit_axis_profile(
 
     timing: Dict[str, Any] = {
         "profile": profile,
-        "maximum_fit_points": int(maximum_fit_points),
+        "maximum_fit_points": int(local_maximum_fit_points),
+        "global_maximum_fit_points": int(global_maximum_fit_points),
         "global_axis_samples": int(global_axis_samples),
         "fixed_radius_iterations": int(fixed_iterations),
         "candidate_evaluations": 0,
@@ -526,20 +574,27 @@ def _fit_axis_profile(
     }
     profile_started = time.perf_counter()
     sampling_started = time.perf_counter()
-    rng = np.random.default_rng(config.random_seed)
-    if len(points) > maximum_fit_points:
-        indexes = rng.choice(len(points), size=maximum_fit_points, replace=False)
-        search_points = points[indexes]
-    else:
-        search_points = points
+    local_points = _sample_search_points(
+        points,
+        local_maximum_fit_points,
+        random_seed=config.random_seed,
+    )
+    global_points = _sample_search_points(
+        local_points,
+        global_maximum_fit_points,
+        random_seed=config.random_seed + 17,
+    )
     timing["sampling_ms"] = (time.perf_counter() - sampling_started) * 1000.0
-    timing["search_point_count"] = int(len(search_points))
+    timing["global_search_point_count"] = int(len(global_points))
+    timing["local_search_point_count"] = int(len(local_points))
+    # Historical compatibility field.
+    timing["search_point_count"] = int(len(local_points))
 
     global_started = time.perf_counter()
     best: Optional[_AxisEvaluation] = None
     for axis in _fibonacci_hemisphere(global_axis_samples):
         candidate = _evaluate_axis(
-            search_points,
+            global_points,
             axis,
             config,
             fixed_radius_iterations=fixed_iterations,
@@ -549,6 +604,17 @@ def _fit_axis_profile(
             best = candidate
     assert best is not None
     timing["global_search_ms"] = (time.perf_counter() - global_started) * 1000.0
+
+    # Re-evaluate the coarse winner on the larger local-search sample before
+    # angular refinement.  This makes the 400-point global stage cheap without
+    # allowing a sparse-sample winner to dominate the final result.
+    best = _evaluate_axis(
+        local_points,
+        best.axis,
+        config,
+        fixed_radius_iterations=fixed_iterations,
+    )
+    timing["candidate_evaluations"] += 1
 
     local_total = 0.0
     for maximum_angle_deg in local_refine_angles:
@@ -562,7 +628,7 @@ def _fit_axis_profile(
         )
         for axis in candidates:
             candidate = _evaluate_axis(
-                search_points,
+                local_points,
                 axis,
                 config,
                 fixed_radius_iterations=fixed_iterations,
@@ -599,6 +665,88 @@ def _fit_axis_profile(
     return final, timing
 
 
+def _fit_axis_local_accurate(
+    points: np.ndarray,
+    config: SideRingTemplateConfig,
+    *,
+    initial_axis: np.ndarray,
+) -> Tuple[_AxisEvaluation, Dict[str, Any]]:
+    """Accurate warm-start refinement without repeating global direction search."""
+
+    timing: Dict[str, Any] = {
+        "profile": "local_accurate",
+        "warm_start": True,
+        "global_axis_samples": 0,
+        "global_search_ms": 0.0,
+        "candidate_evaluations": 0,
+        "local_refine_levels_ms": [],
+        "maximum_fit_points": int(config.local_accurate_maximum_fit_points),
+        "fixed_radius_iterations": int(config.local_accurate_fixed_radius_iterations),
+    }
+    started = time.perf_counter()
+    sample_started = time.perf_counter()
+    search_points = _sample_search_points(
+        points,
+        config.local_accurate_maximum_fit_points,
+        random_seed=config.random_seed + 31,
+    )
+    timing["sampling_ms"] = (time.perf_counter() - sample_started) * 1000.0
+    timing["search_point_count"] = int(len(search_points))
+
+    best = _evaluate_axis(
+        search_points,
+        _unit(np.asarray(initial_axis, dtype=np.float64)),
+        config,
+        fixed_radius_iterations=config.local_accurate_fixed_radius_iterations,
+    )
+    timing["candidate_evaluations"] += 1
+
+    local_total = 0.0
+    for maximum_angle_deg in config.local_accurate_refine_angles_deg:
+        level_started = time.perf_counter()
+        candidates = _local_axis_candidates(
+            best.axis,
+            maximum_angle_deg,
+            config.local_accurate_refine_radial_steps,
+            config.local_accurate_refine_azimuth_steps,
+        )
+        refined: Optional[_AxisEvaluation] = None
+        for axis in candidates:
+            candidate = _evaluate_axis(
+                search_points,
+                axis,
+                config,
+                fixed_radius_iterations=config.local_accurate_fixed_radius_iterations,
+            )
+            timing["candidate_evaluations"] += 1
+            if refined is None or candidate.score < refined.score:
+                refined = candidate
+        assert refined is not None
+        best = refined
+        elapsed = (time.perf_counter() - level_started) * 1000.0
+        local_total += elapsed
+        timing["local_refine_levels_ms"].append(
+            {
+                "maximum_angle_deg": float(maximum_angle_deg),
+                "candidate_count": int(len(candidates)),
+                "elapsed_ms": float(elapsed),
+            }
+        )
+    timing["local_refine_ms"] = float(local_total)
+
+    final_started = time.perf_counter()
+    final = _evaluate_axis(
+        points,
+        best.axis,
+        config,
+        fixed_radius_iterations=config.local_accurate_fixed_radius_iterations,
+    )
+    timing["final_full_point_evaluation_ms"] = (
+        time.perf_counter() - final_started
+    ) * 1000.0
+    timing["total_ms"] = (time.perf_counter() - started) * 1000.0
+    return final, timing
+
 def _fast_fit_fallback_reasons(
     evaluation: _AxisEvaluation,
     config: SideRingTemplateConfig,
@@ -625,10 +773,32 @@ def _fit_axis(
     config: SideRingTemplateConfig,
     *,
     search_profile: str = "auto",
+    initial_axis: Optional[np.ndarray] = None,
 ) -> Tuple[_AxisEvaluation, Dict[str, Any]]:
     requested = str(search_profile or "auto").strip().lower()
-    if requested not in {"auto", "fast", "accurate"}:
-        raise ValueError("search_profile must be auto, fast or accurate")
+    if requested not in {"auto", "fast", "accurate", "local_accurate"}:
+        raise ValueError(
+            "search_profile must be auto, fast, accurate or local_accurate"
+        )
+    if requested == "local_accurate":
+        if initial_axis is None:
+            raise ValueError("local_accurate search requires initial_axis")
+        evaluation, local_timing = _fit_axis_local_accurate(
+            points,
+            config,
+            initial_axis=np.asarray(initial_axis, dtype=np.float64),
+        )
+        return evaluation, {
+            "requested_profile": requested,
+            "final_profile": "local_accurate",
+            "fallback_used": False,
+            "fallback_reasons": [],
+            "fast": None,
+            "accurate": None,
+            "local_accurate": local_timing,
+            "total_ms": float(local_timing["total_ms"]),
+        }
+
     use_fast = requested in {"auto", "fast"} and config.fast_search_enabled
     if not use_fast:
         evaluation, accurate_timing = _fit_axis_profile(
@@ -641,6 +811,7 @@ def _fit_axis(
             "fallback_reasons": [],
             "fast": None,
             "accurate": accurate_timing,
+            "local_accurate": None,
             "total_ms": float(accurate_timing["total_ms"]),
         }
 
@@ -658,6 +829,10 @@ def _fit_axis(
     final_evaluation = fast_evaluation
     final_profile = "fast"
     if fallback_used:
+        # Historical standalone/offline auto mode retains the full accurate
+        # fallback.  The M37.4 online hybrid path explicitly requests ``fast``
+        # for every candidate and performs at most one warm-start
+        # ``local_accurate`` refinement at the scene level.
         final_evaluation, accurate_timing = _fit_axis_profile(
             points, config, profile="accurate"
         )
@@ -669,9 +844,9 @@ def _fit_axis(
         "fallback_reasons": fallback_reasons,
         "fast": fast_timing,
         "accurate": accurate_timing,
+        "local_accurate": None,
         "total_ms": (time.perf_counter() - started) * 1000.0,
     }
-
 
 def _trim_points_by_depth(
     points: np.ndarray,
@@ -987,6 +1162,7 @@ def fit_side_ring_instance(
     *,
     mouth_matched: bool = False,
     search_profile: str = "auto",
+    initial_axis: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """Fit one parameterized short-cylinder template to a foam-ring mask."""
 
@@ -1029,7 +1205,10 @@ def fit_side_ring_instance(
         }
 
     evaluation, axis_search_timing = _fit_axis(
-        points, config, search_profile=search_profile
+        points,
+        config,
+        search_profile=search_profile,
+        initial_axis=initial_axis,
     )
     fit_ms = float(axis_search_timing.get("total_ms", 0.0))
     pose_started = time.perf_counter()
@@ -1147,6 +1326,19 @@ def fit_side_ring_instance(
         "search_profile_used": str(axis_search_timing.get("final_profile")),
         "accurate_fallback_used": bool(axis_search_timing.get("fallback_used", False)),
         "accurate_fallback_reasons": list(axis_search_timing.get("fallback_reasons") or []),
+        "fast_acceptance_passed": bool(
+            str(search_profile).strip().lower() == "fast"
+            and len(rejection_reasons) == 0
+            and float(evaluation.score) <= float(config.fast_accept_max_score)
+        ),
+        "fast_acceptance_reasons": list(
+            _fast_fit_fallback_reasons(evaluation, config)
+            if str(search_profile).strip().lower() == "fast" else []
+        ),
+        "warm_start_initial_axis": (
+            np.asarray(initial_axis, dtype=np.float64).tolist()
+            if initial_axis is not None else None
+        ),
         "eligible": len(rejection_reasons) == 0,
         "rejection_reasons": rejection_reasons,
         "fit_score": float(evaluation.score),

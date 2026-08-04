@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize M37.3 hybrid branch and timing from a service/geometry JSON."""
+"""Summarize M37.4 depth-layer selection and bounded-refinement timing."""
 from __future__ import annotations
 
 import argparse
@@ -27,50 +27,56 @@ def _number(value: Any) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Summarize M37.3 hybrid branch timing")
+    parser = argparse.ArgumentParser(description="Summarize M37.4 hybrid timing")
     parser.add_argument("result", type=Path, nargs="?")
-    parser.add_argument(
-        "--root",
-        type=Path,
-        default=Path("data/foam_ring_online_geometry"),
-    )
+    parser.add_argument("--root", type=Path, default=Path("data/foam_ring_online_geometry"))
     args = parser.parse_args()
     path = args.result or _latest(args.root)
     document = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(document, Mapping):
-        raise ValueError("result root must be an object")
     scene = document.get("scene") if isinstance(document.get("scene"), Mapping) else {}
     hybrid = scene.get("hybrid_grasp") if isinstance(scene.get("hybrid_grasp"), Mapping) else {}
     side = scene.get("side_ring_branch") if isinstance(scene.get("side_ring_branch"), Mapping) else {}
+    layering = scene.get("depth_layering") if isinstance(scene.get("depth_layering"), Mapping) else {}
     timing = hybrid.get("timing_ms") if isinstance(hybrid.get("timing_ms"), Mapping) else {}
     processor_timing = document.get("timing_ms") if isinstance(document.get("timing_ms"), Mapping) else {}
 
     print(f"result: {path.resolve()}")
     print(
-        "branch: selected={}, fallback={}, target_found={}".format(
+        "branch: selected={}, layer={}, depth_mm={}, rank={}, target_found={}".format(
             hybrid.get("selected_branch") or scene.get("selected_grasp_branch") or "none",
-            hybrid.get("fallback_triggered"),
+            layering.get("selected_layer_index"),
+            layering.get("selected_surface_depth_mm"),
+            layering.get("selected_depth_rank"),
             hybrid.get("target_found"),
         )
     )
     print(
-        "M36: matched_pairs={}, candidate_found={}".format(
-            scene.get("matched_pairs"), hybrid.get("m36_candidate_found")
-        )
-    )
-    print(
-        "M37: candidates={}, evaluated={}, deferred={}, selected={}".format(
-            side.get("candidate_count"),
-            side.get("evaluated_count"),
-            side.get("deferred_count"),
+        "M37: fast_attempts={}, local_refines={}, global_accurate={}, selected={}".format(
+            side.get("fast_attempt_count"),
+            side.get("accurate_refinement_count"),
+            side.get("global_accurate_search_used"),
             side.get("selected_ring_instance_id"),
         )
     )
+    print("\nDepth layers")
+    for layer in layering.get("layers") or []:
+        print(
+            "  L{} anchor={} max={} candidates={} ids={}".format(
+                layer.get("layer_index"),
+                layer.get("anchor_depth_mm"),
+                layer.get("maximum_depth_mm"),
+                layer.get("candidate_count"),
+                layer.get("ring_instance_ids"),
+            )
+        )
     print("\nHybrid branch timing (ms)")
     for key in (
+        "association_prepass_ms",
+        "depth_preselection_ms",
+        "depth_layer_build_ms",
         "m36_branch_ms",
-        "m37_candidate_filter_sort_ms",
-        "m37_fit_loop_ms",
+        "m37_fast_total_ms",
+        "m37_local_accurate_ms",
         "m37_evaluated_instance_total_ms",
         "total_ms",
     ):

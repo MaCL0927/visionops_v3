@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M37.3 acceptance test for the persistent hybrid foam-ring trigger service."""
+"""M37.4 acceptance test for the persistent hybrid foam-ring trigger service."""
 
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ def _json_request(*args: Any, **kwargs: Any) -> tuple[int, Dict[str, Any]]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Verify M37.3 hybrid M36/M37 persistent trigger service")
+    parser = argparse.ArgumentParser(description="Verify M37.4 depth-layered hybrid M36/M37 persistent trigger service")
     parser.add_argument("--service-url", default="http://127.0.0.1:19213")
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--timeout-s", type=float, default=30.0)
@@ -121,7 +121,7 @@ def main() -> int:
         if result.get("rgbd_timestamp_delta_ms") != 0:
             failures.append(f"{request_id} exact RGB-D delta is not zero")
         if result.get("robot_ready") is not False:
-            failures.append(f"{request_id} robot_ready must remain false in M37.3")
+            failures.append(f"{request_id} robot_ready must remain false in M37.4")
         branch = str(result.get("selected_grasp_branch") or "none")
         branch_values.append(branch)
         if result.get("target_found") and branch not in {
@@ -173,7 +173,7 @@ def main() -> int:
 
     report = {
         "schema_version": "1.0",
-        "stage": "M37.3",
+        "stage": "M37.4",
         "status": "passed" if not failures else "failed",
         "service_url": args.service_url,
         "samples": len(results),
@@ -216,11 +216,11 @@ def main() -> int:
         "failures": failures,
     }, ensure_ascii=False, indent=2))
     if failures:
-        print("[FAIL] M37.3 acceptance failed:", file=sys.stderr)
+        print("[FAIL] M37.4 acceptance failed:", file=sys.stderr)
         for failure in failures:
             print(f"  - {failure}", file=sys.stderr)
         return 2
-    print("[PASS] M37.3 hybrid persistent trigger service is healthy.")
+    print("[PASS] M37.4 hybrid persistent trigger service is healthy.")
     return 0
 
 

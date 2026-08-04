@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M37.3 persistent hybrid trigger service for foam-ring exact RGB-D geometry.
+"""M37.4 depth-layer-first hybrid trigger service for foam-ring exact RGB-D geometry.
 
 The service keeps the synchronized RGB-D cache, Runtime client, geometry config
 and box calibration resident. Explicit trigger requests are serialized by one
@@ -380,7 +380,7 @@ class FoamRingOnlineService:
                     prepared,
                     save_debug=job.save_debug,
                     generate_overlay=bool(self.settings["latest_overlay_enabled"]),
-                    stage="M37.3_hybrid_persistent_trigger_service",
+                    stage="M37.4_depth_layered_hybrid_persistent_trigger_service",
                     geometry_queue_wait_ms=geometry_wait_ms,
                 )
                 service_processing_ms = max(
@@ -496,7 +496,7 @@ class FoamRingOnlineService:
         return {
             "schema_version": "1.0",
             "message_type": "foam_ring_trigger_result",
-            "stage": str(payload.get("stage") or "M37.3_hybrid_persistent_trigger_service"),
+            "stage": str(payload.get("stage") or "M37.4_depth_layered_hybrid_persistent_trigger_service"),
             "status": "ok",
             "request_id": job.request_id,
             "idempotent_replay": False,
@@ -530,6 +530,11 @@ class FoamRingOnlineService:
                 "m37_evaluated_count": side_branch.get("evaluated_count"),
                 "m37_deferred_count": side_branch.get("deferred_count"),
                 "m37_selected_ring_instance_id": side_branch.get("selected_ring_instance_id"),
+                "selected_depth_layer_index": (scene.get("depth_layering") or {}).get("selected_layer_index"),
+                "selected_surface_depth_mm": (scene.get("depth_layering") or {}).get("selected_surface_depth_mm"),
+                "selected_depth_rank": (scene.get("depth_layering") or {}).get("selected_depth_rank"),
+                "m37_fast_attempt_count": side_branch.get("fast_attempt_count"),
+                "m37_accurate_refinement_count": side_branch.get("accurate_refinement_count"),
             },
             "candidate": deepcopy(candidate),
             "timing_ms": {
@@ -539,9 +544,18 @@ class FoamRingOnlineService:
                 "prepare_total_ms": timing.get("prepare_total_ms"),
                 "polygon_to_mask_ms": timing.get("polygon_to_mask_ms"),
                 "geometry_ms": timing.get("geometry_ms"),
+                "association_prepass_ms": hybrid_timing.get("association_prepass_ms"),
+                "depth_preselection_ms": hybrid_timing.get("depth_preselection_ms"),
+                "depth_layer_build_ms": hybrid_timing.get("depth_layer_build_ms"),
                 "m36_branch_ms": hybrid_timing.get("m36_branch_ms"),
-                "m37_candidate_filter_sort_ms": hybrid_timing.get("m37_candidate_filter_sort_ms"),
-                "m37_fit_loop_ms": hybrid_timing.get("m37_fit_loop_ms"),
+                "m37_fast_total_ms": hybrid_timing.get("m37_fast_total_ms"),
+                "m37_local_accurate_ms": hybrid_timing.get("m37_local_accurate_ms"),
+                # M37.3 compatibility aliases for existing clients/tests.
+                "m37_candidate_filter_sort_ms": hybrid_timing.get("m37_candidate_filter_sort_ms", hybrid_timing.get("depth_preselection_ms")),
+                "m37_fit_loop_ms": hybrid_timing.get("m37_fit_loop_ms", (
+                    float(hybrid_timing.get("m37_fast_total_ms") or 0.0)
+                    + float(hybrid_timing.get("m37_local_accurate_ms") or 0.0)
+                ) if (hybrid_timing.get("m37_fast_total_ms") is not None or hybrid_timing.get("m37_local_accurate_ms") is not None) else None),
                 "m37_evaluated_instance_total_ms": hybrid_timing.get("m37_evaluated_instance_total_ms"),
                 "hybrid_branch_total_ms": hybrid_timing.get("total_ms"),
                 "visualization_ms": timing.get("visualization_ms"),
@@ -855,7 +869,7 @@ def run(
     )
     thread.start()
     print(
-        "Foam Ring M37.3 Hybrid Service started: http={}:{} runtime={} "
+        "Foam Ring M37.4 Depth-Layered Hybrid Service started: http={}:{} runtime={} "
         "m36_mode={} hybrid={} queue={}".format(
             settings["listen_host"],
             settings["listen_port"],
@@ -878,7 +892,7 @@ def run(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="M37.3 hybrid foam-ring persistent trigger service (M36.5-compatible API)")
+    parser = argparse.ArgumentParser(description="M37.4 depth-layered foam-ring persistent trigger service (M36.5-compatible API)")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--runtime-url")
     parser.add_argument("--host")
@@ -901,7 +915,7 @@ def main() -> int:
             geometry_mode=args.geometry_mode,
         )
     except (OSError, ValueError, RuntimeError) as error:
-        print(f"[FAIL] M37.3 hybrid service startup failed: {error}", file=sys.stderr)
+        print(f"[FAIL] M37.4 hybrid service startup failed: {error}", file=sys.stderr)
         return 2
 
 
