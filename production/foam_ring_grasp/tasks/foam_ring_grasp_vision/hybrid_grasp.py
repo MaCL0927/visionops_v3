@@ -1,4 +1,4 @@
-"""M37.4 depth-layer-first hybrid foam-ring grasp selection.
+"""M37.5 depth-layer-first hybrid foam-ring grasp selection with pose safety.
 
 A single Runtime segmentation result and exact RGB-D frame feed both branches.
 All foam rings are first assigned a robust front-surface depth and grouped into
@@ -33,6 +33,19 @@ from .segmentation import SegmentationInstance
 from .side_ring_template import SideRingTemplateConfig, fit_side_ring_instance
 
 
+def _other_ring_exclusion_mask(
+    target: SegmentationInstance,
+    rings: Sequence[SegmentationInstance],
+) -> np.ndarray:
+    exclusion = np.zeros_like(target.mask, dtype=bool)
+    target_id = int(target.instance_id)
+    for ring in rings:
+        if int(ring.instance_id) == target_id:
+            continue
+        exclusion |= ring.mask.astype(bool)
+    return exclusion
+
+
 def _elapsed_ms(started: float) -> float:
     return (time.perf_counter() - started) * 1000.0
 
@@ -53,7 +66,7 @@ def _safe_int(value: Any, default: int) -> int:
 
 @dataclass(frozen=True)
 class HybridGraspConfig:
-    """M37.4 unified depth-layer and bounded-refinement policy."""
+    """M37.5 unified depth-layer, bounded-refinement and pose-safety policy."""
 
     enabled: bool = False
     prefer_mouth_visible: bool = True
@@ -327,7 +340,7 @@ def _scoped_geometry_config(
     raw = deepcopy(geometry_config.raw)
     raw["candidate_scope"] = {
         "allowed_ring_instance_ids": [int(value) for value in allowed_ring_ids],
-        "reason": "M37.4_depth_layer_active_m36_scope",
+        "reason": "M37.5_depth_layer_active_m36_scope",
     }
     return GeometryConfig(raw)
 
@@ -366,9 +379,16 @@ def _deferred_side_record(
 def _fit_quality_rank(fit: Mapping[str, Any]) -> Tuple[Any, ...]:
     rejection_count = len(fit.get("rejection_reasons") or [])
     fast_reason_count = len(fit.get("fast_acceptance_reasons") or [])
+    uncertainty = fit.get("pose_uncertainty") if isinstance(fit.get("pose_uncertainty"), Mapping) else {}
+    bootstrap = uncertainty.get("bootstrap") if isinstance(uncertainty.get("bootstrap"), Mapping) else {}
     return (
         rejection_count,
         fast_reason_count,
+        bool(uncertainty.get("ambiguous_top_hypotheses", False)),
+        _safe_float(bootstrap.get("maximum_axis_spread_deg"), float("inf")),
+        _safe_float(fit.get("normal_axis_p90_deg"), float("inf")),
+        _safe_float(fit.get("normal_radial_p90_deg"), float("inf")),
+        -_safe_float(fit.get("normal_inlier_ratio"), 0.0),
         _safe_float(fit.get("fit_score"), float("inf")),
         _safe_float(fit.get("radial_residual_p90_mm"), float("inf")),
         -_safe_float(fit.get("radial_inlier_ratio"), 0.0),
@@ -395,6 +415,13 @@ def _compact_fast_seed(fit: Mapping[str, Any]) -> Dict[str, Any]:
             "radial_inlier_ratio",
             "radial_residual_median_mm",
             "radial_residual_p90_mm",
+            "normal_inlier_ratio",
+            "normal_axis_median_deg",
+            "normal_axis_p90_deg",
+            "normal_radial_median_deg",
+            "normal_radial_p90_deg",
+            "visible_normal_span_deg",
+            "pose_uncertainty",
             "observed_axis_span_mm",
             "axis_toward_camera",
             "timing_ms",
@@ -414,7 +441,7 @@ def _m37_candidate(fit: Mapping[str, Any]) -> Dict[str, Any]:
         "status": "candidate_only_not_robot_ready",
         "robot_ready": False,
         "reason": (
-            "M37.4 side-ring camera-frame grasp point only; gripper pose, hand-eye "
+            "M37.5 side-ring camera-frame grasp point only; gripper pose, hand-eye "
             "transform, reachability and final robot protocol are not enabled"
         ),
         "grasp_branch": "m37_side_ring_near_visible_crown",
@@ -651,6 +678,7 @@ def run_hybrid_grasp(
                 template_config,
                 mouth_matched=False,
                 search_profile="fast",
+                exclusion_mask=_other_ring_exclusion_mask(instance, rings),
             )
             fast_elapsed = _elapsed_ms(fast_started)
             m37_fast_total_ms += fast_elapsed
@@ -711,6 +739,7 @@ def run_hybrid_grasp(
                     initial_axis=np.asarray(
                         best_fast["axis_toward_camera"], dtype=np.float64
                     ),
+                    exclusion_mask=_other_ring_exclusion_mask(best_instance, rings),
                 )
                 local_elapsed = _elapsed_ms(local_started)
                 local_accurate_total_ms += local_elapsed
@@ -872,7 +901,7 @@ def run_hybrid_grasp(
     }
     result["hybrid_grasp"] = {
         "enabled": True,
-        "policy_version": "M37.4",
+        "policy_version": "M37.5",
         "branch_priority": [
             "nearest_depth_layer",
             "same_layer_m36_mouth_visible_rim_pinch",
@@ -922,6 +951,64 @@ def run_hybrid_grasp(
         "global_accurate_search_used": False,
         "fits": side_fits,
     }
+    m36_pose_conflict_rejections = 0
+    for item in result.get("instances") or []:
+        reasons = item.get("rejection_reasons") or []
+        if any(
+            reason in {
+                "depth_plane_ellipse_pose_conflict",
+                "ellipse_pose_has_insufficient_depth_support",
+                "ellipse_stabilized_pose_residual_too_high",
+            }
+            for reason in reasons
+        ):
+            m36_pose_conflict_rejections += 1
+    m37_uncertainty_rejections = sum(
+        1
+        for fit in evaluated_side
+        if any(
+            reason in {
+                "axis_hypotheses_ambiguous",
+                "axis_bootstrap_unstable",
+                "axis_disagrees_with_surface_normal_seed",
+                "surface_normal_inlier_ratio_too_low",
+                "surface_normals_not_perpendicular_to_axis",
+                "surface_normal_axis_p90_too_high",
+                "surface_normals_not_radial",
+                "surface_normal_radial_p90_too_high",
+                "visible_cylindrical_normal_span_too_small",
+            }
+            for reason in (fit.get("rejection_reasons") or [])
+        )
+    )
+    result["m37_5_pose_safety"] = {
+        "normal_constrained_axis_enabled": bool(template_config.normal_constrained_enabled),
+        "neighbor_surface_exclusion_enabled": True,
+        "m36_pose_conflict_rejection_count": int(m36_pose_conflict_rejections),
+        "m37_uncertainty_rejection_count": int(m37_uncertainty_rejections),
+        "selected_branch": selected_branch,
+        "selected_ring_instance_id": selected_ring_id,
+        "selected_pose_uncertainty": (
+            deepcopy(selected_side.get("pose_uncertainty"))
+            if selected_side is not None
+            else None
+        ),
+    }
+    result["m37_5_timing"] = {
+        "depth_preselection_ms": float(depth_preselection_ms),
+        "depth_layer_build_ms": float(depth_layer_build_ms),
+        "m36_attempt_count": int(m36_attempt_count),
+        "m36_total_ms": float(m36_total_ms),
+        "m37_fast_attempt_count": int(m37_fast_attempt_count),
+        "m37_fast_total_ms": float(m37_fast_total_ms),
+        "m37_local_accurate_ms": float(local_accurate_total_ms),
+        "pose_safety_rejection_count": int(
+            m36_pose_conflict_rejections + m37_uncertainty_rejections
+        ),
+        "total_ms": float(total_ms),
+    }
+
+    # Backward-compatible M37.4 timing alias retained for existing dashboards.
     result["m37_4_timing"] = {
         "depth_preselection_ms": float(depth_preselection_ms),
         "depth_layer_build_ms": float(depth_layer_build_ms),

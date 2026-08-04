@@ -251,3 +251,133 @@ def test_m374_local_accurate_is_warm_started_without_global_search():
     assert axis_search["local_accurate"]["global_axis_samples"] == 0
     assert axis_search["local_accurate"]["global_search_ms"] == 0.0
     assert axis_search["local_accurate"]["candidate_evaluations"] > 0
+
+
+def test_m375_reports_normal_constrained_pose_evidence():
+    instance, depth, intrinsics, config = _synthetic_side_cylinder()
+    result = fit_side_ring_instance(
+        instance,
+        depth,
+        intrinsics,
+        config,
+        search_profile="fast",
+    )
+    assert result["eligible"] is True
+    assert result["normal_constrained"] is True
+    assert result["normal_point_count_trimmed"] >= config.minimum_normal_points
+    assert result["normal_inlier_ratio"] > 0.90
+    assert result["normal_axis_median_deg"] < 3.0
+    assert result["normal_radial_median_deg"] < 8.0
+    assert result["visible_normal_span_deg"] > 60.0
+    assert result["pose_uncertainty"]["ambiguous_top_hypotheses"] is False
+    assert result["timing_ms"]["axis_search"]["normal_constrained"] is True
+
+
+def test_m375_neighbor_mask_exclusion_prevents_contact_patch_bias():
+    instance, depth, intrinsics, config = _synthetic_side_cylinder()
+    contaminated_mask = instance.mask.copy()
+    exclusion = np.zeros_like(contaminated_mask, dtype=bool)
+    exclusion[120:200, 200:260] = True
+    contaminated_mask |= exclusion
+    contaminated_depth = depth.copy()
+    contaminated_depth[exclusion] = 520
+    ys, xs = np.nonzero(contaminated_mask)
+    contaminated = SegmentationInstance(
+        instance_id=instance.instance_id,
+        class_id=instance.class_id,
+        class_name=instance.class_name,
+        confidence=instance.confidence,
+        mask=contaminated_mask,
+        bbox_xyxy=(int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1),
+    )
+    result = fit_side_ring_instance(
+        contaminated,
+        contaminated_depth,
+        intrinsics,
+        config,
+        search_profile="fast",
+        exclusion_mask=exclusion,
+    )
+    axis = np.asarray(result["axis_toward_camera"], dtype=np.float64)
+    assert result["eligible"] is True
+    assert abs(float(axis[0])) > 0.95
+    assert result["surface_separation"]["neighbor_excluded_count"] > 0
+
+
+def test_m375_rejects_mixed_perpendicular_cylinders_as_uncertain():
+    height = width = 320
+    intrinsics = {"fx": 300.0, "fy": 300.0, "cx": 160.0, "cy": 160.0}
+    depth = np.zeros((height, width), dtype=np.uint16)
+
+    def add_cylinder(center, axis):
+        axis = np.asarray(axis, dtype=np.float64)
+        axis /= np.linalg.norm(axis)
+        reference = np.asarray([0.0, 0.0, 1.0])
+        if abs(float(axis[2])) > 0.9:
+            reference = np.asarray([0.0, 1.0, 0.0])
+        first = np.cross(axis, reference)
+        first /= np.linalg.norm(first)
+        second = np.cross(axis, first)
+        for axial in np.linspace(-35.0, 35.0, 90):
+            for angle in np.linspace(0.0, 2.0 * math.pi, 160, endpoint=False):
+                point = (
+                    np.asarray(center, dtype=np.float64)
+                    + axis * axial
+                    + 42.5 * (math.cos(angle) * first + math.sin(angle) * second)
+                )
+                u = int(round(intrinsics["fx"] * point[0] / point[2] + intrinsics["cx"]))
+                v = int(round(intrinsics["fy"] * point[1] / point[2] + intrinsics["cy"]))
+                z = int(round(point[2]))
+                if 0 <= u < width and 0 <= v < height:
+                    if depth[v, u] == 0 or z < int(depth[v, u]):
+                        depth[v, u] = z
+
+    add_cylinder((-25.0, -15.0, 600.0), (1.0, 0.0, 0.0))
+    add_cylinder((25.0, 15.0, 600.0), (0.0, 1.0, 0.0))
+    mask = cv2.dilate(
+        (depth > 0).astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1
+    ).astype(bool)
+    ys, xs = np.nonzero(mask)
+    instance = SegmentationInstance(
+        instance_id=9,
+        class_id=0,
+        class_name="foam_ring",
+        confidence=0.99,
+        mask=mask,
+        bbox_xyxy=(int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1),
+    )
+    raw = {
+        "object_geometry": {
+            "nominal_outer_diameter_mm": 85.0,
+            "nominal_inner_diameter_mm": 60.0,
+            "axial_length_mm": 70.0,
+        },
+        "side_ring_template": {
+            "mask_erode_px": 0,
+            "minimum_radial_inlier_ratio": 0.40,
+            "maximum_radial_residual_median_mm": 8.0,
+            "maximum_radial_residual_p90_mm": 25.0,
+            "minimum_observed_axis_span_mm": 20.0,
+            "minimum_side_lay_angle_deg": 30.0,
+            "normal_fallback_global_samples": 16,
+        },
+    }
+    result = fit_side_ring_instance(
+        instance,
+        depth,
+        intrinsics,
+        SideRingTemplateConfig.from_mapping(raw),
+        search_profile="fast",
+    )
+    assert result["eligible"] is False
+    assert any(
+        reason
+        in {
+            "axis_hypotheses_ambiguous",
+            "axis_bootstrap_unstable",
+            "surface_normal_axis_p90_too_high",
+            "surface_normal_radial_p90_too_high",
+            "observed_axis_span_too_long",
+        }
+        for reason in result["rejection_reasons"]
+    )

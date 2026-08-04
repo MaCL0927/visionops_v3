@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize M37.4 depth-layer selection and bounded-refinement timing."""
+"""Summarize M37.5 depth-layer selection and bounded-refinement timing."""
 from __future__ import annotations
 
 import argparse
@@ -27,7 +27,7 @@ def _number(value: Any) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Summarize M37.4 hybrid timing")
+    parser = argparse.ArgumentParser(description="Summarize M37.5 hybrid timing")
     parser.add_argument("result", type=Path, nargs="?")
     parser.add_argument("--root", type=Path, default=Path("data/foam_ring_online_geometry"))
     args = parser.parse_args()
@@ -38,6 +38,7 @@ def main() -> int:
     side = scene.get("side_ring_branch") if isinstance(scene.get("side_ring_branch"), Mapping) else {}
     layering = scene.get("depth_layering") if isinstance(scene.get("depth_layering"), Mapping) else {}
     timing = hybrid.get("timing_ms") if isinstance(hybrid.get("timing_ms"), Mapping) else {}
+    safety = scene.get("m37_5_pose_safety") if isinstance(scene.get("m37_5_pose_safety"), Mapping) else {}
     processor_timing = document.get("timing_ms") if isinstance(document.get("timing_ms"), Mapping) else {}
 
     print(f"result: {path.resolve()}")
@@ -58,6 +59,30 @@ def main() -> int:
             side.get("selected_ring_instance_id"),
         )
     )
+    print(
+        "Pose safety: M36_conflicts={}, M37_uncertain={}, normal_constrained={}".format(
+            safety.get("m36_pose_conflict_rejection_count"),
+            safety.get("m37_uncertainty_rejection_count"),
+            safety.get("normal_constrained_axis_enabled"),
+        )
+    )
+    selected_fit = None
+    for fit in side.get("fits") or []:
+        if fit.get("ring_instance_id") == side.get("selected_ring_instance_id"):
+            selected_fit = fit
+            break
+    if isinstance(selected_fit, Mapping):
+        uncertainty = selected_fit.get("pose_uncertainty") if isinstance(selected_fit.get("pose_uncertainty"), Mapping) else {}
+        bootstrap = uncertainty.get("bootstrap") if isinstance(uncertainty.get("bootstrap"), Mapping) else {}
+        print(
+            "Selected M37 normal evidence: inlier={:.3f}, axis_med={:.2f}deg, radial_med={:.2f}deg, bootstrap_max={:.2f}deg".format(
+                float(selected_fit.get("normal_inlier_ratio") or 0.0),
+                float(selected_fit.get("normal_axis_median_deg") or 0.0),
+                float(selected_fit.get("normal_radial_median_deg") or 0.0),
+                float(bootstrap.get("maximum_axis_spread_deg") or 0.0),
+            )
+        )
+
     print("\nDepth layers")
     for layer in layering.get("layers") or []:
         print(

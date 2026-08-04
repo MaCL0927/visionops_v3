@@ -81,6 +81,14 @@ pose:
   depth_direction_tiebreak_weight: 0.15
   normal_disagreement_warning_deg: 20.0
 
+  # M37.5 safety gate for the M36 mouth-visible branch.  The two pose cues
+  # must not disagree by tens of degrees and still produce a grasp axis.
+  pose_conflict_hard_reject_enabled: true
+  maximum_normal_disagreement_deg: 25.0
+  conditional_normal_disagreement_deg: 18.0
+  conditional_minimum_depth_plane_inlier_ratio: 0.55
+  maximum_stabilized_residual_p95_mm: 8.0
+
 object_geometry:
   # New measured foam-ring dimensions. The local RGB-D estimate remains the
   # primary value; these nominal values are used for plausibility checks.
@@ -590,7 +598,7 @@ side_ring_template:
   maximum_depth_mm: 3000.0
   depth_lower_quantile: 0.01
   depth_upper_quantile: 0.99
-  maximum_depth_behind_median_mm: 95.0
+  maximum_depth_behind_median_mm: 80.0
 
   # Standalone/offline execution policy retained for M37.2 compatibility.
   # The M37.4 online hybrid path ignores confidence-first ordering and performs
@@ -644,6 +652,50 @@ side_ring_template:
   accurate_fallback_enabled: true
   accurate_fallback_on_quality_gate_failure: true
   random_seed: 3701
+
+  # M37.5 surface separation and normal-constrained axis fitting.  Other ring
+  # masks and D2C depth jumps are removed before deprojection.  The axis is
+  # generated from surface-normal hypotheses instead of relying only on a
+  # fixed-radius radial residual.
+  normal_constrained_enabled: true
+  neighbor_exclusion_dilate_px: 3
+  depth_edge_threshold_mm: 14.0
+  depth_edge_dilate_px: 1
+  surface_component_minimum_ratio: 0.08
+  normal_neighbor_step_px: 2
+  minimum_normal_points: 80
+  minimum_normal_valid_ratio: 0.08
+
+  normal_axis_hypothesis_count: 24
+  normal_pair_hypothesis_samples: 160
+  normal_fallback_global_samples: 24
+  normal_top_k_hypotheses: 3
+  normal_hypothesis_dedup_deg: 6.0
+
+  # The score combines radial fit with two physically necessary constraints:
+  # side-surface normals are perpendicular to the cylinder axis and aligned
+  # with the fitted radial direction.
+  normal_score_axis_weight: 0.10
+  normal_score_radial_weight: 0.06
+  normal_axis_inlier_deg: 22.0
+  normal_radial_inlier_deg: 35.0
+  minimum_normal_inlier_ratio: 0.50
+  maximum_normal_axis_median_deg: 12.0
+  maximum_normal_axis_p90_deg: 28.0
+  maximum_normal_radial_median_deg: 22.0
+  maximum_normal_radial_p90_deg: 48.0
+  minimum_visible_normal_span_deg: 28.0
+
+  # Pose uncertainty rejection.  Keep multiple distinct hypotheses and reject
+  # a result when two distant axes have nearly equal support or bootstrap
+  # resampling does not reproduce the selected direction.
+  ambiguity_min_axis_separation_deg: 12.0
+  ambiguity_min_score_margin: 0.18
+  bootstrap_trials: 5
+  bootstrap_sample_ratio: 0.65
+  maximum_bootstrap_axis_spread_deg: 12.0
+  maximum_normal_seed_disagreement_deg: 18.0
+  reject_when_normal_evidence_insufficient: true
 
   # Fit-quality gates for the nominal outer cylindrical surface.
   radial_inlier_threshold_mm: 6.0

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -175,6 +175,38 @@ class SideRingTemplateConfig:
     visible_crown_minimum_span_deg: float
     visible_crown_maximum_span_deg: float
     visible_crown_fallback_mode: str
+
+    # M37.5 organized RGB-D surface separation and normal-constrained pose.
+    normal_constrained_enabled: bool
+    neighbor_exclusion_dilate_px: int
+    depth_edge_threshold_mm: float
+    depth_edge_dilate_px: int
+    surface_component_minimum_ratio: float
+    normal_neighbor_step_px: int
+    minimum_normal_points: int
+    minimum_normal_valid_ratio: float
+    normal_axis_hypothesis_count: int
+    normal_pair_hypothesis_samples: int
+    normal_fallback_global_samples: int
+    normal_top_k_hypotheses: int
+    normal_hypothesis_dedup_deg: float
+    normal_score_axis_weight: float
+    normal_score_radial_weight: float
+    normal_axis_inlier_deg: float
+    normal_radial_inlier_deg: float
+    minimum_normal_inlier_ratio: float
+    maximum_normal_axis_median_deg: float
+    maximum_normal_axis_p90_deg: float
+    maximum_normal_radial_median_deg: float
+    maximum_normal_radial_p90_deg: float
+    minimum_visible_normal_span_deg: float
+    ambiguity_min_axis_separation_deg: float
+    ambiguity_min_score_margin: float
+    bootstrap_trials: int
+    bootstrap_sample_ratio: float
+    maximum_bootstrap_axis_spread_deg: float
+    maximum_normal_seed_disagreement_deg: float
+    reject_when_normal_evidence_insufficient: bool
     random_seed: int
 
     @classmethod
@@ -370,6 +402,96 @@ class SideRingTemplateConfig:
             visible_crown_fallback_mode=str(
                 section.get("visible_crown_fallback_mode") or "camera_facing"
             ),
+            normal_constrained_enabled=bool(
+                section.get("normal_constrained_enabled", True)
+            ),
+            neighbor_exclusion_dilate_px=max(
+                0, _int(section, "neighbor_exclusion_dilate_px", 3)
+            ),
+            depth_edge_threshold_mm=max(
+                2.0, _float(section, "depth_edge_threshold_mm", 14.0)
+            ),
+            depth_edge_dilate_px=max(
+                0, _int(section, "depth_edge_dilate_px", 1)
+            ),
+            surface_component_minimum_ratio=min(
+                1.0, max(0.0, _float(section, "surface_component_minimum_ratio", 0.08))
+            ),
+            normal_neighbor_step_px=max(
+                1, _int(section, "normal_neighbor_step_px", 2)
+            ),
+            minimum_normal_points=max(
+                20, _int(section, "minimum_normal_points", 80)
+            ),
+            minimum_normal_valid_ratio=min(
+                1.0, max(0.01, _float(section, "minimum_normal_valid_ratio", 0.08))
+            ),
+            normal_axis_hypothesis_count=max(
+                3, _int(section, "normal_axis_hypothesis_count", 24)
+            ),
+            normal_pair_hypothesis_samples=max(
+                16, _int(section, "normal_pair_hypothesis_samples", 160)
+            ),
+            normal_fallback_global_samples=max(
+                0, _int(section, "normal_fallback_global_samples", 24)
+            ),
+            normal_top_k_hypotheses=max(
+                2, _int(section, "normal_top_k_hypotheses", 3)
+            ),
+            normal_hypothesis_dedup_deg=max(
+                1.0, _float(section, "normal_hypothesis_dedup_deg", 6.0)
+            ),
+            normal_score_axis_weight=max(
+                0.0, _float(section, "normal_score_axis_weight", 0.10)
+            ),
+            normal_score_radial_weight=max(
+                0.0, _float(section, "normal_score_radial_weight", 0.06)
+            ),
+            normal_axis_inlier_deg=max(
+                1.0, _float(section, "normal_axis_inlier_deg", 22.0)
+            ),
+            normal_radial_inlier_deg=max(
+                1.0, _float(section, "normal_radial_inlier_deg", 35.0)
+            ),
+            minimum_normal_inlier_ratio=min(
+                1.0, max(0.05, _float(section, "minimum_normal_inlier_ratio", 0.50))
+            ),
+            maximum_normal_axis_median_deg=max(
+                1.0, _float(section, "maximum_normal_axis_median_deg", 12.0)
+            ),
+            maximum_normal_axis_p90_deg=max(
+                2.0, _float(section, "maximum_normal_axis_p90_deg", 28.0)
+            ),
+            maximum_normal_radial_median_deg=max(
+                1.0, _float(section, "maximum_normal_radial_median_deg", 22.0)
+            ),
+            maximum_normal_radial_p90_deg=max(
+                2.0, _float(section, "maximum_normal_radial_p90_deg", 48.0)
+            ),
+            minimum_visible_normal_span_deg=max(
+                5.0, _float(section, "minimum_visible_normal_span_deg", 28.0)
+            ),
+            ambiguity_min_axis_separation_deg=max(
+                2.0, _float(section, "ambiguity_min_axis_separation_deg", 12.0)
+            ),
+            ambiguity_min_score_margin=max(
+                0.0, _float(section, "ambiguity_min_score_margin", 0.18)
+            ),
+            bootstrap_trials=max(
+                0, _int(section, "bootstrap_trials", 5)
+            ),
+            bootstrap_sample_ratio=min(
+                1.0, max(0.20, _float(section, "bootstrap_sample_ratio", 0.65))
+            ),
+            maximum_bootstrap_axis_spread_deg=max(
+                1.0, _float(section, "maximum_bootstrap_axis_spread_deg", 12.0)
+            ),
+            maximum_normal_seed_disagreement_deg=max(
+                1.0, _float(section, "maximum_normal_seed_disagreement_deg", 18.0)
+            ),
+            reject_when_normal_evidence_insufficient=bool(
+                section.get("reject_when_normal_evidence_insufficient", True)
+            ),
             random_seed=_int(section, "random_seed", 3701),
         )
 
@@ -391,6 +513,13 @@ class _AxisEvaluation:
     residual_p90_mm: float
     axial_coordinate_mm: np.ndarray
     observed_axis_span_mm: float
+    normal_point_count: int = 0
+    normal_inlier_ratio: float = 0.0
+    normal_axis_median_deg: float = float("inf")
+    normal_axis_p90_deg: float = float("inf")
+    normal_radial_median_deg: float = float("inf")
+    normal_radial_p90_deg: float = float("inf")
+    visible_normal_span_deg: float = 0.0
 
 
 def _fit_circle_center_fixed_radius(
@@ -510,6 +639,455 @@ def _evaluate_axis(
         observed_axis_span_mm=observed_span,
     )
 
+
+
+def _axis_angle_deg(first: np.ndarray, second: np.ndarray) -> float:
+    first = _unit(first)
+    second = _unit(second)
+    return math.degrees(math.acos(float(np.clip(abs(float(np.dot(first, second))), 0.0, 1.0))))
+
+
+def _hemisphere_axis(axis: np.ndarray) -> np.ndarray:
+    axis = _unit(axis)
+    if axis[2] < 0.0:
+        axis = -axis
+    return axis
+
+
+def _occupied_circular_span_deg(angles: np.ndarray) -> float:
+    angles = np.mod(np.asarray(angles, dtype=np.float64), 2.0 * math.pi)
+    if len(angles) < 2:
+        return 0.0
+    ordered = np.sort(angles)
+    gaps = np.diff(np.concatenate((ordered, ordered[:1] + 2.0 * math.pi)))
+    return math.degrees(max(0.0, 2.0 * math.pi - float(np.max(gaps))))
+
+
+def _evaluate_axis_normal_constrained(
+    points: np.ndarray,
+    axis: np.ndarray,
+    config: SideRingTemplateConfig,
+    *,
+    normal_points: np.ndarray,
+    normals: np.ndarray,
+    fixed_radius_iterations: Optional[int] = None,
+) -> _AxisEvaluation:
+    base = _evaluate_axis(
+        points,
+        axis,
+        config,
+        fixed_radius_iterations=fixed_radius_iterations,
+    )
+    if len(normals) == 0:
+        return base
+
+    axis = base.axis
+    normals = np.asarray(normals, dtype=np.float64).reshape(-1, 3)
+    normal_points = np.asarray(normal_points, dtype=np.float64).reshape(-1, 3)
+    normal_norm = np.linalg.norm(normals, axis=1)
+    valid = normal_norm > 1e-8
+    normals = normals[valid] / normal_norm[valid, None]
+    normal_points = normal_points[valid]
+    if len(normals) == 0:
+        return base
+
+    axis_dot = np.clip(np.abs(normals @ axis), 0.0, 1.0)
+    axis_error_deg = np.degrees(np.arcsin(axis_dot))
+
+    delta = normal_points - base.axis_point[None, :]
+    axial = delta @ axis
+    radial = delta - axial[:, None] * axis[None, :]
+    radial_norm = np.linalg.norm(radial, axis=1)
+    radial_valid = radial_norm > 1e-6
+    radial_unit = np.zeros_like(radial)
+    radial_unit[radial_valid] = radial[radial_valid] / radial_norm[radial_valid, None]
+    radial_alignment = np.zeros(len(normals), dtype=np.float64)
+    radial_alignment[radial_valid] = np.clip(
+        np.abs(np.sum(normals[radial_valid] * radial_unit[radial_valid], axis=1)),
+        0.0,
+        1.0,
+    )
+    radial_error_deg = np.full(len(normals), 90.0, dtype=np.float64)
+    radial_error_deg[radial_valid] = np.degrees(
+        np.arccos(radial_alignment[radial_valid])
+    )
+
+    normal_inlier = (
+        radial_valid
+        & (axis_error_deg <= config.normal_axis_inlier_deg)
+        & (radial_error_deg <= config.normal_radial_inlier_deg)
+    )
+    normal_inlier_ratio = float(np.mean(normal_inlier))
+    axis_median = float(np.median(axis_error_deg))
+    axis_p90 = float(np.percentile(axis_error_deg, 90))
+    radial_median = float(np.median(radial_error_deg[radial_valid])) if np.any(radial_valid) else 90.0
+    radial_p90 = float(np.percentile(radial_error_deg[radial_valid], 90)) if np.any(radial_valid) else 90.0
+
+    span_mask = normal_inlier if int(np.count_nonzero(normal_inlier)) >= 12 else radial_valid
+    if int(np.count_nonzero(span_mask)) >= 2:
+        basis_u, basis_v = _basis_perpendicular(axis)
+        directions = radial_unit[span_mask]
+        angles = np.arctan2(directions @ basis_v, directions @ basis_u)
+        visible_span = _occupied_circular_span_deg(angles)
+    else:
+        visible_span = 0.0
+
+    span_penalty = max(0.0, config.minimum_visible_normal_span_deg - visible_span) * 0.04
+    score = (
+        base.score
+        + config.normal_score_axis_weight * axis_median
+        + config.normal_score_radial_weight * radial_median
+        + 5.0 * (1.0 - normal_inlier_ratio)
+        + span_penalty
+    )
+    return replace(
+        base,
+        score=float(score),
+        normal_point_count=int(len(normals)),
+        normal_inlier_ratio=float(normal_inlier_ratio),
+        normal_axis_median_deg=float(axis_median),
+        normal_axis_p90_deg=float(axis_p90),
+        normal_radial_median_deg=float(radial_median),
+        normal_radial_p90_deg=float(radial_p90),
+        visible_normal_span_deg=float(visible_span),
+    )
+
+
+def _deduplicate_axes(
+    axes: Sequence[np.ndarray],
+    *,
+    minimum_angle_deg: float,
+    maximum_count: int,
+) -> List[np.ndarray]:
+    output: List[np.ndarray] = []
+    for raw in axes:
+        try:
+            axis = _hemisphere_axis(raw)
+        except ValueError:
+            continue
+        if any(_axis_angle_deg(axis, existing) < minimum_angle_deg for existing in output):
+            continue
+        output.append(axis)
+        if len(output) >= maximum_count:
+            break
+    return output
+
+
+def _normal_covariance_axis(normals: np.ndarray) -> Optional[np.ndarray]:
+    normals = np.asarray(normals, dtype=np.float64).reshape(-1, 3)
+    if len(normals) < 3:
+        return None
+    covariance = normals.T @ normals / float(max(1, len(normals)))
+    try:
+        values, vectors = np.linalg.eigh(covariance)
+    except np.linalg.LinAlgError:
+        return None
+    return _hemisphere_axis(vectors[:, int(np.argmin(values))])
+
+
+def _normal_axis_seeds(
+    points: np.ndarray,
+    normals: np.ndarray,
+    config: SideRingTemplateConfig,
+    *,
+    initial_axis: Optional[np.ndarray] = None,
+) -> Tuple[List[np.ndarray], Optional[np.ndarray]]:
+    normals = np.asarray(normals, dtype=np.float64).reshape(-1, 3)
+    raw: List[np.ndarray] = []
+    covariance_axis = _normal_covariance_axis(normals)
+    if initial_axis is not None:
+        raw.append(np.asarray(initial_axis, dtype=np.float64))
+    if covariance_axis is not None:
+        raw.append(covariance_axis)
+
+    if len(points) >= 3:
+        centered = points - np.median(points, axis=0)
+        try:
+            _, _, vh = np.linalg.svd(centered, full_matrices=False)
+            raw.extend(vh[:3])
+        except np.linalg.LinAlgError:
+            pass
+
+    rng = np.random.default_rng(config.random_seed + 503)
+    pair_count = min(config.normal_pair_hypothesis_samples, max(0, len(normals) * 3))
+    for _ in range(pair_count):
+        if len(normals) < 2:
+            break
+        first, second = rng.integers(0, len(normals), size=2)
+        if first == second:
+            continue
+        cross = np.cross(normals[first], normals[second])
+        if float(np.linalg.norm(cross)) < 0.18:
+            continue
+        raw.append(cross)
+
+    if config.normal_fallback_global_samples > 0:
+        raw.extend(_fibonacci_hemisphere(config.normal_fallback_global_samples))
+
+    # Rank seeds by the normal-perpendicular constraint before expensive circle fits.
+    ranked: List[Tuple[float, np.ndarray]] = []
+    for raw_axis in raw:
+        try:
+            axis = _hemisphere_axis(raw_axis)
+        except ValueError:
+            continue
+        error = np.degrees(np.arcsin(np.clip(np.abs(normals @ axis), 0.0, 1.0)))
+        score = float(np.median(error) + 0.20 * np.percentile(error, 80))
+        ranked.append((score, axis))
+    ranked.sort(key=lambda item: item[0])
+    axes = _deduplicate_axes(
+        [item[1] for item in ranked],
+        minimum_angle_deg=config.normal_hypothesis_dedup_deg,
+        maximum_count=config.normal_axis_hypothesis_count,
+    )
+    return axes, covariance_axis
+
+
+def _top_axis_evaluations(
+    candidates: Sequence[_AxisEvaluation],
+    config: SideRingTemplateConfig,
+) -> List[_AxisEvaluation]:
+    ordered = sorted(candidates, key=lambda item: item.score)
+    output: List[_AxisEvaluation] = []
+    for candidate in ordered:
+        if any(
+            _axis_angle_deg(candidate.axis, existing.axis)
+            < config.normal_hypothesis_dedup_deg
+            for existing in output
+        ):
+            continue
+        output.append(candidate)
+        if len(output) >= config.normal_top_k_hypotheses:
+            break
+    return output
+
+
+def _bootstrap_normal_axis_stability(
+    normals: np.ndarray,
+    reference_axis: np.ndarray,
+    config: SideRingTemplateConfig,
+) -> Dict[str, Any]:
+    trials = int(config.bootstrap_trials)
+    if trials <= 0 or len(normals) < config.minimum_normal_points:
+        return {
+            "trial_count": 0,
+            "angles_deg": [],
+            "maximum_axis_spread_deg": 0.0,
+            "median_axis_spread_deg": 0.0,
+        }
+    rng = np.random.default_rng(config.random_seed + 911)
+    sample_count = max(
+        config.minimum_normal_points,
+        int(round(len(normals) * config.bootstrap_sample_ratio)),
+    )
+    sample_count = min(len(normals), sample_count)
+    angles: List[float] = []
+    for _ in range(trials):
+        indexes = rng.choice(len(normals), size=sample_count, replace=False)
+        axis = _normal_covariance_axis(normals[indexes])
+        if axis is not None:
+            angles.append(_axis_angle_deg(axis, reference_axis))
+    return {
+        "trial_count": int(len(angles)),
+        "angles_deg": [float(value) for value in angles],
+        "maximum_axis_spread_deg": float(max(angles) if angles else 0.0),
+        "median_axis_spread_deg": float(np.median(angles) if angles else 0.0),
+    }
+
+
+def _fit_axis_normal_constrained(
+    points: np.ndarray,
+    normal_points: np.ndarray,
+    normals: np.ndarray,
+    config: SideRingTemplateConfig,
+    *,
+    profile: str,
+    initial_axis: Optional[np.ndarray] = None,
+) -> Tuple[_AxisEvaluation, Dict[str, Any]]:
+    profile = str(profile).strip().lower()
+    if profile not in {"fast", "accurate", "local_accurate"}:
+        profile = "fast"
+    fast = profile == "fast"
+    local_accurate = profile == "local_accurate"
+    maximum_points = (
+        config.fast_maximum_fit_points
+        if fast
+        else config.local_accurate_maximum_fit_points
+        if local_accurate
+        else config.maximum_fit_points
+    )
+    fixed_iterations = (
+        config.fast_fixed_radius_iterations
+        if fast
+        else config.local_accurate_fixed_radius_iterations
+        if local_accurate
+        else config.fixed_radius_iterations
+    )
+    refine_angles = (
+        config.fast_local_refine_angles_deg
+        if fast
+        else config.local_accurate_refine_angles_deg
+        if local_accurate
+        else config.local_refine_angles_deg
+    )
+    radial_steps = (
+        config.fast_local_refine_radial_steps
+        if fast
+        else config.local_accurate_refine_radial_steps
+        if local_accurate
+        else config.local_refine_radial_steps
+    )
+    azimuth_steps = (
+        config.fast_local_refine_azimuth_steps
+        if fast
+        else config.local_accurate_refine_azimuth_steps
+        if local_accurate
+        else config.local_refine_azimuth_steps
+    )
+
+    started = time.perf_counter()
+    search_points = _sample_search_points(
+        points,
+        maximum_points,
+        random_seed=config.random_seed + (71 if fast else 73),
+    )
+    normal_maximum = min(len(normals), max(config.minimum_normal_points, 900))
+    if len(normals) > normal_maximum:
+        rng = np.random.default_rng(config.random_seed + 79)
+        idx = rng.choice(len(normals), size=normal_maximum, replace=False)
+        search_normal_points = normal_points[idx]
+        search_normals = normals[idx]
+    else:
+        search_normal_points = normal_points
+        search_normals = normals
+
+    seeds, covariance_axis = _normal_axis_seeds(
+        search_points,
+        search_normals,
+        config,
+        initial_axis=initial_axis,
+    )
+    if not seeds:
+        raise ValueError("normal-constrained axis fitting has no valid hypotheses")
+
+    candidate_evaluations = 0
+    seed_results: List[_AxisEvaluation] = []
+    seed_started = time.perf_counter()
+    for axis in seeds:
+        seed_results.append(
+            _evaluate_axis_normal_constrained(
+                search_points,
+                axis,
+                config,
+                normal_points=search_normal_points,
+                normals=search_normals,
+                fixed_radius_iterations=fixed_iterations,
+            )
+        )
+        candidate_evaluations += 1
+    seed_ms = (time.perf_counter() - seed_started) * 1000.0
+    active = _top_axis_evaluations(seed_results, config)
+
+    local_levels: List[Dict[str, Any]] = []
+    local_total = 0.0
+    for maximum_angle_deg in refine_angles:
+        level_started = time.perf_counter()
+        level_results: List[_AxisEvaluation] = []
+        for seed in active:
+            for axis in _local_axis_candidates(
+                seed.axis,
+                maximum_angle_deg,
+                radial_steps,
+                azimuth_steps,
+            ):
+                level_results.append(
+                    _evaluate_axis_normal_constrained(
+                        search_points,
+                        axis,
+                        config,
+                        normal_points=search_normal_points,
+                        normals=search_normals,
+                        fixed_radius_iterations=fixed_iterations,
+                    )
+                )
+                candidate_evaluations += 1
+        active = _top_axis_evaluations(level_results, config)
+        elapsed = (time.perf_counter() - level_started) * 1000.0
+        local_total += elapsed
+        local_levels.append(
+            {
+                "maximum_angle_deg": float(maximum_angle_deg),
+                "candidate_count": int(len(level_results)),
+                "retained_count": int(len(active)),
+                "elapsed_ms": float(elapsed),
+            }
+        )
+
+    final_results = [
+        _evaluate_axis_normal_constrained(
+            points,
+            item.axis,
+            config,
+            normal_points=normal_points,
+            normals=normals,
+            fixed_radius_iterations=config.fixed_radius_iterations,
+        )
+        for item in active
+    ]
+    final_ranked = _top_axis_evaluations(final_results, config)
+    best = final_ranked[0]
+    second = final_ranked[1] if len(final_ranked) > 1 else None
+    second_angle = _axis_angle_deg(best.axis, second.axis) if second is not None else 0.0
+    score_margin = float(second.score - best.score) if second is not None else float("inf")
+    seed_disagreement = (
+        _axis_angle_deg(best.axis, covariance_axis)
+        if covariance_axis is not None
+        else 0.0
+    )
+    bootstrap = _bootstrap_normal_axis_stability(normals, best.axis, config)
+    ambiguity = bool(
+        second is not None
+        and second_angle >= config.ambiguity_min_axis_separation_deg
+        and score_margin < config.ambiguity_min_score_margin
+    )
+    uncertainty = {
+        "ambiguous_top_hypotheses": ambiguity,
+        "top2_axis_separation_deg": float(second_angle),
+        "top2_score_margin": float(score_margin),
+        "normal_seed_axis_disagreement_deg": float(seed_disagreement),
+        "bootstrap": bootstrap,
+        "hypotheses": [
+            {
+                "rank": index + 1,
+                "score": float(item.score),
+                "axis": item.axis.tolist(),
+                "angle_from_best_deg": float(_axis_angle_deg(item.axis, best.axis)),
+                "normal_inlier_ratio": float(item.normal_inlier_ratio),
+                "normal_axis_median_deg": float(item.normal_axis_median_deg),
+                "normal_radial_median_deg": float(item.normal_radial_median_deg),
+            }
+            for index, item in enumerate(final_ranked)
+        ],
+    }
+    timing = {
+        "profile": profile,
+        "normal_constrained": True,
+        "warm_start": bool(initial_axis is not None),
+        "global_axis_samples": 0,
+        "normal_seed_count": int(len(seeds)),
+        "seed_evaluation_ms": float(seed_ms),
+        # Compatibility with M37.2/M37.4 timing consumers.  In M37.5 this is
+        # normal-hypothesis evaluation rather than a blind Fibonacci search.
+        "global_search_ms": 0.0 if local_accurate else float(seed_ms),
+        "candidate_evaluations": int(candidate_evaluations),
+        "local_refine_levels_ms": local_levels,
+        "local_refine_ms": float(local_total),
+        "search_point_count": int(len(search_points)),
+        "normal_point_count": int(len(search_normals)),
+        "uncertainty": uncertainty,
+        "total_ms": (time.perf_counter() - started) * 1000.0,
+    }
+    return best, timing
 
 def _sample_search_points(
     points: np.ndarray,
@@ -1096,7 +1674,16 @@ def _extract_instance_points(
     depth_mm: np.ndarray,
     intrinsics: Mapping[str, float],
     config: SideRingTemplateConfig,
-) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    *,
+    exclusion_mask: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    """Extract a separated organized surface and robust local normals.
+
+    M37.5 removes neighboring-instance contact zones and RGB-D discontinuity
+    pixels before deprojection.  Normals are computed only where a complete
+    cross-shaped neighborhood belongs to the retained target surface.
+    """
+
     started = time.perf_counter()
     height, width = depth_mm.shape[:2]
     x1, y1, x2, y2 = (int(value) for value in instance.bbox_xyxy)
@@ -1105,15 +1692,18 @@ def _extract_instance_points(
     y1 = max(0, y1 - padding)
     x2 = min(width, x2 + padding)
     y2 = min(height, y2 + padding)
+    empty = (
+        np.empty((0, 3), dtype=np.float64),
+        np.empty((0, 2), dtype=np.int32),
+        np.empty((0, 3), dtype=np.float64),
+        np.empty((0, 3), dtype=np.float64),
+    )
     if x2 <= x1 or y2 <= y1:
-        return (
-            np.empty((0, 3), dtype=np.float64),
-            np.empty((0, 2), dtype=np.int32),
-            {"bbox_xyxy": [x1, y1, x2, y2], "total_ms": 0.0},
-        )
+        return (*empty, {"bbox_xyxy": [x1, y1, x2, y2], "total_ms": 0.0})
 
     mask_started = time.perf_counter()
     local_mask = instance.mask[y1:y2, x1:x2].astype(np.uint8, copy=True)
+    original_mask_count = int(np.count_nonzero(local_mask))
     if config.mask_erode_px > 0:
         kernel_size = config.mask_erode_px * 2 + 1
         local_mask = cv2.erode(
@@ -1121,36 +1711,250 @@ def _extract_instance_points(
             np.ones((kernel_size, kernel_size), dtype=np.uint8),
             iterations=1,
         )
+    eroded_count = int(np.count_nonzero(local_mask))
+
+    excluded_count = 0
+    if exclusion_mask is not None and exclusion_mask.shape[:2] == depth_mm.shape[:2]:
+        local_exclusion = exclusion_mask[y1:y2, x1:x2].astype(np.uint8, copy=False)
+        if config.neighbor_exclusion_dilate_px > 0:
+            size = config.neighbor_exclusion_dilate_px * 2 + 1
+            local_exclusion = cv2.dilate(
+                local_exclusion,
+                np.ones((size, size), dtype=np.uint8),
+                iterations=1,
+            )
+        excluded_count = int(np.count_nonzero(local_mask & local_exclusion))
+        local_mask[local_exclusion.astype(bool)] = 0
+
+    local_depth = depth_mm[y1:y2, x1:x2].astype(np.float64)
+    valid_depth = (
+        (local_depth >= config.minimum_depth_mm)
+        & (local_depth <= config.maximum_depth_mm)
+    )
+    candidate_mask = local_mask.astype(bool) & valid_depth
+
+    # Remove pixels adjacent to a physical depth jump.  This suppresses D2C
+    # mixed pixels, inner-hole background and contact boundaries.
+    edge = np.zeros_like(candidate_mask, dtype=bool)
+    threshold = float(config.depth_edge_threshold_mm)
+    for dy, dx in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+        shifted_depth = np.roll(local_depth, shift=(dy, dx), axis=(0, 1))
+        shifted_valid = np.roll(candidate_mask, shift=(dy, dx), axis=(0, 1))
+        comparison = candidate_mask & shifted_valid
+        edge |= comparison & (np.abs(local_depth - shifted_depth) > threshold)
+    if config.depth_edge_dilate_px > 0 and np.any(edge):
+        size = config.depth_edge_dilate_px * 2 + 1
+        edge = cv2.dilate(
+            edge.astype(np.uint8),
+            np.ones((size, size), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+    candidate_mask &= ~edge
+    edge_removed_count = int(np.count_nonzero(edge & local_mask.astype(bool)))
+
+    # Retain meaningful connected surface components.  Tiny isolated islands
+    # are typical depth flying pixels and contact contamination.
+    component_count = 0
+    component_kept_count = 0
+    if np.any(candidate_mask):
+        component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            candidate_mask.astype(np.uint8), connectivity=8
+        )
+        component_count = max(0, int(component_count) - 1)
+        if component_count > 0:
+            areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64)
+            largest = int(np.max(areas))
+            minimum_area = max(8, int(round(largest * config.surface_component_minimum_ratio)))
+            keep_labels = [index + 1 for index, area in enumerate(areas) if int(area) >= minimum_area]
+            retained = np.isin(labels, keep_labels)
+            candidate_mask &= retained
+            component_kept_count = int(len(keep_labels))
     mask_ms = (time.perf_counter() - mask_started) * 1000.0
 
     deproject_started = time.perf_counter()
-    local_depth = depth_mm[y1:y2, x1:x2]
-    valid = (
-        local_mask.astype(bool)
-        & (local_depth >= config.minimum_depth_mm)
-        & (local_depth <= config.maximum_depth_mm)
-    )
-    local_y, local_x = np.nonzero(valid)
+    local_y, local_x = np.nonzero(candidate_mask)
     if local_x.size == 0:
-        points = np.empty((0, 3), dtype=np.float64)
-        pixels = np.empty((0, 2), dtype=np.int32)
-    else:
-        xs = local_x + x1
-        ys = local_y + y1
-        z = local_depth[local_y, local_x].astype(np.float64)
-        fx = float(intrinsics["fx"])
-        fy = float(intrinsics["fy"])
-        cx = float(intrinsics["cx"])
-        cy = float(intrinsics["cy"])
-        x = (xs.astype(np.float64) - cx) * z / fx
-        y = (ys.astype(np.float64) - cy) * z / fy
-        points = np.column_stack((x, y, z))
-        pixels = np.column_stack((xs, ys)).astype(np.int32)
+        return (
+            *empty,
+            {
+                "bbox_xyxy": [int(x1), int(y1), int(x2), int(y2)],
+                "original_mask_count": original_mask_count,
+                "eroded_mask_count": eroded_count,
+                "neighbor_excluded_count": excluded_count,
+                "depth_edge_removed_count": edge_removed_count,
+                "component_count": component_count,
+                "component_kept_count": component_kept_count,
+                "mask_prepare_ms": float(mask_ms),
+                "depth_deproject_ms": 0.0,
+                "normal_estimation_ms": 0.0,
+                "total_ms": (time.perf_counter() - started) * 1000.0,
+            },
+        )
+
+    xs = local_x + x1
+    ys = local_y + y1
+    z = local_depth[local_y, local_x]
+    fx = float(intrinsics["fx"])
+    fy = float(intrinsics["fy"])
+    cx = float(intrinsics["cx"])
+    cy = float(intrinsics["cy"])
+    x = (xs.astype(np.float64) - cx) * z / fx
+    y = (ys.astype(np.float64) - cy) * z / fy
+    points = np.column_stack((x, y, z))
+    pixels = np.column_stack((xs, ys)).astype(np.int32)
     deproject_ms = (time.perf_counter() - deproject_started) * 1000.0
-    return points, pixels, {
+
+    normal_started = time.perf_counter()
+    local_h, local_w = local_depth.shape
+    point_map = np.full((local_h, local_w, 3), np.nan, dtype=np.float64)
+    grid_y, grid_x = np.indices((local_h, local_w))
+    point_map[..., 2] = local_depth
+    point_map[..., 0] = (grid_x + x1 - cx) * local_depth / fx
+    point_map[..., 1] = (grid_y + y1 - cy) * local_depth / fy
+    step = int(config.normal_neighbor_step_px)
+    normal_points: List[np.ndarray] = []
+    normal_values: List[np.ndarray] = []
+    if local_h > 2 * step and local_w > 2 * step:
+        center_mask = candidate_mask[step:-step, step:-step]
+        left_mask = candidate_mask[step:-step, :-2 * step]
+        right_mask = candidate_mask[step:-step, 2 * step:]
+        up_mask = candidate_mask[:-2 * step, step:-step]
+        down_mask = candidate_mask[2 * step:, step:-step]
+        normal_valid = center_mask & left_mask & right_mask & up_mask & down_mask
+        center_p = point_map[step:-step, step:-step]
+        dx = point_map[step:-step, 2 * step:] - point_map[step:-step, :-2 * step]
+        dy = point_map[2 * step:, step:-step] - point_map[:-2 * step, step:-step]
+        normals_map = np.cross(dx, dy)
+        norm = np.linalg.norm(normals_map, axis=2)
+        normal_valid &= np.isfinite(norm) & (norm > 1e-6)
+        selected_points = center_p[normal_valid]
+        selected_normals = normals_map[normal_valid] / norm[normal_valid, None]
+        # Orient each normal toward the camera; cylinder scoring later still
+        # uses absolute dot products, while a consistent sign helps diagnostics.
+        toward_camera = -selected_points
+        flip = np.sum(selected_normals * toward_camera, axis=1) < 0.0
+        selected_normals[flip] *= -1.0
+        normal_points = selected_points
+        normal_values = selected_normals
+    normals = np.asarray(normal_values, dtype=np.float64).reshape(-1, 3)
+    normal_points_array = np.asarray(normal_points, dtype=np.float64).reshape(-1, 3)
+    normal_ms = (time.perf_counter() - normal_started) * 1000.0
+    return points, pixels, normal_points_array, normals, {
         "bbox_xyxy": [int(x1), int(y1), int(x2), int(y2)],
+        "original_mask_count": original_mask_count,
+        "eroded_mask_count": eroded_count,
+        "neighbor_excluded_count": excluded_count,
+        "depth_edge_removed_count": edge_removed_count,
+        "component_count": component_count,
+        "component_kept_count": component_kept_count,
+        "retained_surface_pixel_count": int(len(points)),
+        "normal_point_count": int(len(normals)),
+        "normal_valid_ratio": float(len(normals)) / float(max(1, len(points))),
         "mask_prepare_ms": float(mask_ms),
         "depth_deproject_ms": float(deproject_ms),
+        "normal_estimation_ms": float(normal_ms),
+        "total_ms": (time.perf_counter() - started) * 1000.0,
+    }
+
+
+def _depth_trim_bounds(
+    points: np.ndarray,
+    config: SideRingTemplateConfig,
+) -> Tuple[float, float]:
+    if len(points) == 0:
+        return float("inf"), float("-inf")
+    depth = points[:, 2]
+    lower = float(np.quantile(depth, config.depth_lower_quantile)) - 3.0
+    upper = float(np.quantile(depth, config.depth_upper_quantile))
+    median = float(np.median(depth))
+    upper = min(upper, median + config.maximum_depth_behind_median_mm)
+    return lower, upper
+
+
+def _fit_axis_m375(
+    points: np.ndarray,
+    normal_points: np.ndarray,
+    normals: np.ndarray,
+    config: SideRingTemplateConfig,
+    *,
+    search_profile: str,
+    initial_axis: Optional[np.ndarray],
+) -> Tuple[_AxisEvaluation, Dict[str, Any]]:
+    if not config.normal_constrained_enabled:
+        return _fit_axis(
+            points,
+            config,
+            search_profile=search_profile,
+            initial_axis=initial_axis,
+        )
+
+    requested = str(search_profile).strip().lower()
+    if requested not in {"auto", "fast", "accurate", "local_accurate"}:
+        raise ValueError("search_profile must be auto, fast, accurate or local_accurate")
+    started = time.perf_counter()
+    if requested == "auto":
+        fast_eval, fast_timing = _fit_axis_normal_constrained(
+            points,
+            normal_points,
+            normals,
+            config,
+            profile="fast",
+            initial_axis=initial_axis,
+        )
+        reasons = _fast_fit_fallback_reasons(fast_eval, config)
+        if reasons and config.accurate_fallback_enabled:
+            accurate_eval, accurate_timing = _fit_axis_normal_constrained(
+                points,
+                normal_points,
+                normals,
+                config,
+                profile="accurate",
+                initial_axis=fast_eval.axis,
+            )
+            return accurate_eval, {
+                "requested_profile": "auto",
+                "final_profile": "accurate_fallback",
+                "fallback_used": True,
+                "fallback_reasons": reasons,
+                "normal_constrained": True,
+                "fast": fast_timing,
+                "accurate": accurate_timing,
+                "local_accurate": None,
+                "uncertainty": accurate_timing.get("uncertainty") or {},
+                "total_ms": (time.perf_counter() - started) * 1000.0,
+            }
+        return fast_eval, {
+            "requested_profile": "auto",
+            "final_profile": "fast",
+            "fallback_used": False,
+            "fallback_reasons": reasons,
+            "normal_constrained": True,
+            "fast": fast_timing,
+            "accurate": None,
+            "local_accurate": None,
+            "uncertainty": fast_timing.get("uncertainty") or {},
+            "total_ms": (time.perf_counter() - started) * 1000.0,
+        }
+
+    evaluation, profile_timing = _fit_axis_normal_constrained(
+        points,
+        normal_points,
+        normals,
+        config,
+        profile=requested,
+        initial_axis=initial_axis,
+    )
+    key = "local_accurate" if requested == "local_accurate" else requested
+    return evaluation, {
+        "requested_profile": requested,
+        "final_profile": requested,
+        "fallback_used": False,
+        "fallback_reasons": [],
+        "normal_constrained": True,
+        "fast": profile_timing if key == "fast" else None,
+        "accurate": profile_timing if key == "accurate" else None,
+        "local_accurate": profile_timing if key == "local_accurate" else None,
+        "uncertainty": profile_timing.get("uncertainty") or {},
         "total_ms": (time.perf_counter() - started) * 1000.0,
     }
 
@@ -1163,6 +1967,7 @@ def fit_side_ring_instance(
     mouth_matched: bool = False,
     search_profile: str = "auto",
     initial_axis: Optional[np.ndarray] = None,
+    exclusion_mask: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """Fit one parameterized short-cylinder template to a foam-ring mask."""
 
@@ -1170,16 +1975,38 @@ def fit_side_ring_instance(
     if instance.class_name != "foam_ring":
         raise ValueError("fit_side_ring_instance requires foam_ring")
     extract_started = time.perf_counter()
-    points, pixels, extraction_timing = _extract_instance_points(
-        instance, depth_mm, intrinsics, config
+    points, pixels, normal_points, normals, extraction_timing = _extract_instance_points(
+        instance,
+        depth_mm,
+        intrinsics,
+        config,
+        exclusion_mask=exclusion_mask,
     )
     extraction_ms = (time.perf_counter() - extract_started) * 1000.0
     raw_point_count = int(len(points))
+    raw_normal_count = int(len(normals))
     trim_started = time.perf_counter()
-    points = _trim_points_by_depth(points, config)
+    lower_depth, upper_depth = _depth_trim_bounds(points, config)
+    point_keep = (points[:, 2] >= lower_depth) & (points[:, 2] <= upper_depth) if len(points) else np.zeros(0, dtype=bool)
+    points = points[point_keep]
+    if len(normal_points):
+        normal_keep = (normal_points[:, 2] >= lower_depth) & (normal_points[:, 2] <= upper_depth)
+        normal_points = normal_points[normal_keep]
+        normals = normals[normal_keep]
     depth_trim_ms = (time.perf_counter() - trim_started) * 1000.0
     trimmed_point_count = int(len(points))
-    if trimmed_point_count < config.minimum_depth_points:
+    trimmed_normal_count = int(len(normals))
+    normal_valid_ratio = float(trimmed_normal_count) / float(max(1, trimmed_point_count))
+    insufficient_normals = bool(
+        config.normal_constrained_enabled
+        and (
+            trimmed_normal_count < config.minimum_normal_points
+            or normal_valid_ratio < config.minimum_normal_valid_ratio
+        )
+    )
+    if trimmed_point_count < config.minimum_depth_points or (
+        insufficient_normals and config.reject_when_normal_evidence_insufficient
+    ):
         total_ms = (time.perf_counter() - started) * 1000.0
         return {
             "ring_instance_id": int(instance.instance_id),
@@ -1187,9 +2014,17 @@ def fit_side_ring_instance(
             "ring_bbox_xyxy": [int(value) for value in instance.bbox_xyxy],
             "mouth_matched": bool(mouth_matched),
             "eligible": False,
-            "rejection_reasons": ["insufficient_depth_points"],
+            "rejection_reasons": (
+                ["insufficient_depth_points"]
+                if trimmed_point_count < config.minimum_depth_points
+                else ["insufficient_surface_normal_evidence"]
+            ),
             "point_count_raw": raw_point_count,
             "point_count_trimmed": trimmed_point_count,
+            "normal_point_count_raw": raw_normal_count,
+            "normal_point_count_trimmed": trimmed_normal_count,
+            "normal_valid_ratio": float(normal_valid_ratio),
+            "surface_separation": dict(extraction_timing),
             "search_profile_requested": str(search_profile),
             "search_profile_used": None,
             "timing_ms": {
@@ -1197,6 +2032,7 @@ def fit_side_ring_instance(
                 "mask_prepare_ms": float(extraction_timing.get("mask_prepare_ms", 0.0)),
                 "depth_deproject_ms": float(extraction_timing.get("depth_deproject_ms", 0.0)),
                 "depth_trim_ms": float(depth_trim_ms),
+                "normal_estimation_ms": float(extraction_timing.get("normal_estimation_ms", 0.0)),
                 "axis_template_fit_ms": 0.0,
                 "endpoint_and_grasp_ms": 0.0,
                 "quality_gate_ms": 0.0,
@@ -1204,8 +2040,10 @@ def fit_side_ring_instance(
             },
         }
 
-    evaluation, axis_search_timing = _fit_axis(
+    evaluation, axis_search_timing = _fit_axis_m375(
         points,
+        normal_points,
+        normals,
         config,
         search_profile=search_profile,
         initial_axis=initial_axis,
@@ -1310,6 +2148,28 @@ def fit_side_ring_instance(
     if axis_view_angle_deg < config.minimum_side_lay_angle_deg:
         rejection_reasons.append("axis_not_side_laying")
 
+    uncertainty = axis_search_timing.get("uncertainty") or {}
+    bootstrap = uncertainty.get("bootstrap") or {}
+    if config.normal_constrained_enabled:
+        if evaluation.normal_inlier_ratio < config.minimum_normal_inlier_ratio:
+            rejection_reasons.append("surface_normal_inlier_ratio_too_low")
+        if evaluation.normal_axis_median_deg > config.maximum_normal_axis_median_deg:
+            rejection_reasons.append("surface_normals_not_perpendicular_to_axis")
+        if evaluation.normal_axis_p90_deg > config.maximum_normal_axis_p90_deg:
+            rejection_reasons.append("surface_normal_axis_p90_too_high")
+        if evaluation.normal_radial_median_deg > config.maximum_normal_radial_median_deg:
+            rejection_reasons.append("surface_normals_not_radial")
+        if evaluation.normal_radial_p90_deg > config.maximum_normal_radial_p90_deg:
+            rejection_reasons.append("surface_normal_radial_p90_too_high")
+        if evaluation.visible_normal_span_deg < config.minimum_visible_normal_span_deg:
+            rejection_reasons.append("visible_cylindrical_normal_span_too_small")
+        if bool(uncertainty.get("ambiguous_top_hypotheses", False)):
+            rejection_reasons.append("axis_hypotheses_ambiguous")
+        if float(uncertainty.get("normal_seed_axis_disagreement_deg", 0.0)) > config.maximum_normal_seed_disagreement_deg:
+            rejection_reasons.append("axis_disagrees_with_surface_normal_seed")
+        if float(bootstrap.get("maximum_axis_spread_deg", 0.0)) > config.maximum_bootstrap_axis_spread_deg:
+            rejection_reasons.append("axis_bootstrap_unstable")
+
     quality_gate_ms = (time.perf_counter() - quality_started) * 1000.0
     center_uv = project_point(center, intrinsics)
     near_center_uv = project_point(near_center, intrinsics)
@@ -1344,6 +2204,18 @@ def fit_side_ring_instance(
         "fit_score": float(evaluation.score),
         "point_count_raw": raw_point_count,
         "point_count_trimmed": trimmed_point_count,
+        "normal_point_count_raw": raw_normal_count,
+        "normal_point_count_trimmed": trimmed_normal_count,
+        "normal_valid_ratio": float(normal_valid_ratio),
+        "surface_separation": dict(extraction_timing),
+        "normal_constrained": bool(config.normal_constrained_enabled),
+        "normal_inlier_ratio": float(evaluation.normal_inlier_ratio),
+        "normal_axis_median_deg": float(evaluation.normal_axis_median_deg),
+        "normal_axis_p90_deg": float(evaluation.normal_axis_p90_deg),
+        "normal_radial_median_deg": float(evaluation.normal_radial_median_deg),
+        "normal_radial_p90_deg": float(evaluation.normal_radial_p90_deg),
+        "visible_normal_span_deg": float(evaluation.visible_normal_span_deg),
+        "pose_uncertainty": uncertainty,
         "radial_inlier_count": int(np.count_nonzero(evaluation.radial_inlier_mask)),
         "radial_inlier_ratio": float(evaluation.radial_inlier_ratio),
         "radial_residual_median_mm": float(evaluation.residual_median_mm),
@@ -1406,6 +2278,7 @@ def fit_side_ring_instance(
             "mask_prepare_ms": float(extraction_timing.get("mask_prepare_ms", 0.0)),
             "depth_deproject_ms": float(extraction_timing.get("depth_deproject_ms", 0.0)),
             "depth_trim_ms": float(depth_trim_ms),
+            "normal_estimation_ms": float(extraction_timing.get("normal_estimation_ms", 0.0)),
             "axis_template_fit_ms": float(fit_ms),
             "axis_search": axis_search_timing,
             "endpoint_and_grasp_ms": float(endpoint_and_grasp_ms),
@@ -1414,6 +2287,8 @@ def fit_side_ring_instance(
         },
         "_debug": {
             "trimmed_points_camera_mm": points,
+            "surface_normal_points_camera_mm": normal_points,
+            "surface_normals_camera": normals,
             "radial_inlier_mask": evaluation.radial_inlier_mask,
             "near_outer_circle_camera_mm": _circle_points(
                 near_center,

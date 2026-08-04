@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M37.4 depth-layer-first hybrid trigger service for foam-ring exact RGB-D geometry.
+"""M37.5 depth-layer-first hybrid trigger service for foam-ring exact RGB-D geometry.
 
 The service keeps the synchronized RGB-D cache, Runtime client, geometry config
 and box calibration resident. Explicit trigger requests are serialized by one
@@ -380,7 +380,7 @@ class FoamRingOnlineService:
                     prepared,
                     save_debug=job.save_debug,
                     generate_overlay=bool(self.settings["latest_overlay_enabled"]),
-                    stage="M37.4_depth_layered_hybrid_persistent_trigger_service",
+                    stage="M37.5_depth_layered_hybrid_persistent_trigger_service",
                     geometry_queue_wait_ms=geometry_wait_ms,
                 )
                 service_processing_ms = max(
@@ -496,7 +496,7 @@ class FoamRingOnlineService:
         return {
             "schema_version": "1.0",
             "message_type": "foam_ring_trigger_result",
-            "stage": str(payload.get("stage") or "M37.4_depth_layered_hybrid_persistent_trigger_service"),
+            "stage": str(payload.get("stage") or "M37.5_depth_layered_hybrid_persistent_trigger_service"),
             "status": "ok",
             "request_id": job.request_id,
             "idempotent_replay": False,
@@ -869,7 +869,7 @@ def run(
     )
     thread.start()
     print(
-        "Foam Ring M37.4 Depth-Layered Hybrid Service started: http={}:{} runtime={} "
+        "Foam Ring M37.5 Depth-Layered Hybrid Service started: http={}:{} runtime={} "
         "m36_mode={} hybrid={} queue={}".format(
             settings["listen_host"],
             settings["listen_port"],
@@ -892,7 +892,7 @@ def run(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="M37.4 depth-layered foam-ring persistent trigger service (M36.5-compatible API)")
+    parser = argparse.ArgumentParser(description="M37.5 depth-layered foam-ring persistent trigger service (M36.5-compatible API)")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--runtime-url")
     parser.add_argument("--host")
@@ -915,7 +915,7 @@ def main() -> int:
             geometry_mode=args.geometry_mode,
         )
     except (OSError, ValueError, RuntimeError) as error:
-        print(f"[FAIL] M37.4 hybrid service startup failed: {error}", file=sys.stderr)
+        print(f"[FAIL] M37.5 hybrid service startup failed: {error}", file=sys.stderr)
         return 2
 
 

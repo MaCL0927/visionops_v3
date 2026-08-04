@@ -293,3 +293,26 @@ python3 production/foam_ring_grasp/scripts/replay_m37_4_result_set.py \
 ```
 
 完整说明见 `docs/M37.4_DEPTH_LAYERED_BOUNDED_REFINEMENT.md`。
+
+## M37.5 圆柱侧面点云分离、法向约束轴线拟合与姿态拒绝
+
+M37.5 修复“径向残差很低但轴线明显错误”的系统性问题。在线流程会排除
+相邻实例接触区和深度跳变边缘，从组织化 RGB-D 计算局部表面法向，并将
+“侧面法向垂直于轴线、法向与圆柱径向一致”加入姿态评分。程序保留多个
+轴线假设，并通过候选分数间隔、法向种子一致性和 bootstrap 重采样稳定性
+拒绝欠约束姿态。M36 同时增加深度平面与椭圆法向的硬冲突拒绝。
+
+查看最近一次姿态安全与耗时：
+
+```bash
+python3 production/foam_ring_grasp/scripts/summarize_hybrid_timing.py
+```
+
+批量回放调试结果：
+
+```bash
+python3 production/foam_ring_grasp/scripts/replay_m37_5_result_set.py \
+  /path/to/foam_ring_online_geometry --output /tmp/m37_5_replay
+```
+
+完整说明见 `docs/M37.5_NORMAL_CONSTRAINED_POSE_SAFETY.md`。

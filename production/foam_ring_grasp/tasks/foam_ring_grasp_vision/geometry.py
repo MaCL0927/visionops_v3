@@ -2911,9 +2911,38 @@ def analyze_ring_pair(
 
     pose_started = time.perf_counter()
     pose_plane, pose_diagnostics = build_pose_plane(ellipse, intrinsics, points, depth_plane, config)
-    disagreement_warn = _safe_float(config.section("pose").get("normal_disagreement_warning_deg"), 20.0)
-    if float(pose_diagnostics.get("normal_disagreement_deg", 0.0)) > disagreement_warn:
+    pose_cfg = config.section("pose")
+    disagreement = float(pose_diagnostics.get("normal_disagreement_deg", 0.0))
+    disagreement_warn = _safe_float(pose_cfg.get("normal_disagreement_warning_deg"), 20.0)
+    if disagreement > disagreement_warn:
         warnings.append("depth_plane_ellipse_pose_disagreement")
+
+    # M37.5 safety gate: an ellipse-derived normal and a depth plane that
+    # disagree by tens of degrees do not define a trustworthy grasp axis.
+    # Reject the pair instead of forcing one source to win.
+    if bool(pose_cfg.get("pose_conflict_hard_reject_enabled", True)):
+        hard_limit = _safe_float(pose_cfg.get("maximum_normal_disagreement_deg"), 25.0)
+        if disagreement > hard_limit:
+            reasons.append("depth_plane_ellipse_pose_conflict")
+        conditional_limit = _safe_float(
+            pose_cfg.get("conditional_normal_disagreement_deg"), 18.0
+        )
+        minimum_depth_support = _safe_float(
+            pose_cfg.get("conditional_minimum_depth_plane_inlier_ratio"), 0.55
+        )
+        if (
+            str(pose_diagnostics.get("normal_source")) == "ellipse_stabilized"
+            and disagreement > conditional_limit
+            and depth_plane.inlier_ratio < minimum_depth_support
+        ):
+            reasons.append("ellipse_pose_has_insufficient_depth_support")
+        stabilized_p95 = pose_diagnostics.get("stabilized_residual_p95_mm")
+        if (
+            stabilized_p95 is not None
+            and float(stabilized_p95)
+            > _safe_float(pose_cfg.get("maximum_stabilized_residual_p95_mm"), 8.0)
+        ):
+            reasons.append("ellipse_stabilized_pose_residual_too_high")
 
     center_uv = tuple(ellipse["center_uv"])
     center_camera = ray_plane_intersection(center_uv, intrinsics, pose_plane)

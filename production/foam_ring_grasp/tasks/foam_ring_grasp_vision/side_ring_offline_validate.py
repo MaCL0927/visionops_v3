@@ -402,6 +402,7 @@ def _process(
 
     fits: List[Dict[str, Any]] = []
     selected: Mapping[str, Any] | None = None
+    all_rings = [item for item in instances if item.class_name == "foam_ring"]
     fit_loop_started = time.perf_counter()
     processed_count = 0
     stop_index: int | None = None
@@ -411,6 +412,10 @@ def _process(
         if maximum_attempts > 0 and processed_count >= maximum_attempts:
             stop_index = index
             break
+        exclusion_mask = np.zeros_like(instance.mask, dtype=bool)
+        for other in all_rings:
+            if int(other.instance_id) != int(instance.instance_id):
+                exclusion_mask |= other.mask.astype(bool)
         fit = fit_side_ring_instance(
             instance,
             depth_mm,
@@ -418,6 +423,7 @@ def _process(
             template_config,
             mouth_matched=mouth_matched,
             search_profile=effective_search_profile,
+            exclusion_mask=exclusion_mask,
         )
         fit["attempt_rank"] = int(attempt_rank)
         fit["processing_status"] = "evaluated"
