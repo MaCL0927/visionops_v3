@@ -18,12 +18,13 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from functools import lru_cache
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import cv2  # type: ignore
 import numpy as np  # type: ignore
 
-from .geometry import depth_pixels_to_points, project_point
+from .geometry import project_point
 from .segmentation import SegmentationInstance
 
 
@@ -62,7 +63,8 @@ def _basis_perpendicular(axis: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return first, second
 
 
-def _fibonacci_hemisphere(count: int) -> Sequence[np.ndarray]:
+@lru_cache(maxsize=16)
+def _fibonacci_hemisphere(count: int) -> Tuple[np.ndarray, ...]:
     count = max(32, int(count))
     golden_angle = math.pi * (3.0 - math.sqrt(5.0))
     directions = []
@@ -77,7 +79,7 @@ def _fibonacci_hemisphere(count: int) -> Sequence[np.ndarray]:
                 dtype=np.float64,
             )
         )
-    return directions
+    return tuple(directions)
 
 
 def _local_axis_candidates(
@@ -128,6 +130,23 @@ class SideRingTemplateConfig:
     local_refine_radial_steps: int
     local_refine_azimuth_steps: int
     fixed_radius_iterations: int
+    execution_mode: str
+    stop_after_first_eligible: bool
+    maximum_instances_to_attempt: int
+    first_valid_search_profile: str
+    exhaustive_search_profile: str
+    point_extraction_bbox_padding_px: int
+    minimum_depth_points: int
+    fast_search_enabled: bool
+    fast_maximum_fit_points: int
+    fast_global_axis_samples: int
+    fast_local_refine_angles_deg: Tuple[float, ...]
+    fast_local_refine_radial_steps: int
+    fast_local_refine_azimuth_steps: int
+    fast_fixed_radius_iterations: int
+    fast_accept_max_score: float
+    accurate_fallback_enabled: bool
+    accurate_fallback_on_quality_gate_failure: bool
     radial_inlier_threshold_mm: float
     minimum_radial_inlier_ratio: float
     maximum_radial_residual_median_mm: float
@@ -167,6 +186,10 @@ class SideRingTemplateConfig:
         if not isinstance(refine_raw, (list, tuple)):
             refine_raw = [12.0, 4.0, 1.5]
         refine_angles = tuple(max(0.1, float(item)) for item in refine_raw)
+        fast_refine_raw = section.get("fast_local_refine_angles_deg", [12.0, 4.0, 1.5])
+        if not isinstance(fast_refine_raw, (list, tuple)):
+            fast_refine_raw = [12.0, 4.0, 1.5]
+        fast_refine_angles = tuple(max(0.1, float(item)) for item in fast_refine_raw)
         return cls(
             enabled=bool(section.get("enabled", True)),
             outer_radius_mm=_float(section, "outer_radius_mm", nominal_outer / 2.0),
@@ -187,6 +210,53 @@ class SideRingTemplateConfig:
             local_refine_radial_steps=max(1, _int(section, "local_refine_radial_steps", 3)),
             local_refine_azimuth_steps=max(4, _int(section, "local_refine_azimuth_steps", 16)),
             fixed_radius_iterations=max(3, _int(section, "fixed_radius_iterations", 12)),
+            execution_mode=str(
+                section.get("execution_mode") or "first_valid_confidence"
+            ).strip().lower(),
+            stop_after_first_eligible=bool(
+                section.get("stop_after_first_eligible", True)
+            ),
+            maximum_instances_to_attempt=max(
+                0, _int(section, "maximum_instances_to_attempt", 0)
+            ),
+            first_valid_search_profile=str(
+                section.get("first_valid_search_profile") or "auto"
+            ).strip().lower(),
+            exhaustive_search_profile=str(
+                section.get("exhaustive_search_profile") or "accurate"
+            ).strip().lower(),
+            point_extraction_bbox_padding_px=max(
+                0, _int(section, "point_extraction_bbox_padding_px", 3)
+            ),
+            minimum_depth_points=max(
+                20, _int(section, "minimum_depth_points", 80)
+            ),
+            fast_search_enabled=bool(section.get("fast_search_enabled", True)),
+            fast_maximum_fit_points=max(
+                200, _int(section, "fast_maximum_fit_points", 700)
+            ),
+            fast_global_axis_samples=max(
+                32, _int(section, "fast_global_axis_samples", 80)
+            ),
+            fast_local_refine_angles_deg=fast_refine_angles,
+            fast_local_refine_radial_steps=max(
+                1, _int(section, "fast_local_refine_radial_steps", 2)
+            ),
+            fast_local_refine_azimuth_steps=max(
+                4, _int(section, "fast_local_refine_azimuth_steps", 12)
+            ),
+            fast_fixed_radius_iterations=max(
+                3, _int(section, "fast_fixed_radius_iterations", 6)
+            ),
+            fast_accept_max_score=max(
+                0.5, _float(section, "fast_accept_max_score", 3.0)
+            ),
+            accurate_fallback_enabled=bool(
+                section.get("accurate_fallback_enabled", True)
+            ),
+            accurate_fallback_on_quality_gate_failure=bool(
+                section.get("accurate_fallback_on_quality_gate_failure", True)
+            ),
             radial_inlier_threshold_mm=max(
                 0.5,
                 _float(section, "radial_inlier_threshold_mm", 6.0),
@@ -339,6 +409,8 @@ def _evaluate_axis(
     points: np.ndarray,
     axis: np.ndarray,
     config: SideRingTemplateConfig,
+    *,
+    fixed_radius_iterations: Optional[int] = None,
 ) -> _AxisEvaluation:
     axis = _unit(axis)
     basis_u, basis_v = _basis_perpendicular(axis)
@@ -346,7 +418,11 @@ def _evaluate_axis(
     circle_center = _fit_circle_center_fixed_radius(
         projected,
         config.outer_radius_mm,
-        config.fixed_radius_iterations,
+        (
+            config.fixed_radius_iterations
+            if fixed_radius_iterations is None
+            else int(fixed_radius_iterations)
+        ),
     )
     radial_distance = np.linalg.norm(projected - circle_center, axis=1)
     radial_residual = np.abs(radial_distance - config.outer_radius_mm)
@@ -405,36 +481,196 @@ def _evaluate_axis(
     )
 
 
-def _fit_axis(points: np.ndarray, config: SideRingTemplateConfig) -> _AxisEvaluation:
+def _fit_axis_profile(
+    points: np.ndarray,
+    config: SideRingTemplateConfig,
+    *,
+    profile: str,
+) -> Tuple[_AxisEvaluation, Dict[str, Any]]:
+    profile = str(profile).strip().lower()
+    fast = profile == "fast"
+    maximum_fit_points = (
+        config.fast_maximum_fit_points if fast else config.maximum_fit_points
+    )
+    global_axis_samples = (
+        config.fast_global_axis_samples if fast else config.global_axis_samples
+    )
+    local_refine_angles = (
+        config.fast_local_refine_angles_deg
+        if fast
+        else config.local_refine_angles_deg
+    )
+    local_radial_steps = (
+        config.fast_local_refine_radial_steps
+        if fast
+        else config.local_refine_radial_steps
+    )
+    local_azimuth_steps = (
+        config.fast_local_refine_azimuth_steps
+        if fast
+        else config.local_refine_azimuth_steps
+    )
+    fixed_iterations = (
+        config.fast_fixed_radius_iterations
+        if fast
+        else config.fixed_radius_iterations
+    )
+
+    timing: Dict[str, Any] = {
+        "profile": profile,
+        "maximum_fit_points": int(maximum_fit_points),
+        "global_axis_samples": int(global_axis_samples),
+        "fixed_radius_iterations": int(fixed_iterations),
+        "candidate_evaluations": 0,
+        "local_refine_levels_ms": [],
+    }
+    profile_started = time.perf_counter()
+    sampling_started = time.perf_counter()
     rng = np.random.default_rng(config.random_seed)
-    if len(points) > config.maximum_fit_points:
-        indexes = rng.choice(len(points), size=config.maximum_fit_points, replace=False)
+    if len(points) > maximum_fit_points:
+        indexes = rng.choice(len(points), size=maximum_fit_points, replace=False)
         search_points = points[indexes]
     else:
         search_points = points
+    timing["sampling_ms"] = (time.perf_counter() - sampling_started) * 1000.0
+    timing["search_point_count"] = int(len(search_points))
 
+    global_started = time.perf_counter()
     best: Optional[_AxisEvaluation] = None
-    for axis in _fibonacci_hemisphere(config.global_axis_samples):
-        candidate = _evaluate_axis(search_points, axis, config)
+    for axis in _fibonacci_hemisphere(global_axis_samples):
+        candidate = _evaluate_axis(
+            search_points,
+            axis,
+            config,
+            fixed_radius_iterations=fixed_iterations,
+        )
+        timing["candidate_evaluations"] += 1
         if best is None or candidate.score < best.score:
             best = candidate
     assert best is not None
+    timing["global_search_ms"] = (time.perf_counter() - global_started) * 1000.0
 
-    for maximum_angle_deg in config.local_refine_angles_deg:
+    local_total = 0.0
+    for maximum_angle_deg in local_refine_angles:
+        level_started = time.perf_counter()
         refined: Optional[_AxisEvaluation] = None
-        for axis in _local_axis_candidates(
+        candidates = _local_axis_candidates(
             best.axis,
             maximum_angle_deg,
-            config.local_refine_radial_steps,
-            config.local_refine_azimuth_steps,
-        ):
-            candidate = _evaluate_axis(search_points, axis, config)
+            local_radial_steps,
+            local_azimuth_steps,
+        )
+        for axis in candidates:
+            candidate = _evaluate_axis(
+                search_points,
+                axis,
+                config,
+                fixed_radius_iterations=fixed_iterations,
+            )
+            timing["candidate_evaluations"] += 1
             if refined is None or candidate.score < refined.score:
                 refined = candidate
         assert refined is not None
         best = refined
+        level_ms = (time.perf_counter() - level_started) * 1000.0
+        local_total += level_ms
+        timing["local_refine_levels_ms"].append(
+            {
+                "maximum_angle_deg": float(maximum_angle_deg),
+                "candidate_count": int(len(candidates)),
+                "elapsed_ms": float(level_ms),
+            }
+        )
+    timing["local_refine_ms"] = float(local_total)
 
-    return _evaluate_axis(points, best.axis, config)
+    final_started = time.perf_counter()
+    final = _evaluate_axis(
+        points,
+        best.axis,
+        config,
+        fixed_radius_iterations=(
+            config.fixed_radius_iterations if fast else fixed_iterations
+        ),
+    )
+    timing["final_full_point_evaluation_ms"] = (
+        time.perf_counter() - final_started
+    ) * 1000.0
+    timing["total_ms"] = (time.perf_counter() - profile_started) * 1000.0
+    return final, timing
+
+
+def _fast_fit_fallback_reasons(
+    evaluation: _AxisEvaluation,
+    config: SideRingTemplateConfig,
+) -> List[str]:
+    reasons: List[str] = []
+    if evaluation.score > config.fast_accept_max_score:
+        reasons.append("fast_fit_score_above_accept_threshold")
+    if config.accurate_fallback_on_quality_gate_failure:
+        if evaluation.radial_inlier_ratio < config.minimum_radial_inlier_ratio:
+            reasons.append("fast_radial_inlier_ratio_gate_failed")
+        if evaluation.residual_median_mm > config.maximum_radial_residual_median_mm:
+            reasons.append("fast_radial_residual_median_gate_failed")
+        if evaluation.residual_p90_mm > config.maximum_radial_residual_p90_mm:
+            reasons.append("fast_radial_residual_p90_gate_failed")
+        if evaluation.observed_axis_span_mm < config.minimum_observed_axis_span_mm:
+            reasons.append("fast_axis_span_short_gate_failed")
+        if evaluation.observed_axis_span_mm > config.maximum_observed_axis_span_mm:
+            reasons.append("fast_axis_span_long_gate_failed")
+    return reasons
+
+
+def _fit_axis(
+    points: np.ndarray,
+    config: SideRingTemplateConfig,
+    *,
+    search_profile: str = "auto",
+) -> Tuple[_AxisEvaluation, Dict[str, Any]]:
+    requested = str(search_profile or "auto").strip().lower()
+    if requested not in {"auto", "fast", "accurate"}:
+        raise ValueError("search_profile must be auto, fast or accurate")
+    use_fast = requested in {"auto", "fast"} and config.fast_search_enabled
+    if not use_fast:
+        evaluation, accurate_timing = _fit_axis_profile(
+            points, config, profile="accurate"
+        )
+        return evaluation, {
+            "requested_profile": requested,
+            "final_profile": "accurate",
+            "fallback_used": False,
+            "fallback_reasons": [],
+            "fast": None,
+            "accurate": accurate_timing,
+            "total_ms": float(accurate_timing["total_ms"]),
+        }
+
+    started = time.perf_counter()
+    fast_evaluation, fast_timing = _fit_axis_profile(
+        points, config, profile="fast"
+    )
+    fallback_reasons = _fast_fit_fallback_reasons(fast_evaluation, config)
+    fallback_used = bool(
+        requested == "auto"
+        and config.accurate_fallback_enabled
+        and fallback_reasons
+    )
+    accurate_timing = None
+    final_evaluation = fast_evaluation
+    final_profile = "fast"
+    if fallback_used:
+        final_evaluation, accurate_timing = _fit_axis_profile(
+            points, config, profile="accurate"
+        )
+        final_profile = "accurate_fallback"
+    return final_evaluation, {
+        "requested_profile": requested,
+        "final_profile": final_profile,
+        "fallback_used": bool(fallback_used),
+        "fallback_reasons": fallback_reasons,
+        "fast": fast_timing,
+        "accurate": accurate_timing,
+        "total_ms": (time.perf_counter() - started) * 1000.0,
+    }
 
 
 def _trim_points_by_depth(
@@ -679,6 +915,70 @@ def _visible_crown_direction(
     return direction, debug
 
 
+
+def _extract_instance_points(
+    instance: SegmentationInstance,
+    depth_mm: np.ndarray,
+    intrinsics: Mapping[str, float],
+    config: SideRingTemplateConfig,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    started = time.perf_counter()
+    height, width = depth_mm.shape[:2]
+    x1, y1, x2, y2 = (int(value) for value in instance.bbox_xyxy)
+    padding = max(config.point_extraction_bbox_padding_px, config.mask_erode_px + 1)
+    x1 = max(0, x1 - padding)
+    y1 = max(0, y1 - padding)
+    x2 = min(width, x2 + padding)
+    y2 = min(height, y2 + padding)
+    if x2 <= x1 or y2 <= y1:
+        return (
+            np.empty((0, 3), dtype=np.float64),
+            np.empty((0, 2), dtype=np.int32),
+            {"bbox_xyxy": [x1, y1, x2, y2], "total_ms": 0.0},
+        )
+
+    mask_started = time.perf_counter()
+    local_mask = instance.mask[y1:y2, x1:x2].astype(np.uint8, copy=True)
+    if config.mask_erode_px > 0:
+        kernel_size = config.mask_erode_px * 2 + 1
+        local_mask = cv2.erode(
+            local_mask,
+            np.ones((kernel_size, kernel_size), dtype=np.uint8),
+            iterations=1,
+        )
+    mask_ms = (time.perf_counter() - mask_started) * 1000.0
+
+    deproject_started = time.perf_counter()
+    local_depth = depth_mm[y1:y2, x1:x2]
+    valid = (
+        local_mask.astype(bool)
+        & (local_depth >= config.minimum_depth_mm)
+        & (local_depth <= config.maximum_depth_mm)
+    )
+    local_y, local_x = np.nonzero(valid)
+    if local_x.size == 0:
+        points = np.empty((0, 3), dtype=np.float64)
+        pixels = np.empty((0, 2), dtype=np.int32)
+    else:
+        xs = local_x + x1
+        ys = local_y + y1
+        z = local_depth[local_y, local_x].astype(np.float64)
+        fx = float(intrinsics["fx"])
+        fy = float(intrinsics["fy"])
+        cx = float(intrinsics["cx"])
+        cy = float(intrinsics["cy"])
+        x = (xs.astype(np.float64) - cx) * z / fx
+        y = (ys.astype(np.float64) - cy) * z / fy
+        points = np.column_stack((x, y, z))
+        pixels = np.column_stack((xs, ys)).astype(np.int32)
+    deproject_ms = (time.perf_counter() - deproject_started) * 1000.0
+    return points, pixels, {
+        "bbox_xyxy": [int(x1), int(y1), int(x2), int(y2)],
+        "mask_prepare_ms": float(mask_ms),
+        "depth_deproject_ms": float(deproject_ms),
+        "total_ms": (time.perf_counter() - started) * 1000.0,
+    }
+
 def fit_side_ring_instance(
     instance: SegmentationInstance,
     depth_mm: np.ndarray,
@@ -686,45 +986,53 @@ def fit_side_ring_instance(
     config: SideRingTemplateConfig,
     *,
     mouth_matched: bool = False,
+    search_profile: str = "auto",
 ) -> Dict[str, Any]:
     """Fit one parameterized short-cylinder template to a foam-ring mask."""
 
     started = time.perf_counter()
     if instance.class_name != "foam_ring":
         raise ValueError("fit_side_ring_instance requires foam_ring")
-    mask = instance.mask.astype(np.uint8)
-    if config.mask_erode_px > 0:
-        kernel_size = config.mask_erode_px * 2 + 1
-        mask = cv2.erode(
-            mask,
-            np.ones((kernel_size, kernel_size), dtype=np.uint8),
-            iterations=1,
-        )
-    points, pixels = depth_pixels_to_points(
-        depth_mm,
-        mask.astype(bool),
-        intrinsics,
-        config.minimum_depth_mm,
-        config.maximum_depth_mm,
-        stride=1,
+    extract_started = time.perf_counter()
+    points, pixels, extraction_timing = _extract_instance_points(
+        instance, depth_mm, intrinsics, config
     )
+    extraction_ms = (time.perf_counter() - extract_started) * 1000.0
     raw_point_count = int(len(points))
+    trim_started = time.perf_counter()
     points = _trim_points_by_depth(points, config)
+    depth_trim_ms = (time.perf_counter() - trim_started) * 1000.0
     trimmed_point_count = int(len(points))
-    if trimmed_point_count < 80:
+    if trimmed_point_count < config.minimum_depth_points:
+        total_ms = (time.perf_counter() - started) * 1000.0
         return {
             "ring_instance_id": int(instance.instance_id),
+            "ring_confidence": float(instance.confidence),
+            "ring_bbox_xyxy": [int(value) for value in instance.bbox_xyxy],
             "mouth_matched": bool(mouth_matched),
             "eligible": False,
             "rejection_reasons": ["insufficient_depth_points"],
             "point_count_raw": raw_point_count,
             "point_count_trimmed": trimmed_point_count,
-            "timing_ms": {"total_ms": (time.perf_counter() - started) * 1000.0},
+            "search_profile_requested": str(search_profile),
+            "search_profile_used": None,
+            "timing_ms": {
+                "point_extraction_ms": float(extraction_ms),
+                "mask_prepare_ms": float(extraction_timing.get("mask_prepare_ms", 0.0)),
+                "depth_deproject_ms": float(extraction_timing.get("depth_deproject_ms", 0.0)),
+                "depth_trim_ms": float(depth_trim_ms),
+                "axis_template_fit_ms": 0.0,
+                "endpoint_and_grasp_ms": 0.0,
+                "quality_gate_ms": 0.0,
+                "total_ms": float(total_ms),
+            },
         }
 
-    fit_started = time.perf_counter()
-    evaluation = _fit_axis(points, config)
-    fit_ms = (time.perf_counter() - fit_started) * 1000.0
+    evaluation, axis_search_timing = _fit_axis(
+        points, config, search_profile=search_profile
+    )
+    fit_ms = float(axis_search_timing.get("total_ms", 0.0))
+    pose_started = time.perf_counter()
 
     axial_inliers = evaluation.axial_coordinate_mm[evaluation.radial_inlier_mask]
     if len(axial_inliers) < 20:
@@ -798,6 +1106,8 @@ def fit_side_ring_instance(
         raise ValueError("near-side visible crown point cannot be projected")
     grasp_point_uv = (float(grasp_point_uv_value[0]), float(grasp_point_uv_value[1]))
 
+    endpoint_and_grasp_ms = (time.perf_counter() - pose_started) * 1000.0
+    quality_started = time.perf_counter()
     fitted_radius = float(
         np.median(
             evaluation.radial_distance_mm[evaluation.radial_inlier_mask]
@@ -821,6 +1131,7 @@ def fit_side_ring_instance(
     if axis_view_angle_deg < config.minimum_side_lay_angle_deg:
         rejection_reasons.append("axis_not_side_laying")
 
+    quality_gate_ms = (time.perf_counter() - quality_started) * 1000.0
     center_uv = project_point(center, intrinsics)
     near_center_uv = project_point(near_center, intrinsics)
     far_center_uv = project_point(far_center, intrinsics)
@@ -832,6 +1143,10 @@ def fit_side_ring_instance(
         "ring_confidence": float(instance.confidence),
         "ring_bbox_xyxy": [int(value) for value in instance.bbox_xyxy],
         "mouth_matched": bool(mouth_matched),
+        "search_profile_requested": str(search_profile),
+        "search_profile_used": str(axis_search_timing.get("final_profile")),
+        "accurate_fallback_used": bool(axis_search_timing.get("fallback_used", False)),
+        "accurate_fallback_reasons": list(axis_search_timing.get("fallback_reasons") or []),
         "eligible": len(rejection_reasons) == 0,
         "rejection_reasons": rejection_reasons,
         "fit_score": float(evaluation.score),
@@ -895,7 +1210,14 @@ def fit_side_ring_instance(
             "grasp_point_uv": [float(grasp_point_uv[0]), float(grasp_point_uv[1])],
         },
         "timing_ms": {
+            "point_extraction_ms": float(extraction_ms),
+            "mask_prepare_ms": float(extraction_timing.get("mask_prepare_ms", 0.0)),
+            "depth_deproject_ms": float(extraction_timing.get("depth_deproject_ms", 0.0)),
+            "depth_trim_ms": float(depth_trim_ms),
             "axis_template_fit_ms": float(fit_ms),
+            "axis_search": axis_search_timing,
+            "endpoint_and_grasp_ms": float(endpoint_and_grasp_ms),
+            "quality_gate_ms": float(quality_gate_ms),
             "total_ms": float(total_ms),
         },
         "_debug": {

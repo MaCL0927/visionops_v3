@@ -556,13 +556,46 @@ side_ring_template:
   depth_upper_quantile: 0.99
   maximum_depth_behind_median_mm: 95.0
 
-  # NumPy-only deterministic axis search; no SciPy/Open3D dependency is added.
+  # M37.2 execution policy.  Side-ring candidates are sorted by foam_ring
+  # confidence.  The first eligible fit is returned immediately; lower-ranked
+  # instances remain explicitly marked as deferred.  Use exhaustive mode only
+  # for full offline diagnosis.
+  execution_mode: first_valid_confidence  # first_valid_confidence | exhaustive
+  stop_after_first_eligible: true
+  maximum_instances_to_attempt: 0  # 0 = unlimited until first success
+  first_valid_search_profile: auto  # fast first, accurate fallback when needed
+  exhaustive_search_profile: accurate
+
+  # Restrict depth extraction to the instance bbox.  This avoids scanning the
+  # complete ROI for every ring while preserving original image coordinates.
+  point_extraction_bbox_padding_px: 3
+  minimum_depth_points: 80
+
+  # Accurate search retained from M37.1 for fallback and exhaustive comparison.
   maximum_fit_points: 1200
   global_axis_samples: 320
   local_refine_angles_deg: [12.0, 4.0, 1.5]
   local_refine_radial_steps: 3
   local_refine_azimuth_steps: 16
   fixed_radius_iterations: 12
+
+  # M37.2 coarse-to-fine fast profile.  The real instance-7 frame keeps the
+  # corrected grasp point while reducing axis fitting from about 608 ms to
+  # about 120-135 ms on the local validation machine.
+  fast_search_enabled: true
+  fast_maximum_fit_points: 700
+  fast_global_axis_samples: 80
+  fast_local_refine_angles_deg: [12.0, 4.0, 1.5]
+  fast_local_refine_radial_steps: 2
+  fast_local_refine_azimuth_steps: 12
+  fast_fixed_radius_iterations: 6
+
+  # A fast result above this score, or one that fails a fit-quality gate, is
+  # rerun with the original accurate profile before the candidate is rejected
+  # or accepted.  This keeps poor/ambiguous masks conservative.
+  fast_accept_max_score: 3.0
+  accurate_fallback_enabled: true
+  accurate_fallback_on_quality_gate_failure: true
   random_seed: 3701
 
   # Fit-quality gates for the nominal outer cylindrical surface.

@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
@@ -70,6 +71,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default=None)
     parser.add_argument("--include-mouth-matched", action="store_true")
     parser.add_argument("--instance-id", type=int, action="append")
+    parser.add_argument(
+        "--mode",
+        choices=("first_valid_confidence", "exhaustive"),
+        default=None,
+        help="默认读取side_ring_template.execution_mode",
+    )
+    parser.add_argument(
+        "--search-profile",
+        choices=("auto", "fast", "accurate"),
+        default=None,
+        help="first-valid默认auto，exhaustive默认accurate",
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--no-ply", action="store_true")
     return parser
@@ -125,9 +138,14 @@ def _draw_fit_overlay(
         instance = instance_map.get(instance_id)
         if instance is None:
             continue
-        eligible = bool(fit.get("eligible", False))
+        processing_status = str(fit.get("processing_status") or "evaluated")
+        eligible_value = fit.get("eligible")
+        eligible = bool(eligible_value) if eligible_value is not None else False
         selected = selected_instance_id == instance_id
-        color = (0, 255, 0) if eligible else (0, 165, 255)
+        if processing_status == "deferred":
+            color = (128, 128, 128)
+        else:
+            color = (0, 255, 0) if eligible else (0, 165, 255)
         if selected:
             color = (255, 255, 0)
         contours, _ = cv2.findContours(
@@ -137,7 +155,12 @@ def _draw_fit_overlay(
         )
         cv2.drawContours(overlay, contours, -1, color, 1)
         x1, y1, _, _ = instance.bbox_xyxy
-        label = "S%d %.2f" % (instance_id, float(fit.get("fit_score", 0.0)))
+        if processing_status == "deferred":
+            label = "S%d D %.2f" % (
+                instance_id, float(fit.get("ring_confidence", 0.0))
+            )
+        else:
+            label = "S%d %.2f" % (instance_id, float(fit.get("fit_score", 0.0)))
         cv2.putText(
             overlay,
             label,
@@ -204,7 +227,7 @@ def _draw_fit_overlay(
                 cv2.polylines(overlay, [contour], True, circle_color, 1, cv2.LINE_AA)
     cv2.putText(
         overlay,
-        "M37.1: red box=crown grasp, white X=old rim-top, blue=visible arc ends",
+        "M37.2: confidence-first, first valid exits; gray=deferred",
         (10, 18),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.45,
@@ -236,6 +259,9 @@ def _summary_rows(capture_id: str, fits: Sequence[Mapping[str, Any]]) -> List[Di
             {
                 "capture_id": capture_id,
                 "ring_instance_id": fit.get("ring_instance_id"),
+                "ring_confidence": fit.get("ring_confidence"),
+                "attempt_rank": fit.get("attempt_rank"),
+                "processing_status": fit.get("processing_status"),
                 "eligible": fit.get("eligible"),
                 "mouth_matched": fit.get("mouth_matched"),
                 "rejection_reasons": ";".join(fit.get("rejection_reasons") or []),
@@ -258,7 +284,10 @@ def _summary_rows(capture_id: str, fits: Sequence[Mapping[str, Any]]) -> List[Di
                 "visible_arc_span_deg": (top_arc.get("visible_arc") or {}).get(
                     "visible_angular_span_deg"
                 ),
+                "search_profile_used": fit.get("search_profile_used"),
+                "accurate_fallback_used": fit.get("accurate_fallback_used"),
                 "fit_ms": (fit.get("timing_ms") or {}).get("axis_template_fit_ms"),
+                "total_ms": (fit.get("timing_ms") or {}).get("total_ms"),
             }
         )
     return rows
@@ -275,6 +304,54 @@ def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+
+def _ordered_side_ring_candidates(
+    instances: Sequence[SegmentationInstance],
+    *,
+    matched_ids: set[int],
+    include_mouth_matched: bool,
+    requested_ids: set[int],
+) -> List[Tuple[SegmentationInstance, bool]]:
+    candidates: List[Tuple[SegmentationInstance, bool]] = []
+    for instance in instances:
+        if instance.class_name != "foam_ring":
+            continue
+        instance_id = int(instance.instance_id)
+        if requested_ids and instance_id not in requested_ids:
+            continue
+        mouth_matched = instance_id in matched_ids
+        if mouth_matched and not include_mouth_matched:
+            continue
+        candidates.append((instance, mouth_matched))
+    candidates.sort(
+        key=lambda item: (
+            -float(item[0].confidence),
+            int(item[0].instance_id),
+        )
+    )
+    return candidates
+
+
+def _deferred_fit_record(
+    instance: SegmentationInstance,
+    *,
+    mouth_matched: bool,
+    attempt_rank: int,
+    reason: str,
+) -> Dict[str, Any]:
+    return {
+        "ring_instance_id": int(instance.instance_id),
+        "ring_confidence": float(instance.confidence),
+        "ring_bbox_xyxy": [int(value) for value in instance.bbox_xyxy],
+        "mouth_matched": bool(mouth_matched),
+        "attempt_rank": int(attempt_rank),
+        "processing_status": "deferred",
+        "deferred_reason": str(reason),
+        "eligible": None,
+        "rejection_reasons": [],
+        "timing_ms": {"total_ms": 0.0},
+    }
+
 def _process(
     *,
     capture_id: str,
@@ -288,38 +365,109 @@ def _process(
     instance_ids: Sequence[int] | None,
     save_ply: bool,
     inputs: Mapping[str, Any],
+    execution_mode: str | None = None,
+    search_profile: str | None = None,
 ) -> Dict[str, Any]:
+    process_started = time.perf_counter()
     template_config = SideRingTemplateConfig.from_mapping(raw_config)
-    matched_ids = _mouth_matches(instances, raw_config)
-    requested = set(int(value) for value in (instance_ids or []))
-    fits: List[Dict[str, Any]] = []
-    for instance in instances:
-        if instance.class_name != "foam_ring":
-            continue
-        if requested and int(instance.instance_id) not in requested:
-            continue
-        mouth_matched = int(instance.instance_id) in matched_ids
-        if mouth_matched and not include_mouth_matched:
-            continue
-        fits.append(
-            fit_side_ring_instance(
-                instance,
-                depth_mm,
-                intrinsics,
-                template_config,
-                mouth_matched=mouth_matched,
-            )
+    mode = str(execution_mode or template_config.execution_mode).strip().lower()
+    if mode not in {"first_valid_confidence", "exhaustive"}:
+        raise ValueError("M37 execution mode must be first_valid_confidence or exhaustive")
+    effective_search_profile = str(
+        search_profile
+        or (
+            template_config.first_valid_search_profile
+            if mode == "first_valid_confidence"
+            else template_config.exhaustive_search_profile
         )
+    ).strip().lower()
+    if effective_search_profile not in {"auto", "fast", "accurate"}:
+        raise ValueError("M37 search profile must be auto, fast or accurate")
 
-    selected = select_best_side_ring(fits)
+    association_started = time.perf_counter()
+    matched_ids = _mouth_matches(instances, raw_config)
+    association_ms = (time.perf_counter() - association_started) * 1000.0
+    requested = set(int(value) for value in (instance_ids or []))
+    order_started = time.perf_counter()
+    candidates = _ordered_side_ring_candidates(
+        instances,
+        matched_ids=matched_ids,
+        include_mouth_matched=include_mouth_matched,
+        requested_ids=requested,
+    )
+    candidate_order_ms = (time.perf_counter() - order_started) * 1000.0
+
+    fits: List[Dict[str, Any]] = []
+    selected: Mapping[str, Any] | None = None
+    fit_loop_started = time.perf_counter()
+    processed_count = 0
+    stop_index: int | None = None
+    for index, (instance, mouth_matched) in enumerate(candidates):
+        attempt_rank = index + 1
+        maximum_attempts = int(template_config.maximum_instances_to_attempt)
+        if maximum_attempts > 0 and processed_count >= maximum_attempts:
+            stop_index = index
+            break
+        fit = fit_side_ring_instance(
+            instance,
+            depth_mm,
+            intrinsics,
+            template_config,
+            mouth_matched=mouth_matched,
+            search_profile=effective_search_profile,
+        )
+        fit["attempt_rank"] = int(attempt_rank)
+        fit["processing_status"] = "evaluated"
+        fits.append(fit)
+        processed_count += 1
+        if (
+            mode == "first_valid_confidence"
+            and template_config.stop_after_first_eligible
+            and bool(fit.get("eligible", False))
+        ):
+            selected = fit
+            stop_index = index + 1
+            break
+
+    fit_loop_ms = (time.perf_counter() - fit_loop_started) * 1000.0
+    if mode == "exhaustive":
+        selected = select_best_side_ring(fits)
+    elif selected is None:
+        selected = select_best_side_ring(fits)
+
+    if stop_index is not None and stop_index < len(candidates):
+        reason = (
+            "after_first_valid_confidence_candidate"
+            if selected is not None and bool(selected.get("eligible", False))
+            else "maximum_instances_to_attempt_reached"
+        )
+        for index in range(stop_index, len(candidates)):
+            instance, mouth_matched = candidates[index]
+            fits.append(
+                _deferred_fit_record(
+                    instance,
+                    mouth_matched=mouth_matched,
+                    attempt_rank=index + 1,
+                    reason=reason,
+                )
+            )
+
     selected_id = int(selected["ring_instance_id"]) if selected is not None else None
+    output_started = time.perf_counter()
     output_dir = output_root / capture_id
     output_dir.mkdir(parents=True, exist_ok=True)
     overlay = _draw_fit_overlay(rgb_bgr, instances, fits, intrinsics, selected_id)
     cv2.imwrite(str(output_dir / "side_ring_template_overlay.jpg"), overlay)
 
     if save_ply:
-        for fit in fits:
+        ply_fits = (
+            [selected]
+            if mode == "first_valid_confidence" and selected is not None
+            else [fit for fit in fits if fit.get("processing_status") == "evaluated"]
+        )
+        for fit in ply_fits:
+            if fit is None:
+                continue
             debug = fit.get("_debug") or {}
             points = debug.get("trimmed_points_camera_mm")
             if points is not None:
@@ -342,12 +490,32 @@ def _process(
                     np.vstack(template_parts),
                 )
 
+    output_generation_ms = (time.perf_counter() - output_started) * 1000.0
+    evaluated_fits = [
+        fit for fit in fits if fit.get("processing_status") == "evaluated"
+    ]
+    deferred_fits = [
+        fit for fit in fits if fit.get("processing_status") == "deferred"
+    ]
+    process_total_ms = (time.perf_counter() - process_started) * 1000.0
     payload = {
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "message_type": "side_ring_template_offline_validation_result",
-        "stage": "M37.1_near_visible_cylindrical_crown_grasp_point_correction",
+        "stage": "M37.2_confidence_first_fast_side_ring_template",
         "status": "ok",
         "capture_id": capture_id,
+        "execution": {
+            "mode": mode,
+            "candidate_order_rule": "foam_ring_confidence_descending",
+            "search_profile": effective_search_profile,
+            "stop_after_first_eligible": bool(template_config.stop_after_first_eligible),
+            "maximum_instances_to_attempt": int(template_config.maximum_instances_to_attempt),
+            "first_valid_early_exit_triggered": bool(
+                mode == "first_valid_confidence"
+                and selected is not None
+                and len(deferred_fits) > 0
+            ),
+        },
         "inputs": dict(inputs),
         "image": {"width": int(rgb_bgr.shape[1]), "height": int(rgb_bgr.shape[0])},
         "depth": {"dtype": str(depth_mm.dtype)},
@@ -368,11 +536,37 @@ def _process(
         "rings_detected": sum(1 for item in instances if item.class_name == "foam_ring"),
         "mouths_detected": sum(1 for item in instances if item.class_name == "ring_mouth"),
         "mouth_matched_ring_ids": sorted(matched_ids),
-        "evaluated_count": len(fits),
-        "eligible_count": sum(1 for item in fits if item.get("eligible")),
+        "candidate_count": len(candidates),
+        "candidate_order": [
+            {
+                "rank": index + 1,
+                "ring_instance_id": int(instance.instance_id),
+                "confidence": float(instance.confidence),
+            }
+            for index, (instance, _) in enumerate(candidates)
+        ],
+        "evaluated_count": len(evaluated_fits),
+        "deferred_count": len(deferred_fits),
+        "eligible_count": sum(1 for item in evaluated_fits if item.get("eligible")),
+        "attempted_instance_ids": [
+            int(item["ring_instance_id"]) for item in evaluated_fits
+        ],
         "selected_ring_instance_id": selected_id,
         "selected": _strip_debug(selected) if selected is not None else None,
         "fits": [_strip_debug(item) for item in fits],
+        "timing_ms": {
+            "association_ms": float(association_ms),
+            "candidate_filter_sort_ms": float(candidate_order_ms),
+            "fit_loop_ms": float(fit_loop_ms),
+            "output_generation_ms": float(output_generation_ms),
+            "total_ms": float(process_total_ms),
+            "evaluated_instance_total_ms": float(
+                sum(
+                    float((item.get("timing_ms") or {}).get("total_ms", 0.0))
+                    for item in evaluated_fits
+                )
+            ),
+        },
         "files": {
             "overlay": str(output_dir / "side_ring_template_overlay.jpg"),
             "result": str(output_dir / "side_ring_template_result.json"),
@@ -494,6 +688,8 @@ def main() -> int:
                 instance_ids=args.instance_id,
                 save_ply=not args.no_ply,
                 inputs=inputs,
+                execution_mode=args.mode,
+                search_profile=args.search_profile,
             )
         )
     else:
@@ -513,6 +709,8 @@ def main() -> int:
                     include_mouth_matched=bool(args.include_mouth_matched),
                     instance_ids=args.instance_id,
                     save_ply=not args.no_ply,
+                    execution_mode=args.mode,
+                    search_profile=args.search_profile,
                     inputs={
                         "mode": "raw_capture",
                         "rgb": str(paths.rgb),
@@ -524,11 +722,16 @@ def main() -> int:
             )
 
     summary = {
-        "stage": "M37.1",
+        "stage": "M37.2",
         "status": "ok",
         "captures": len(payloads),
         "evaluated_count": sum(int(item.get("evaluated_count", 0)) for item in payloads),
         "eligible_count": sum(int(item.get("eligible_count", 0)) for item in payloads),
+        "deferred_count": sum(int(item.get("deferred_count", 0)) for item in payloads),
+        "total_processing_ms": sum(
+            float((item.get("timing_ms") or {}).get("total_ms", 0.0))
+            for item in payloads
+        ),
         "selected": [
             {
                 "capture_id": item.get("capture_id"),
@@ -547,7 +750,7 @@ def main() -> int:
         "output": str(output_root),
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    print("[PASS] M37.1 near-side visible crown grasp-point correction completed.")
+    print("[PASS] M37.2 confidence-first fast side-ring fitting completed.")
     return 0
 
 

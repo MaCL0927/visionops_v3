@@ -128,3 +128,100 @@ def test_m37_selects_nearest_eligible_side_ring():
     )
     assert selected is not None
     assert selected["ring_instance_id"] == 3
+
+
+def test_m372_auto_profile_reports_fast_search_timing():
+    instance, depth, intrinsics, config = _synthetic_side_cylinder()
+    result = fit_side_ring_instance(
+        instance,
+        depth,
+        intrinsics,
+        config,
+        search_profile="auto",
+    )
+    assert result["eligible"] is True
+    assert result["search_profile_used"] in {"fast", "accurate_fallback"}
+    timing = result["timing_ms"]
+    assert timing["point_extraction_ms"] >= 0.0
+    assert timing["axis_template_fit_ms"] > 0.0
+    axis_search = timing["axis_search"]
+    assert axis_search["requested_profile"] == "auto"
+    assert axis_search["fast"]["candidate_evaluations"] > 0
+    assert axis_search["fast"]["global_search_ms"] > 0.0
+
+
+def test_m372_orders_candidates_by_confidence_and_stops_after_first_valid(
+    monkeypatch,
+    tmp_path,
+):
+    from production.foam_ring_grasp.tasks.foam_ring_grasp_vision import (
+        side_ring_offline_validate as validator,
+    )
+
+    mask_a = np.zeros((80, 80), dtype=bool)
+    mask_b = np.zeros((80, 80), dtype=bool)
+    mask_a[10:40, 10:40] = True
+    mask_b[40:70, 40:70] = True
+    low = SegmentationInstance(
+        instance_id=1,
+        class_id=0,
+        class_name="foam_ring",
+        confidence=0.60,
+        mask=mask_a,
+        bbox_xyxy=(10, 10, 40, 40),
+    )
+    high = SegmentationInstance(
+        instance_id=2,
+        class_id=0,
+        class_name="foam_ring",
+        confidence=0.95,
+        mask=mask_b,
+        bbox_xyxy=(40, 40, 70, 70),
+    )
+    calls = []
+
+    def fake_fit(instance, *_args, **_kwargs):
+        calls.append(int(instance.instance_id))
+        return {
+            "ring_instance_id": int(instance.instance_id),
+            "ring_confidence": float(instance.confidence),
+            "ring_bbox_xyxy": list(instance.bbox_xyxy),
+            "eligible": True,
+            "rejection_reasons": [],
+            "fit_score": 1.0,
+            "center_uv": None,
+            "timing_ms": {"total_ms": 1.0},
+        }
+
+    monkeypatch.setattr(validator, "fit_side_ring_instance", fake_fit)
+    payload = validator._process(
+        capture_id="synthetic",
+        rgb_bgr=np.zeros((80, 80, 3), dtype=np.uint8),
+        depth_mm=np.zeros((80, 80), dtype=np.uint16),
+        intrinsics={"fx": 100.0, "fy": 100.0, "cx": 40.0, "cy": 40.0},
+        instances=[low, high],
+        raw_config={
+            "object_geometry": {
+                "nominal_outer_diameter_mm": 85.0,
+                "nominal_inner_diameter_mm": 60.0,
+                "axial_length_mm": 70.0,
+            },
+            "side_ring_template": {
+                "execution_mode": "first_valid_confidence",
+                "stop_after_first_eligible": True,
+            },
+        },
+        output_root=tmp_path,
+        include_mouth_matched=False,
+        instance_ids=None,
+        save_ply=False,
+        inputs={"mode": "test"},
+    )
+    assert calls == [2]
+    assert payload["selected_ring_instance_id"] == 2
+    assert payload["evaluated_count"] == 1
+    assert payload["deferred_count"] == 1
+    assert payload["candidate_order"][0]["ring_instance_id"] == 2
+    assert payload["execution"]["first_valid_early_exit_triggered"] is True
+    deferred = [item for item in payload["fits"] if item["processing_status"] == "deferred"]
+    assert deferred[0]["ring_instance_id"] == 1

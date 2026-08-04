@@ -252,4 +252,4 @@ python3 production/foam_ring_grasp/scripts/verify_online_service.py \
 
 ## M37 侧躺圆环参数化 3D 模板
 
-对于没有可靠 `ring_mouth` 的侧躺圆环，M37 使用已知外径、内径和轴向长度的短空心圆柱模型拟合 `foam_ring` 内部 RGB-D 点云。轴线从远端指向距离深度相机更近的端面。M37.1 在近端后方的真实可见圆柱弧面上计算抓取点，不再使用开口端投影最高点。该流程当前仅用于离线验证，详见 `docs/M37_SIDE_RING_PARAMETERIZED_TEMPLATE.md` 和 `docs/M37.1_NEAR_VISIBLE_CROWN_GRASP_POINT.md`。
+对于没有可靠 `ring_mouth` 的侧躺圆环，M37 使用已知外径、内径和轴向长度的短空心圆柱模型拟合 `foam_ring` 内部 RGB-D 点云。轴线从远端指向距离深度相机更近的端面。M37.1 在近端后方的真实可见圆柱弧面上计算抓取点，不再使用开口端投影最高点。M37.2 默认按 `foam_ring` 置信度排序，逐个尝试并在首个有效抓取点后立即退出，同时使用快速粗到细轴线搜索和保守高精度回退。该流程当前仅用于离线验证，详见 `docs/M37_SIDE_RING_PARAMETERIZED_TEMPLATE.md`、`docs/M37.1_NEAR_VISIBLE_CROWN_GRASP_POINT.md` 和 `docs/M37.2_CONFIDENCE_FIRST_FAST_TEMPLATE_FITTING.md`。
