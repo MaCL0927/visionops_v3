@@ -229,3 +229,23 @@ VISIONOPS_FOAM_RING_GEOMETRY_MODE=exhaustive \
 
 详细说明见 `docs/M36.4.2_FIRST_VALID_ADAPTIVE_CLOCK_OPTIMIZATION.md`。
 
+
+## M36.5：常驻触发式在线服务
+
+M36.5 将 M36.4.2 的单次在线几何流程封装为常驻服务。RGB-D 缓存、Runtime IPC、几何配置和箱体模型只初始化一次；显式 `request_id` 通过 inference/geometry 双线程有界可靠流水线处理，重复 request_id 幂等返回原任务/结果。生产触发默认不保存文件，`save_debug=true` 才保存完整证据链。
+
+```bash
+cd /opt/visionops_v3
+bash production/foam_ring_grasp/scripts/start_online_service.sh
+
+curl -s -X POST http://127.0.0.1:19213/api/foam_ring/infer_once \
+  -H 'Content-Type: application/json' \
+  -d '{"request_id":"robot-000001","wait":true,"save_debug":false}' \
+  | python3 -m json.tool
+
+python3 production/foam_ring_grasp/scripts/verify_online_service.py \
+  --samples 5 \
+  --report /tmp/m36_5_report.json
+```
+
+详细说明见 `docs/M36.5_PERSISTENT_TRIGGER_SERVICE.md`。

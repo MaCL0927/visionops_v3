@@ -447,6 +447,34 @@ online_rgbd:
   require_exact_timestamp: true
   allow_nearest_fallback: false
 
+online_service:
+  # M36.5 persistent trigger service. It keeps RGB-D cache/config/calibration
+  # resident and serializes explicit request_id jobs through one geometry worker.
+  enabled: true
+  listen_host: 0.0.0.0
+  listen_port: 19213
+
+  # Explicit robot/manual triggers are reliable jobs, not latest-only frames.
+  # Duplicate request_id returns the existing job/result without re-running.
+  trigger_queue_capacity: 4
+  geometry_queue_capacity: 4
+  request_registry_capacity: 64
+  default_wait_timeout_ms: 15000
+  maximum_wait_timeout_ms: 60000
+
+  # Production triggers do not write RGB/depth/JSON files unless save_debug=true.
+  default_save_debug: false
+  output_root: data/foam_ring_online_geometry
+
+  # Keep only one in-memory JPEG from the latest trigger for /snapshot.jpg.
+  latest_overlay_enabled: true
+  overlay_jpeg_quality: 90
+
+  # Runtime health/status is cached briefly; every inference still carries the
+  # exact Runtime capture timestamp used for RGB-D matching.
+  runtime_status_ttl_ms: 1000
+  max_http_body_bytes: 1048576
+
 online_geometry:
   # M36.4 one-shot diagnostic pipeline. This stage invokes the existing
   # analyze_scene() only after a Runtime capture timestamp has matched an exact
