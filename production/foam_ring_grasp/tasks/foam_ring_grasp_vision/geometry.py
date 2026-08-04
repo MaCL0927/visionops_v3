@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -56,6 +57,210 @@ def _safe_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return int(default)
+
+
+def _elapsed_ms(started: float) -> float:
+    return (time.perf_counter() - started) * 1000.0
+
+
+def _optimization_settings(config: GeometryConfig) -> Dict[str, Any]:
+    """Resolve online geometry evaluation settings through M36.4.2.
+
+    The historical/offline default remains ``exhaustive`` when the section is
+    absent.  ``staged`` preserves M36.4.1 global candidate budgeting, while
+    ``first_valid`` processes pre-ranked pairs lazily and exits as soon as one
+    complete collision-checked grasp is found.
+    """
+    section = config.section("geometry_optimization")
+    enabled = bool(section.get("enabled", False))
+    mode = str(section.get("mode") or ("staged" if enabled else "exhaustive")).strip().lower()
+    if mode not in {"first_valid", "staged", "exhaustive"}:
+        mode = "exhaustive"
+    initial_budget = max(1, _safe_int(section.get("initial_full_candidate_budget"), 4))
+    maximum_budget = max(initial_budget, _safe_int(section.get("maximum_full_candidate_budget"), 8))
+    minimum_valid = max(1, _safe_int(section.get("minimum_valid_full_candidates"), 2))
+    return {
+        "enabled": enabled,
+        "mode": mode,
+        "timing_enabled": bool(section.get("timing_enabled", True)),
+        "skip_rejected_pairs": bool(section.get("skip_rejected_pairs", True)),
+        "prefer_top_layer": bool(section.get("prefer_top_layer", True)),
+        "round_robin_pairs": bool(section.get("round_robin_pairs", True)),
+        "cache_neighbor_point_clouds": bool(section.get("cache_neighbor_point_clouds", True)),
+        "initial_full_candidate_budget": initial_budget,
+        "maximum_full_candidate_budget": maximum_budget,
+        "minimum_valid_full_candidates": minimum_valid,
+        "expand_if_no_valid": bool(section.get("expand_if_no_valid", True)),
+        "stop_after_first_valid_target": bool(section.get("stop_after_first_valid_target", True)),
+        "stop_after_first_valid_candidate": bool(section.get("stop_after_first_valid_candidate", True)),
+        "maximum_pairs_to_fully_analyze": max(
+            1, _safe_int(section.get("maximum_pairs_to_fully_analyze"), 3)
+        ),
+        "maximum_full_candidates_per_pair": max(
+            1, _safe_int(section.get("maximum_full_candidates_per_pair"), 12)
+        ),
+    }
+
+
+def _clock_search_settings(config: GeometryConfig) -> Dict[str, Any]:
+    section = config.section("clock_search")
+    primary_raw = section.get("primary_clock_hours")
+    primary_hours: List[int] = []
+    if isinstance(primary_raw, Sequence) and not isinstance(primary_raw, (str, bytes)):
+        for value in primary_raw:
+            hour = _safe_int(value, -1)
+            if hour == 0:
+                hour = 12
+            if 1 <= hour <= 12 and hour not in primary_hours:
+                primary_hours.append(hour)
+    if not primary_hours:
+        # Four cardinal directions plus four evenly distributed diagonals.
+        # The remaining 1/4/7/10 o'clock directions form the fallback batch.
+        primary_hours = [12, 2, 3, 5, 6, 8, 9, 11]
+    return {
+        "mode": str(section.get("mode") or "adaptive_8_plus_4").strip().lower(),
+        "primary_clock_hours": primary_hours,
+        "fallback_to_remaining": bool(section.get("fallback_to_remaining", True)),
+    }
+
+
+def _adaptive_clock_batches(config: GeometryConfig) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    settings = _clock_search_settings(config)
+    base = _clock_positions(12)
+    by_hour = {int(row["clock_hour"]): dict(row) for row in base}
+    primary: List[Dict[str, Any]] = []
+    for order, hour in enumerate(settings["primary_clock_hours"]):
+        row = by_hour.get(int(hour))
+        if row is None:
+            continue
+        row = dict(row)
+        row["search_batch"] = "primary"
+        row["search_order"] = int(order)
+        primary.append(row)
+    primary_indexes = {int(row["clock_index"]) for row in primary}
+    fallback: List[Dict[str, Any]] = []
+    if settings["fallback_to_remaining"]:
+        for row in base:
+            if int(row["clock_index"]) in primary_indexes:
+                continue
+            item = dict(row)
+            item["search_batch"] = "fallback"
+            item["search_order"] = int(len(primary) + len(fallback))
+            fallback.append(item)
+    return primary, fallback
+
+
+def _pair_preselection_metrics(
+    ring: SegmentationInstance,
+    mouth: SegmentationInstance,
+    association: Mapping[str, Any],
+    depth: np.ndarray,
+    config: GeometryConfig,
+) -> Dict[str, Any]:
+    """Cheap pair ranking without point-cloud construction or plane fitting."""
+    section = config.section("pair_preselection")
+    stride = max(1, _safe_int(section.get("depth_sample_stride"), 4))
+    minimum_depth = _safe_float(config.section("depth").get("minimum_mm"), 150.0)
+    maximum_depth = _safe_float(config.section("depth").get("maximum_mm"), 3000.0)
+    ring_erode = max(0, _safe_int(section.get("ring_erode_px"), 1))
+    mouth_exclusion = max(0, _safe_int(section.get("mouth_exclusion_px"), 2))
+    front_mask = _erode(ring.mask, ring_erode) & ~_dilate(mouth.mask, mouth_exclusion)
+    sampled_mask = front_mask[::stride, ::stride]
+    sampled_depth = depth[::stride, ::stride]
+    values = sampled_depth[sampled_mask]
+    valid = values[(values >= minimum_depth) & (values <= maximum_depth)]
+    valid_count = int(valid.size)
+    sampled_count = int(values.size)
+    valid_ratio = float(valid_count) / float(max(1, sampled_count))
+    median_mm = float(np.median(valid)) if valid_count else None
+    p25_mm = float(np.percentile(valid, 25)) if valid_count else None
+    confidence = 0.5 * (float(ring.confidence) + float(mouth.confidence))
+    return {
+        "ring_instance_id": int(ring.instance_id),
+        "mouth_instance_id": int(mouth.instance_id),
+        "sparse_front_depth_median_mm": median_mm,
+        "sparse_front_depth_p25_mm": p25_mm,
+        "sparse_depth_valid_count": valid_count,
+        "sparse_depth_sample_count": sampled_count,
+        "sparse_depth_valid_ratio": valid_ratio,
+        "association_score": _safe_float(association.get("association_score"), 0.0),
+        "containment": _safe_float(association.get("containment"), 0.0),
+        "segmentation_confidence": float(confidence),
+    }
+
+
+def _pair_preselection_rank(metrics: Mapping[str, Any], prefer_top_layer: bool) -> Tuple[Any, ...]:
+    median = metrics.get("sparse_front_depth_median_mm")
+    has_depth = median is not None and math.isfinite(float(median))
+    return (
+        bool(has_depth),
+        -float(median) if has_depth and prefer_top_layer else 0.0,
+        float(metrics.get("sparse_depth_valid_ratio") or 0.0),
+        float(metrics.get("association_score") or 0.0),
+        float(metrics.get("segmentation_confidence") or 0.0),
+        float(metrics.get("containment") or 0.0),
+    )
+
+
+def _deferred_pair_result(
+    ring: SegmentationInstance,
+    mouth: SegmentationInstance,
+    association: Mapping[str, Any],
+    preselection: Mapping[str, Any],
+    reason: str,
+) -> Dict[str, Any]:
+    return {
+        "ring_instance_id": int(ring.instance_id),
+        "mouth_instance_id": int(mouth.instance_id),
+        "ring_confidence": float(ring.confidence),
+        "mouth_confidence": float(mouth.confidence),
+        "association": dict(association),
+        "pair_preselection": dict(preselection),
+        "processing_status": "deferred",
+        "deferred_reason": str(reason),
+        "eligible": False,
+        "robot_ready": False,
+        "warnings": [],
+        "rejection_reasons": [],
+        "grasp": {
+            "mode": "rim_pinch",
+            "clock_candidates": [],
+            "best_clock_candidate": None,
+            "best_light_clock_candidate": None,
+        },
+        "candidate_evaluation": {
+            "mode": "first_valid",
+            "status": "deferred",
+            "full_evaluated_count": 0,
+            "full_valid_count": 0,
+            "deferred_count": 12,
+        },
+        "timing_ms": {"total_ms": 0.0},
+    }
+
+
+def _aggregate_timing_rows(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, float]]:
+    values: Dict[str, List[float]] = {}
+    for row in rows:
+        timing = row.get("timing_ms") if isinstance(row.get("timing_ms"), Mapping) else {}
+        for key, value in timing.items():
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(number):
+                continue
+            values.setdefault(str(key), []).append(number)
+    return {
+        key: {
+            "count": float(len(items)),
+            "total_ms": float(sum(items)),
+            "mean_ms": float(sum(items) / len(items)),
+            "max_ms": float(max(items)),
+        }
+        for key, items in values.items()
+        if items
+    }
 
 
 def _kernel(radius: int) -> np.ndarray:
@@ -1303,6 +1508,21 @@ def _distance_to_mask_px(mask: np.ndarray, uv: Tuple[float, float]) -> float:
     return float(distance[y, x])
 
 
+def _distance_map_to_mask_px(mask: np.ndarray) -> np.ndarray:
+    if not np.any(mask):
+        fill = float(math.hypot(mask.shape[0], mask.shape[1]))
+        return np.full(mask.shape, fill, dtype=np.float32)
+    return cv2.distanceTransform((~mask.astype(bool)).astype(np.uint8), cv2.DIST_L2, 5)
+
+
+def _distance_from_map_px(distance_map: np.ndarray, uv: Tuple[float, float]) -> float:
+    x = int(round(float(uv[0])))
+    y = int(round(float(uv[1])))
+    if not (0 <= y < distance_map.shape[0] and 0 <= x < distance_map.shape[1]):
+        return 0.0
+    return float(distance_map[y, x])
+
+
 
 def _expected_plane_depth_at_pixels(
     pixels: np.ndarray,
@@ -1326,6 +1546,72 @@ def _expected_plane_depth_at_pixels(
     return expected
 
 
+def _build_neighbor_base_cache(
+    all_rings: Sequence[SegmentationInstance],
+    ring_mouth_masks: Mapping[int, np.ndarray],
+    depth: np.ndarray,
+    intrinsics: Mapping[str, float],
+    config: GeometryConfig,
+) -> Tuple[Dict[int, Dict[str, Any]], Dict[str, Any]]:
+    """Build depth point clouds once per ring before target-specific filtering.
+
+    The old implementation reprojected every non-target ring for every matched
+    target.  M36.4.1 performs the expensive mask/depth-to-3D conversion once,
+    then applies the target-plane duplicate suppression lazily per selected
+    target candidate.
+    """
+    started = time.perf_counter()
+    section = config.section("neighbor_3d")
+    if not bool(section.get("enabled", True)):
+        return {}, {
+            "enabled": False,
+            "status": "disabled",
+            "instance_count": len(all_rings),
+            "point_count": 0,
+            "build_ms": _elapsed_ms(started),
+        }
+    depth_cfg = config.section("depth")
+    minimum_mm = _safe_float(section.get("minimum_depth_mm"), _safe_float(depth_cfg.get("minimum_mm"), 150.0))
+    maximum_mm = _safe_float(section.get("maximum_depth_mm"), _safe_float(depth_cfg.get("maximum_mm"), 3000.0))
+    erode_px = _safe_int(section.get("mask_erode_px"), 1)
+    mouth_exclusion_px = _safe_int(section.get("neighbor_mouth_exclusion_px"), 1)
+    stride = max(1, _safe_int(section.get("point_stride"), 2))
+    cache: Dict[int, Dict[str, Any]] = {}
+    total_points = 0
+    for item in all_rings:
+        mask = _erode(item.mask, erode_px)
+        excluded_mouth_pixel_count = 0
+        mouth_mask = ring_mouth_masks.get(int(item.instance_id))
+        if isinstance(mouth_mask, np.ndarray):
+            exclusion = _dilate(mouth_mask.astype(bool), mouth_exclusion_px)
+            excluded_mouth_pixel_count = int(np.count_nonzero(mask & exclusion))
+            mask &= ~exclusion
+        points, pixels = depth_pixels_to_points(
+            depth,
+            mask,
+            intrinsics,
+            minimum_mm,
+            maximum_mm,
+            stride=stride,
+        )
+        total_points += int(len(points))
+        cache[int(item.instance_id)] = {
+            "instance_id": int(item.instance_id),
+            "mask_area_px": int(item.area_px),
+            "points_camera": points,
+            "pixels_uv": pixels,
+            "raw_point_count": int(len(points)),
+            "excluded_neighbor_mouth_pixel_count": excluded_mouth_pixel_count,
+        }
+    return cache, {
+        "enabled": True,
+        "status": "ready",
+        "instance_count": len(cache),
+        "point_count": int(total_points),
+        "build_ms": _elapsed_ms(started),
+    }
+
+
 def _prepare_neighbor_point_clouds(
     all_rings: Sequence[SegmentationInstance],
     target_ring: SegmentationInstance,
@@ -1334,6 +1620,7 @@ def _prepare_neighbor_point_clouds(
     intrinsics: Mapping[str, float],
     target_plane: PlaneModel,
     config: GeometryConfig,
+    base_cache: Optional[Mapping[int, Mapping[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Build visible per-instance point clouds for rings other than the target.
 
@@ -1373,22 +1660,29 @@ def _prepare_neighbor_point_clouds(
     summaries: List[Dict[str, Any]] = []
     total_retained = 0
     for item in other_rings:
-        mask = _erode(item.mask, erode_px)
-        excluded_mouth_pixel_count = 0
-        neighbor_mouth_mask = ring_mouth_masks.get(int(item.instance_id))
-        if isinstance(neighbor_mouth_mask, np.ndarray):
-            exclusion = _dilate(neighbor_mouth_mask.astype(bool), mouth_exclusion_px)
-            excluded_mouth_pixel_count = int(np.count_nonzero(mask & exclusion))
-            mask &= ~exclusion
-        points, pixels = depth_pixels_to_points(
-            depth,
-            mask,
-            intrinsics,
-            minimum_mm,
-            maximum_mm,
-            stride=stride,
-        )
-        raw_count = int(len(points))
+        cached = base_cache.get(int(item.instance_id)) if base_cache is not None else None
+        if isinstance(cached, Mapping):
+            points = np.asarray(cached.get("points_camera"), dtype=np.float64).reshape(-1, 3)
+            pixels = np.asarray(cached.get("pixels_uv"), dtype=np.int64).reshape(-1, 2)
+            raw_count = int(cached.get("raw_point_count", len(points)))
+            excluded_mouth_pixel_count = int(cached.get("excluded_neighbor_mouth_pixel_count", 0))
+        else:
+            mask = _erode(item.mask, erode_px)
+            excluded_mouth_pixel_count = 0
+            neighbor_mouth_mask = ring_mouth_masks.get(int(item.instance_id))
+            if isinstance(neighbor_mouth_mask, np.ndarray):
+                exclusion = _dilate(neighbor_mouth_mask.astype(bool), mouth_exclusion_px)
+                excluded_mouth_pixel_count = int(np.count_nonzero(mask & exclusion))
+                mask &= ~exclusion
+            points, pixels = depth_pixels_to_points(
+                depth,
+                mask,
+                intrinsics,
+                minimum_mm,
+                maximum_mm,
+                stride=stride,
+            )
+            raw_count = int(len(points))
         removed_target_surface = 0
         if suppress_target and len(points):
             xs = pixels[:, 0]
@@ -1714,7 +2008,14 @@ def _clock_candidate(
     center_camera: np.ndarray,
     tilt_deg: float,
     config: GeometryConfig,
+    *,
+    evaluation_level: str = "full",
+    other_ring_distance_map: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
+    candidate_started = time.perf_counter()
+    timing_ms: Dict[str, float] = {}
+    light_only = str(evaluation_level).strip().lower() != "full"
+    boundary_started = time.perf_counter()
     gripper = config.section("gripper")
     candidate_cfg = config.section("candidate")
     object_cfg = config.section("object_geometry")
@@ -1723,13 +2024,28 @@ def _clock_candidate(
     angle_deg = float(clock["image_angle_deg_from_positive_x"])
     center_uv = mask_centroid(mouth.mask)
 
+    def fail_early(reason: str) -> Dict[str, Any]:
+        timing_ms["boundary_and_2d_sweep_ms"] = _elapsed_ms(boundary_started)
+        timing_ms["total_ms"] = _elapsed_ms(candidate_started)
+        return {
+            **dict(clock),
+            "evaluation_stage": "light" if light_only else "full",
+            "full_evaluated": not light_only,
+            "light_valid": False,
+            "valid": False,
+            "score": 0.0,
+            "warnings": list(warnings),
+            "rejection_reasons": [reason],
+            "timing_ms": timing_ms,
+        }
+
     inner_info = _mouth_boundary_on_ray(mouth.mask, center_uv, angle_deg)
     if inner_info is None:
-        return {**dict(clock), "valid": False, "score": 0.0, "rejection_reasons": ["mouth_boundary_unavailable"]}
+        return fail_early("mouth_boundary_unavailable")
     inner_uv = inner_info["uv"]
     inner_camera = ray_plane_intersection(inner_uv, intrinsics, pose_plane)
     if inner_camera is None:
-        return {**dict(clock), "valid": False, "score": 0.0, "rejection_reasons": ["inner_boundary_ray_plane_failed"]}
+        return fail_early("inner_boundary_ray_plane_failed")
 
     pixel_radius = max(1e-6, float(inner_info["distance_px"]))
     radial_mm = float(np.linalg.norm(inner_camera - center_camera))
@@ -1770,18 +2086,18 @@ def _clock_candidate(
             outer_boundary_source = "filled_envelope_fallback"
             warnings.append("outer_boundary_used_filled_envelope")
     if outer_info is None:
-        return {**dict(clock), "valid": False, "score": 0.0, "rejection_reasons": ["outer_rim_boundary_unavailable"]}
+        return fail_early("outer_rim_boundary_unavailable")
     if bool(outer_info.get("ambiguous")):
         reasons.append("outer_rim_boundary_ambiguous")
     outer_uv = outer_info["uv"]
     outer_camera = ray_plane_intersection(outer_uv, intrinsics, pose_plane)
     if outer_camera is None:
-        return {**dict(clock), "valid": False, "score": 0.0, "rejection_reasons": ["outer_boundary_ray_plane_failed"]}
+        return fail_early("outer_boundary_ray_plane_failed")
 
     radial_vector = outer_camera - inner_camera
     wall_thickness = float(np.linalg.norm(radial_vector))
     if wall_thickness <= 1e-6:
-        return {**dict(clock), "valid": False, "score": 0.0, "rejection_reasons": ["invalid_wall_thickness"]}
+        return fail_early("invalid_wall_thickness")
     closing_axis = radial_vector / wall_thickness  # inner -> outer
     normal_toward_camera = _normalize(pose_plane.normal)
     approach = -normal_toward_camera
@@ -1876,6 +2192,152 @@ def _clock_candidate(
         elif overlap_mode == "warning_only":
             warnings.append("neighbor_2d_overlap_warning")
 
+    timing_ms["boundary_and_2d_sweep_ms"] = _elapsed_ms(boundary_started)
+
+    # M36.4.1 lightweight ranking stage.  It deliberately avoids calibrated
+    # box sweeps, neighbor-cloud volume checks and the complete gripper model.
+    # Those checks are performed only for the globally best-ranked candidates.
+    if light_only:
+        local_started = time.perf_counter()
+        border_margin = min(
+            _polygon_border_margin_px(inner_polygon, mouth.mask.shape),
+            _polygon_border_margin_px(outer_polygon, mouth.mask.shape),
+        )
+        minimum_border = _safe_float(candidate_cfg.get("minimum_image_border_margin_px"), 3.0)
+        if border_margin < minimum_border:
+            reasons.append("finger_sweep_outside_image")
+        distance_map = (
+            other_ring_distance_map
+            if isinstance(other_ring_distance_map, np.ndarray)
+            else _distance_map_to_mask_px(other_ring_mask)
+        )
+        outer_neighbor_px = _distance_from_map_px(distance_map, outer_uv)
+        inner_neighbor_px = _distance_from_map_px(distance_map, inner_uv)
+        neighbor_2d_clearance_mm = min(outer_neighbor_px, inner_neighbor_px) * mm_per_px
+        minimum_neighbor = _safe_float(candidate_cfg.get("minimum_neighbor_clearance_mm"), 2.0)
+        clearance_mode = str(candidate_cfg.get("neighbor_2d_clearance_mode") or "warning_only")
+        if neighbor_2d_clearance_mm < minimum_neighbor:
+            if clearance_mode == "hard_reject":
+                reasons.append("neighbor_clearance_too_small")
+            elif clearance_mode == "warning_only":
+                warnings.append("neighbor_2d_clearance_warning")
+        combined_sweep = inner_sweep | outer_sweep
+        front_obstacle = _local_front_obstacle(
+            depth,
+            combined_sweep,
+            intrinsics,
+            pose_plane,
+            config,
+            tilt_deg,
+        )
+        if front_obstacle.get("status") == "blocked":
+            if bool(candidate_cfg.get("hard_reject_front_obstacle", False)):
+                reasons.append("local_front_obstacle")
+            else:
+                warnings.append("local_front_obstacle_unverified_stage1")
+        elif front_obstacle.get("status") == "unknown":
+            warnings.append("local_depth_clearance_unknown")
+        safe_tilt = _safe_float(gripper.get("robot_safe_max_tilt_deg"), 30.0)
+        if tilt_deg > safe_tilt:
+            warnings.append("tilt_above_initial_robot_safe_limit")
+        timing_ms["local_depth_and_clearance_ms"] = _elapsed_ms(local_started)
+
+        opening_margin = min(target_gap - minimum_opening, maximum_opening - target_gap)
+        opening_score = float(np.clip(opening_margin / max(1.0, 0.5 * (maximum_opening - minimum_opening)), 0.0, 1.0))
+        obstacle_status = str(front_obstacle.get("status") or "unknown")
+        obstacle_score = 1.0 if obstacle_status == "clear" else (0.45 if obstacle_status == "unknown" else 0.0)
+        tilt_limit = _safe_float(gripper.get("geometry_candidate_max_tilt_deg"), 45.0)
+        tilt_score = float(np.clip(1.0 - tilt_deg / max(1.0, tilt_limit), 0.0, 1.0))
+        confidence_score = float(np.clip(0.5 * (ring.confidence + mouth.confidence), 0.0, 1.0))
+        border_score = float(np.clip(border_margin / 30.0, 0.0, 1.0))
+        neighbor_score = float(np.clip(neighbor_2d_clearance_mm / 30.0, 0.0, 1.0))
+        light_weights = {
+            "inner_containment": 0.28,
+            "neighbor_clearance": 0.20,
+            "opening_margin": 0.18,
+            "local_depth_clearance": 0.12,
+            "lower_tilt": 0.10,
+            "segmentation_confidence": 0.07,
+            "image_border": 0.05,
+        }
+        configured_light = candidate_cfg.get("light_score_weights")
+        if isinstance(configured_light, Mapping):
+            light_weights.update({str(k): _safe_float(v, light_weights.get(str(k), 0.0)) for k, v in configured_light.items()})
+        weight_sum = max(1e-6, sum(max(0.0, float(value)) for value in light_weights.values()))
+        light_score = 100.0 * (
+            light_weights["inner_containment"] * float(np.clip(inner_containment, 0.0, 1.0))
+            + light_weights["neighbor_clearance"] * neighbor_score
+            + light_weights["opening_margin"] * opening_score
+            + light_weights["local_depth_clearance"] * obstacle_score
+            + light_weights["lower_tilt"] * tilt_score
+            + light_weights["segmentation_confidence"] * confidence_score
+            + light_weights["image_border"] * border_score
+        ) / weight_sum
+        light_valid = len(reasons) == 0
+        if not light_valid:
+            light_score *= 0.25
+        deferred = {
+            "enabled": True,
+            "status": "deferred_by_staged_evaluation",
+        }
+        result: Dict[str, Any] = {
+            **dict(clock),
+            "evaluation_stage": "light",
+            "full_evaluated": False,
+            "light_valid": bool(light_valid),
+            "valid": False,
+            "score": float(light_score),
+            "light_score": float(light_score),
+            "warnings": warnings,
+            "rejection_reasons": reasons,
+            "inner_boundary_uv": _json_uv(inner_uv),
+            "outer_boundary_uv": _json_uv(outer_uv),
+            "inner_boundary_camera_mm": _json_vector(inner_camera),
+            "outer_boundary_camera_mm": _json_vector(outer_camera),
+            "rim_plane_midpoint_camera_mm": _json_vector(front_midpoint),
+            "grasp_center_camera_mm": _json_vector(grasp_center),
+            "pregrasp_center_camera_mm": _json_vector(pregrasp),
+            "inner_contact_camera_mm": _json_vector(inner_contact),
+            "outer_contact_camera_mm": _json_vector(outer_contact),
+            "approach_vector_camera": _json_vector(approach),
+            "closing_axis_camera": _json_vector(closing_axis),
+            "lateral_axis_camera": _json_vector(tangent),
+            "wall_thickness_mm": float(wall_thickness),
+            "desired_target_closing_gap_mm": float(desired_target_gap),
+            "target_closing_gap_mm": float(target_gap),
+            "desired_wall_compression_each_side_mm": float(desired_compression),
+            "actual_wall_compression_each_side_mm": float(actual_compression),
+            "approach_opening_mm": float(approach_opening),
+            "opening_margin_mm": float(opening_margin),
+            "rim_insert_depth_mm": float(rim_insert),
+            "inner_finger_mouth_containment": float(inner_containment),
+            "other_ring_overlap_ratio": float(neighbor_2d_overlap),
+            "neighbor_2d_overlap_mode": overlap_mode,
+            "neighbor_2d_clearance_mm": float(neighbor_2d_clearance_mm),
+            "neighbor_2d_clearance_mode": clearance_mode,
+            "neighbor_3d": dict(deferred),
+            "neighbor_3d_status": deferred["status"],
+            "full_gripper_static": dict(deferred),
+            "full_gripper_static_status": deferred["status"],
+            "full_gripper_motion": dict(deferred),
+            "full_gripper_motion_status": deferred["status"],
+            "neighbor_clearance_mm": float(neighbor_2d_clearance_mm),
+            "image_border_margin_px": float(border_margin),
+            "box_wall": dict(deferred),
+            "box_wall_clearance_mm": None,
+            "box_wall_status": deferred["status"],
+            "local_front_obstacle": front_obstacle,
+            "inner_finger_sweep_polygon_uv": inner_polygon.reshape(-1, 2).astype(float).tolist() if inner_polygon is not None else None,
+            "outer_finger_sweep_polygon_uv": outer_polygon.reshape(-1, 2).astype(float).tolist() if outer_polygon is not None else None,
+            "outer_boundary_ambiguous": bool(outer_info.get("ambiguous")),
+            "outer_boundary_source": outer_boundary_source,
+        }
+        result["grasp_frame_camera"] = _robot_grasp_frame(result, config)
+        timing_ms["total_ms"] = _elapsed_ms(candidate_started)
+        result["timing_ms"] = timing_ms
+        return result
+
+    box_started = time.perf_counter()
     box_section = config.section("box_wall")
     box_model_name = str(box_section.get("model") or "disabled")
     calibrated_box: Optional[BoxModel3D] = None
@@ -1930,6 +2392,7 @@ def _clock_candidate(
                 box_wall["clearance_px"] = None
     else:
         box_wall = _check_box_wall_clearance(inner_sweep, outer_sweep, mm_per_px, config)
+    timing_ms["box_wall_ms"] = _elapsed_ms(box_started)
     box_status = str(box_wall.get("status") or "disabled")
     is_3d_box = box_model_name == "calibrated_3d_cuboid"
     if box_status in {"unconfigured", "capture_mismatch"}:
@@ -2002,6 +2465,7 @@ def _clock_candidate(
             ],
         },
     ]
+    neighbor_started = time.perf_counter()
     neighbor_3d = _check_neighbor_collision_3d(
         neighbor_clouds,
         stage_volumes,
@@ -2011,6 +2475,7 @@ def _clock_candidate(
         finger_width,
         config,
     )
+    timing_ms["neighbor_3d_ms"] = _elapsed_ms(neighbor_started)
     neighbor_3d_status = str(neighbor_3d.get("status") or "disabled")
     if neighbor_3d_status == "intersects":
         if bool(neighbor_3d.get("hard_reject_on_intersection", True)):
@@ -2028,6 +2493,7 @@ def _clock_candidate(
         else:
             warnings.append("neighbor_3d_unknown")
 
+    static_started = time.perf_counter()
     full_static = check_full_gripper_static_final_pose(
         grasp_center,
         closing_axis,
@@ -2040,6 +2506,7 @@ def _clock_candidate(
         config.section("full_gripper_static_collision"),
         intrinsics=intrinsics,
     )
+    timing_ms["full_gripper_static_ms"] = _elapsed_ms(static_started)
     static_status = str(full_static.get("status") or "disabled")
     static_box_status = str(full_static.get("box_status") or "disabled")
     static_neighbor_status = str(full_static.get("neighbor_status") or "disabled")
@@ -2075,8 +2542,14 @@ def _clock_candidate(
     if border_margin < minimum_border:
         reasons.append("finger_sweep_outside_image")
 
-    outer_neighbor_px = _distance_to_mask_px(other_ring_mask, outer_uv)
-    inner_neighbor_px = _distance_to_mask_px(other_ring_mask, inner_uv)
+    local_started = time.perf_counter()
+    distance_map = (
+        other_ring_distance_map
+        if isinstance(other_ring_distance_map, np.ndarray)
+        else _distance_map_to_mask_px(other_ring_mask)
+    )
+    outer_neighbor_px = _distance_from_map_px(distance_map, outer_uv)
+    inner_neighbor_px = _distance_from_map_px(distance_map, inner_uv)
     neighbor_2d_clearance_mm = min(outer_neighbor_px, inner_neighbor_px) * mm_per_px
     minimum_neighbor = _safe_float(candidate_cfg.get("minimum_neighbor_clearance_mm"), 2.0)
     clearance_mode = str(candidate_cfg.get("neighbor_2d_clearance_mode") or "warning_only")
@@ -2106,7 +2579,9 @@ def _clock_candidate(
     safe_tilt = _safe_float(gripper.get("robot_safe_max_tilt_deg"), 30.0)
     if tilt_deg > safe_tilt:
         warnings.append("tilt_above_initial_robot_safe_limit")
+    timing_ms["local_depth_and_clearance_ms"] = _elapsed_ms(local_started)
 
+    motion_started = time.perf_counter()
     motion_cfg = config.section("full_gripper_motion_collision")
     if reasons and bool(motion_cfg.get("skip_if_prerequisite_failed", True)):
         full_motion = {
@@ -2161,6 +2636,7 @@ def _clock_candidate(
             reasons.append("full_gripper_motion_neighbor_unknown")
     elif motion_neighbor_status not in {"clear", "disabled"} and motion_status != "skipped_prerequisite_failed":
         warnings.append("full_gripper_motion_neighbor_" + motion_neighbor_status)
+    timing_ms["full_gripper_motion_ms"] = _elapsed_ms(motion_started)
 
     opening_margin = min(target_gap - minimum_opening, maximum_opening - target_gap)
     opening_score = float(np.clip(opening_margin / max(1.0, 0.5 * (maximum_opening - minimum_opening)), 0.0, 1.0))
@@ -2260,6 +2736,9 @@ def _clock_candidate(
 
     result: Dict[str, Any] = {
         **dict(clock),
+        "evaluation_stage": "full",
+        "full_evaluated": True,
+        "light_valid": True,
         "valid": bool(valid),
         "score": float(score),
         "warnings": warnings,
@@ -2329,6 +2808,8 @@ def _clock_candidate(
         "outer_boundary_source": outer_boundary_source,
     }
     result["grasp_frame_camera"] = _robot_grasp_frame(result, config)
+    timing_ms["total_ms"] = _elapsed_ms(candidate_started)
+    result["timing_ms"] = timing_ms
     return result
 
 
@@ -2341,7 +2822,16 @@ def analyze_ring_pair(
     depth: np.ndarray,
     intrinsics: Mapping[str, float],
     config: GeometryConfig,
+    *,
+    evaluation_mode: str = "exhaustive",
+    neighbor_base_cache: Optional[Mapping[int, Mapping[str, Any]]] = None,
+    clock_rows: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Dict[str, Any]:
+    pair_started = time.perf_counter()
+    timing_ms: Dict[str, float] = {}
+    resolved_evaluation_mode = str(evaluation_mode).strip().lower()
+    staged = resolved_evaluation_mode in {"staged", "first_valid"}
+    optimization = _optimization_settings(config)
     quality_cfg = config.section("quality")
     depth_cfg = config.section("depth")
     plane_cfg = config.section("plane")
@@ -2355,9 +2845,12 @@ def analyze_ring_pair(
     if mouth_area < _safe_int(quality_cfg.get("minimum_mouth_area_px"), 80):
         reasons.append("mouth_area_too_small")
 
+    ellipse_started = time.perf_counter()
     ellipse = fit_mouth_ellipse(mouth.mask)
+    timing_ms["ellipse_fit_ms"] = _elapsed_ms(ellipse_started)
     if ellipse is None or len(ellipse.get("contour", [])) < _safe_int(quality_cfg.get("minimum_ellipse_points"), 12):
         reasons.append("mouth_ellipse_unavailable")
+        timing_ms["total_ms"] = _elapsed_ms(pair_started)
         return {
             "ring_instance_id": ring.instance_id,
             "mouth_instance_id": mouth.instance_id,
@@ -2368,9 +2861,11 @@ def analyze_ring_pair(
             "robot_ready": False,
             "warnings": warnings,
             "rejection_reasons": reasons,
-            "clock_candidates": [],
+            "grasp": {"clock_candidates": [], "best_clock_candidate": None},
+            "timing_ms": timing_ms,
         }
 
+    depth_points_started = time.perf_counter()
     equivalent_radius = math.sqrt(max(1.0, float(mouth_area)) / math.pi)
     expand = int(round(equivalent_radius * _safe_float(depth_cfg.get("front_band_expand_ratio"), 0.40)))
     expand = max(_safe_int(depth_cfg.get("minimum_front_band_px"), 6), expand)
@@ -2383,14 +2878,18 @@ def analyze_ring_pair(
     points, pixels = depth_pixels_to_points(depth, front_band, intrinsics, minimum_depth, maximum_depth)
     band_pixel_count = int(np.count_nonzero(front_band))
     valid_ratio = float(len(points)) / float(max(1, band_pixel_count))
+    timing_ms["front_depth_points_ms"] = _elapsed_ms(depth_points_started)
     if len(points) < _safe_int(depth_cfg.get("minimum_valid_points"), 80):
         reasons.append("insufficient_front_pose_depth")
     if valid_ratio < _safe_float(quality_cfg.get("minimum_depth_valid_ratio"), 0.32):
         reasons.append("low_front_pose_depth_valid_ratio")
 
+    plane_started = time.perf_counter()
     depth_plane = fit_plane_ransac(points, config) if len(points) >= 3 else None
+    timing_ms["plane_ransac_ms"] = _elapsed_ms(plane_started)
     if depth_plane is None:
         reasons.append("front_pose_fit_failed")
+        timing_ms["total_ms"] = _elapsed_ms(pair_started)
         return {
             "ring_instance_id": ring.instance_id,
             "mouth_instance_id": mouth.instance_id,
@@ -2404,11 +2903,13 @@ def analyze_ring_pair(
             "robot_ready": False,
             "warnings": warnings,
             "rejection_reasons": reasons,
-            "clock_candidates": [],
+            "grasp": {"clock_candidates": [], "best_clock_candidate": None},
+            "timing_ms": timing_ms,
         }
     if depth_plane.inlier_ratio < _safe_float(plane_cfg.get("minimum_inlier_ratio"), 0.34):
         reasons.append("low_plane_inlier_ratio")
 
+    pose_started = time.perf_counter()
     pose_plane, pose_diagnostics = build_pose_plane(ellipse, intrinsics, points, depth_plane, config)
     disagreement_warn = _safe_float(config.section("pose").get("normal_disagreement_warning_deg"), 20.0)
     if float(pose_diagnostics.get("normal_disagreement_deg", 0.0)) > disagreement_warn:
@@ -2444,43 +2945,77 @@ def analyze_ring_pair(
                 reasons.append("mouth_physical_size_out_of_range")
             else:
                 warnings.append("mouth_physical_size_out_of_range")
+    timing_ms["pose_and_size_ms"] = _elapsed_ms(pose_started)
 
+    mask_started = time.perf_counter()
     other_ring_mask = np.zeros(ring.mask.shape, dtype=bool)
     for item in all_rings:
         if int(item.instance_id) != int(ring.instance_id):
             other_ring_mask |= item.mask.astype(bool)
-    neighbor_clouds, neighbor_cloud_summary = _prepare_neighbor_point_clouds(
-        all_rings,
-        ring,
-        ring_mouth_masks,
-        depth,
-        intrinsics,
-        pose_plane,
-        config,
-    )
+    other_ring_distance_map = _distance_map_to_mask_px(other_ring_mask)
+    timing_ms["other_ring_mask_cache_ms"] = _elapsed_ms(mask_started)
 
-    count = _safe_int(gripper_cfg.get("clock_position_count"), 12)
-    clock_candidates = [
-        _clock_candidate(
-            clock,
+    neighbor_clouds: List[Dict[str, Any]] = []
+    neighbor_cloud_summary: Dict[str, Any] = {
+        "enabled": bool(config.section("neighbor_3d").get("enabled", True)),
+        "status": "deferred_by_staged_evaluation" if staged else "pending",
+        "neighbor_instance_count": max(0, len(all_rings) - 1),
+        "ready_instance_count": 0,
+        "retained_point_count": 0,
+        "instances": [],
+    }
+    if not staged:
+        neighbor_started = time.perf_counter()
+        neighbor_clouds, neighbor_cloud_summary = _prepare_neighbor_point_clouds(
+            all_rings,
             ring,
-            mouth,
-            other_ring_mask,
-            neighbor_clouds,
+            ring_mouth_masks,
             depth,
             intrinsics,
             pose_plane,
-            center_camera,
-            tilt_deg,
             config,
+            base_cache=neighbor_base_cache,
         )
-        for clock in _clock_positions(count)
-    ]
-    valid_candidates = [item for item in clock_candidates if item.get("valid")]
-    valid_candidates.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
-    best = valid_candidates[0] if valid_candidates else None
-    if best is None:
-        reasons.append("no_valid_rim_pinch_clock_position")
+        timing_ms["neighbor_cloud_prepare_ms"] = _elapsed_ms(neighbor_started)
+
+    count = _safe_int(gripper_cfg.get("clock_position_count"), 12)
+    clocks = [dict(row) for row in clock_rows] if clock_rows is not None else _clock_positions(count)
+    candidate_started = time.perf_counter()
+    if staged and bool(optimization.get("skip_rejected_pairs", True)) and reasons:
+        clock_candidates: List[Dict[str, Any]] = []
+    else:
+        clock_candidates = [
+            _clock_candidate(
+                clock,
+                ring,
+                mouth,
+                other_ring_mask,
+                neighbor_clouds,
+                depth,
+                intrinsics,
+                pose_plane,
+                center_camera,
+                tilt_deg,
+                config,
+                evaluation_level="light" if staged else "full",
+                other_ring_distance_map=other_ring_distance_map,
+            )
+            for clock in clocks
+        ]
+    timing_ms["clock_candidates_initial_ms"] = _elapsed_ms(candidate_started)
+
+    if staged:
+        light_valid = [item for item in clock_candidates if item.get("light_valid")]
+        light_valid.sort(key=lambda item: float(item.get("light_score", item.get("score", 0.0))), reverse=True)
+        best = None
+        best_light = light_valid[0] if light_valid else None
+    else:
+        valid_candidates = [item for item in clock_candidates if item.get("valid")]
+        valid_candidates.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+        best = valid_candidates[0] if valid_candidates else None
+        best_light = None
+        if best is None:
+            reasons.append("no_valid_rim_pinch_clock_position")
 
     normal = pose_plane.normal
     approach = -normal
@@ -2528,15 +3063,26 @@ def analyze_ring_pair(
         "grasp": {
             "mode": "rim_pinch",
             "description": "one finger inside, one finger outside, then close on the local foam wall",
-            "selection_scope": "12_clock_rim_pinch_with_3d_box_depth_neighbor_complete_gripper_static_and_pregrasp_motion",
+            "selection_scope": (
+                (
+                    "first_valid_adaptive_light_then_complete_collision"
+                    if resolved_evaluation_mode == "first_valid" else
+                    "staged_light_then_budgeted_complete_3d_collision"
+                )
+                if staged else
+                "12_clock_rim_pinch_with_3d_box_depth_neighbor_complete_gripper_static_and_pregrasp_motion"
+            ),
             "clock_position_count": int(count),
+            "generated_clock_candidate_count": int(len(clocks)),
             "best_clock_candidate": best,
+            "best_light_clock_candidate": best_light,
             "clock_candidates": clock_candidates,
         },
-        "eligible": False,
+        "eligible": bool(not staged and len(reasons) == 0 and best is not None),
         "robot_ready": False,
         "warnings": warnings,
-        "rejection_reasons": reasons,
+        "rejection_reasons": list(reasons),
+        "timing_ms": timing_ms,
         "_debug": {
             "front_band_mask": front_band,
             "plane_points": points,
@@ -2544,7 +3090,58 @@ def analyze_ring_pair(
             "plane_inlier_mask": depth_plane.inlier_mask,
         },
     }
-    result["eligible"] = len(reasons) == 0 and best is not None
+    if staged:
+        result["candidate_evaluation"] = {
+            "mode": resolved_evaluation_mode,
+            "light_candidate_count": len(clock_candidates),
+            "light_valid_count": len([item for item in clock_candidates if item.get("light_valid")]),
+            "full_evaluated_count": 0,
+            "full_valid_count": 0,
+            "deferred_count": len(clock_candidates),
+        }
+        result["_optimization_context"] = {
+            "ring": ring,
+            "mouth": mouth,
+            "other_ring_mask": other_ring_mask,
+            "other_ring_distance_map": other_ring_distance_map,
+            "depth": depth,
+            "intrinsics": intrinsics,
+            "pose_plane": pose_plane,
+            "center_camera": center_camera,
+            "tilt_deg": float(tilt_deg),
+            "all_rings": all_rings,
+            "ring_mouth_masks": ring_mouth_masks,
+            "neighbor_clouds": None,
+            "neighbor_cloud_summary": None,
+        }
+    else:
+        diagnostic_warnings = {"neighbor_2d_overlap_warning", "neighbor_2d_clearance_warning"}
+        best_blocking_warnings = [
+            warning for warning in (best.get("warnings") if best else [])
+            if str(warning) not in diagnostic_warnings
+        ]
+        result["initial_robot_safe_geometry"] = bool(
+            result["eligible"]
+            and tilt_deg <= _safe_float(gripper_cfg.get("robot_safe_max_tilt_deg"), 30.0)
+            and not best_blocking_warnings
+            and str((best.get("neighbor_3d") or {}).get("status") or "unknown") == "clear"
+            and str((best.get("full_gripper_static") or {}).get("status") or "unknown") == "clear"
+            and str((best.get("full_gripper_motion") or {}).get("status") or "unknown") == "clear"
+        )
+    timing_ms["total_ms"] = _elapsed_ms(pair_started)
+    return result
+
+
+def _finalize_staged_pair(result: Dict[str, Any], config: GeometryConfig) -> None:
+    grasp = result.get("grasp") if isinstance(result.get("grasp"), dict) else {}
+    candidates = grasp.get("clock_candidates") if isinstance(grasp.get("clock_candidates"), list) else []
+    full_candidates = [item for item in candidates if item.get("full_evaluated")]
+    valid_candidates = [item for item in full_candidates if item.get("valid")]
+    valid_candidates.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    best = valid_candidates[0] if valid_candidates else None
+    grasp["best_clock_candidate"] = best
+    result["grasp"] = grasp
+    result["eligible"] = bool(len(result.get("rejection_reasons") or []) == 0 and best is not None)
     diagnostic_warnings = {"neighbor_2d_overlap_warning", "neighbor_2d_clearance_warning"}
     best_blocking_warnings = [
         warning for warning in (best.get("warnings") if best else [])
@@ -2552,13 +3149,24 @@ def analyze_ring_pair(
     ]
     result["initial_robot_safe_geometry"] = bool(
         result["eligible"]
-        and tilt_deg <= _safe_float(gripper_cfg.get("robot_safe_max_tilt_deg"), 30.0)
+        and float(result.get("tilt_deg", 180.0)) <= _safe_float(config.section("gripper").get("robot_safe_max_tilt_deg"), 30.0)
         and not best_blocking_warnings
         and str((best.get("neighbor_3d") or {}).get("status") or "unknown") == "clear"
         and str((best.get("full_gripper_static") or {}).get("status") or "unknown") == "clear"
         and str((best.get("full_gripper_motion") or {}).get("status") or "unknown") == "clear"
     )
-    return result
+    evaluation = result.get("candidate_evaluation") if isinstance(result.get("candidate_evaluation"), dict) else {}
+    evaluation.update({
+        "full_evaluated_count": len(full_candidates),
+        "full_valid_count": len(valid_candidates),
+        "deferred_count": len([item for item in candidates if not item.get("full_evaluated")]),
+        "status": (
+            "valid_found"
+            if valid_candidates else
+            ("no_valid_within_budget" if full_candidates else "not_selected_for_full_evaluation")
+        ),
+    })
+    result["candidate_evaluation"] = evaluation
 
 
 def analyze_scene(
@@ -2567,25 +3175,538 @@ def analyze_scene(
     intrinsics: Mapping[str, float],
     config: GeometryConfig,
 ) -> Dict[str, Any]:
+    scene_started = time.perf_counter()
+    scene_timing: Dict[str, float] = {}
+    optimization = _optimization_settings(config)
+    mode = str(optimization.get("mode") or "exhaustive")
+    staged = bool(optimization.get("enabled")) and mode == "staged"
+    first_valid = bool(optimization.get("enabled")) and mode == "first_valid"
     classes = config.section("classes")
     ring_name = str(classes.get("foam_ring") or "foam_ring")
     mouth_name = str(classes.get("ring_mouth") or "ring_mouth")
     rings = [item for item in instances if item.class_name == ring_name]
     mouths = [item for item in instances if item.class_name == mouth_name]
+    association_started = time.perf_counter()
     matches, unmatched_rings, unmatched_mouths, association_debug = _associate_ring_mouths_detailed(
         rings,
         mouths,
         config,
     )
+    scene_timing["association_ms"] = _elapsed_ms(association_started)
     ring_mouth_masks = {int(ring.instance_id): mouth.mask for ring, mouth, _ in matches}
-    results = [
-        analyze_ring_pair(ring, mouth, metrics, rings, ring_mouth_masks, depth, intrinsics, config)
-        for ring, mouth, metrics in matches
-    ]
+    results: List[Dict[str, Any]] = []
+    optimization_summary: Dict[str, Any] = {
+        **optimization,
+        "matched_pair_count": len(matches),
+        "light_candidate_count": 0,
+        "light_valid_count": 0,
+        "full_candidate_evaluated_count": 0,
+        "full_candidate_valid_count": 0,
+        "candidate_budget_exhausted": False,
+        "neighbor_base_cache": None,
+        "pair_preselection_count": 0,
+        "fully_analyzed_pair_count": 0,
+        "deferred_pair_count": 0,
+        "adaptive_fallback_used": False,
+        "primary_light_candidate_count": 0,
+        "fallback_light_candidate_count": 0,
+        "first_valid_pair_rank": None,
+        "first_valid_candidate_search_batch": None,
+        "first_valid_candidate_clock_hour": None,
+        "early_exit_triggered": False,
+    }
 
+    if first_valid:
+        # M36.4.2: rank pairs using only masks, association metrics and sparse
+        # depth samples. No point-cloud construction or RANSAC is performed here.
+        preselection_started = time.perf_counter()
+        ranked_pairs: List[Dict[str, Any]] = []
+        for ring, mouth, metrics in matches:
+            preselection = _pair_preselection_metrics(ring, mouth, metrics, depth, config)
+            ranked_pairs.append({
+                "ring": ring,
+                "mouth": mouth,
+                "association": metrics,
+                "preselection": preselection,
+                "rank_key": _pair_preselection_rank(
+                    preselection,
+                    bool(optimization.get("prefer_top_layer", True)),
+                ),
+            })
+        ranked_pairs.sort(key=lambda row: row["rank_key"], reverse=True)
+        for rank, row in enumerate(ranked_pairs, start=1):
+            row["preselection"]["rank"] = int(rank)
+        scene_timing["pair_preselection_ms"] = _elapsed_ms(preselection_started)
+        optimization_summary["pair_preselection_count"] = len(ranked_pairs)
+
+        primary_clocks, fallback_clocks = _adaptive_clock_batches(config)
+        maximum_pairs = int(optimization["maximum_pairs_to_fully_analyze"])
+        maximum_candidates_per_pair = int(optimization["maximum_full_candidates_per_pair"])
+        base_cache: Optional[Dict[int, Dict[str, Any]]] = None
+        base_cache_summary: Optional[Dict[str, Any]] = None
+        base_cache_ms = 0.0
+        pair_initial_ms = 0.0
+        full_evaluation_ms = 0.0
+        fallback_light_ms = 0.0
+        analyzed_keys: set[Tuple[int, int]] = set()
+        selected_found = False
+
+        for row in ranked_pairs:
+            rank = int(row["preselection"]["rank"])
+            if rank > maximum_pairs:
+                optimization_summary["candidate_budget_exhausted"] = True
+                break
+            ring = row["ring"]
+            mouth = row["mouth"]
+            metrics = row["association"]
+            pair_key = (int(ring.instance_id), int(mouth.instance_id))
+            analyzed_keys.add(pair_key)
+
+            pair_started = time.perf_counter()
+            pair_result = analyze_ring_pair(
+                ring,
+                mouth,
+                metrics,
+                rings,
+                ring_mouth_masks,
+                depth,
+                intrinsics,
+                config,
+                evaluation_mode="first_valid",
+                clock_rows=primary_clocks,
+            )
+            pair_initial_ms += _elapsed_ms(pair_started)
+            pair_result["pair_preselection"] = dict(row["preselection"])
+            pair_result["processing_status"] = "analyzed"
+            results.append(pair_result)
+            optimization_summary["fully_analyzed_pair_count"] += 1
+
+            context = pair_result.get("_optimization_context")
+            candidates = ((pair_result.get("grasp") or {}).get("clock_candidates") or [])
+            optimization_summary["primary_light_candidate_count"] += len(candidates)
+            optimization_summary["light_candidate_count"] += len(candidates)
+            optimization_summary["light_valid_count"] += len(
+                [candidate for candidate in candidates if bool(candidate.get("light_valid"))]
+            )
+
+            valid_found = False
+            evaluated_for_pair = 0
+
+            def ensure_neighbor_clouds() -> bool:
+                nonlocal base_cache, base_cache_summary, base_cache_ms, full_evaluation_ms
+                if not isinstance(context, dict):
+                    return False
+                if context.get("neighbor_clouds") is not None:
+                    return True
+                if base_cache is None and bool(optimization.get("cache_neighbor_point_clouds")):
+                    cache_started = time.perf_counter()
+                    base_cache, base_cache_summary = _build_neighbor_base_cache(
+                        rings,
+                        ring_mouth_masks,
+                        depth,
+                        intrinsics,
+                        config,
+                    )
+                    elapsed = _elapsed_ms(cache_started)
+                    base_cache_ms += elapsed
+                    optimization_summary["neighbor_base_cache"] = base_cache_summary
+                neighbor_stage_started = time.perf_counter()
+                neighbor_started = time.perf_counter()
+                neighbor_clouds, neighbor_summary = _prepare_neighbor_point_clouds(
+                    context["all_rings"],
+                    context["ring"],
+                    context["ring_mouth_masks"],
+                    context["depth"],
+                    context["intrinsics"],
+                    context["pose_plane"],
+                    config,
+                    base_cache=base_cache,
+                )
+                context["neighbor_clouds"] = neighbor_clouds
+                context["neighbor_cloud_summary"] = neighbor_summary
+                pair_result["neighbor_3d_point_clouds"] = neighbor_summary
+                pair_timing = pair_result.get("timing_ms") if isinstance(pair_result.get("timing_ms"), dict) else {}
+                pair_timing["neighbor_cloud_prepare_ms"] = _elapsed_ms(neighbor_started)
+                pair_result["timing_ms"] = pair_timing
+                full_evaluation_ms += _elapsed_ms(neighbor_stage_started)
+                return True
+
+            def evaluate_candidate(candidate_index: int) -> bool:
+                nonlocal evaluated_for_pair, full_evaluation_ms
+                if not isinstance(context, dict):
+                    return False
+                if evaluated_for_pair >= maximum_candidates_per_pair:
+                    optimization_summary["candidate_budget_exhausted"] = True
+                    return False
+                current_candidates = pair_result["grasp"]["clock_candidates"]
+                original = current_candidates[candidate_index]
+                if not bool(original.get("light_valid")):
+                    return False
+                if not ensure_neighbor_clouds():
+                    return False
+                candidate_started = time.perf_counter()
+                full_candidate = _clock_candidate(
+                    original,
+                    context["ring"],
+                    context["mouth"],
+                    context["other_ring_mask"],
+                    context["neighbor_clouds"],
+                    context["depth"],
+                    context["intrinsics"],
+                    context["pose_plane"],
+                    context["center_camera"],
+                    float(context["tilt_deg"]),
+                    config,
+                    evaluation_level="full",
+                    other_ring_distance_map=context["other_ring_distance_map"],
+                )
+                elapsed = _elapsed_ms(candidate_started)
+                full_evaluation_ms += elapsed
+                full_candidate["evaluation_stage"] = "full"
+                full_candidate["full_evaluated"] = True
+                full_candidate["light_score"] = original.get("light_score", original.get("score"))
+                full_candidate["light_rank_source"] = "M36.4.2_first_valid_adaptive_clock_ranking"
+                current_candidates[candidate_index] = full_candidate
+                evaluated_for_pair += 1
+                optimization_summary["full_candidate_evaluated_count"] += 1
+                if bool(full_candidate.get("valid")):
+                    optimization_summary["full_candidate_valid_count"] += 1
+                    optimization_summary["first_valid_pair_rank"] = rank
+                    optimization_summary["first_valid_candidate_search_batch"] = full_candidate.get("search_batch")
+                    optimization_summary["first_valid_candidate_clock_hour"] = full_candidate.get("clock_hour")
+                    return True
+                return False
+
+            if isinstance(context, dict) and (
+                not bool(optimization.get("skip_rejected_pairs"))
+                or not pair_result.get("rejection_reasons")
+            ):
+                primary_order = sorted(
+                    [
+                        index for index, candidate in enumerate(candidates)
+                        if bool(candidate.get("light_valid"))
+                    ],
+                    key=lambda index: float(
+                        candidates[index].get("light_score", candidates[index].get("score", 0.0))
+                    ),
+                    reverse=True,
+                )
+                for candidate_index in primary_order:
+                    if evaluate_candidate(candidate_index):
+                        valid_found = True
+                        if bool(optimization.get("stop_after_first_valid_candidate", True)):
+                            break
+
+                if (
+                    not valid_found
+                    and fallback_clocks
+                    and evaluated_for_pair < maximum_candidates_per_pair
+                ):
+                    fallback_started = time.perf_counter()
+                    fallback_candidates = [
+                        _clock_candidate(
+                            clock,
+                            context["ring"],
+                            context["mouth"],
+                            context["other_ring_mask"],
+                            [],
+                            context["depth"],
+                            context["intrinsics"],
+                            context["pose_plane"],
+                            context["center_camera"],
+                            float(context["tilt_deg"]),
+                            config,
+                            evaluation_level="light",
+                            other_ring_distance_map=context["other_ring_distance_map"],
+                        )
+                        for clock in fallback_clocks
+                    ]
+                    fallback_light_ms += _elapsed_ms(fallback_started)
+                    start_index = len(pair_result["grasp"]["clock_candidates"])
+                    pair_result["grasp"]["clock_candidates"].extend(fallback_candidates)
+                    pair_result["grasp"]["generated_clock_candidate_count"] = len(
+                        pair_result["grasp"]["clock_candidates"]
+                    )
+                    optimization_summary["adaptive_fallback_used"] = True
+                    optimization_summary["fallback_light_candidate_count"] += len(fallback_candidates)
+                    optimization_summary["light_candidate_count"] += len(fallback_candidates)
+                    optimization_summary["light_valid_count"] += len(
+                        [candidate for candidate in fallback_candidates if bool(candidate.get("light_valid"))]
+                    )
+                    fallback_order = sorted(
+                        [
+                            start_index + offset
+                            for offset, candidate in enumerate(fallback_candidates)
+                            if bool(candidate.get("light_valid"))
+                        ],
+                        key=lambda index: float(
+                            pair_result["grasp"]["clock_candidates"][index].get(
+                                "light_score",
+                                pair_result["grasp"]["clock_candidates"][index].get("score", 0.0),
+                            )
+                        ),
+                        reverse=True,
+                    )
+                    for candidate_index in fallback_order:
+                        if evaluate_candidate(candidate_index):
+                            valid_found = True
+                            if bool(optimization.get("stop_after_first_valid_candidate", True)):
+                                break
+
+            for candidate in ((pair_result.get("grasp") or {}).get("clock_candidates") or []):
+                if not candidate.get("full_evaluated"):
+                    candidate["evaluation_stage"] = "deferred"
+                    candidate["deferred_reason"] = (
+                        "first_valid_candidate_found"
+                        if valid_found else
+                        "not_reached_before_pair_candidate_limit"
+                    )
+            if isinstance(pair_result.get("_optimization_context"), Mapping):
+                _finalize_staged_pair(pair_result, config)
+                pair_result.pop("_optimization_context", None)
+            pair_result["processing_status"] = (
+                "selected_first_valid" if pair_result.get("eligible") else "analyzed_no_valid_grasp"
+            )
+            if pair_result.get("eligible"):
+                selected_found = True
+                if bool(optimization.get("stop_after_first_valid_target", True)):
+                    optimization_summary["early_exit_triggered"] = True
+                    break
+
+        deferred_reason = (
+            "after_first_valid_target"
+            if selected_found else
+            "maximum_pairs_to_fully_analyze_reached"
+        )
+        for row in ranked_pairs:
+            ring = row["ring"]
+            mouth = row["mouth"]
+            key = (int(ring.instance_id), int(mouth.instance_id))
+            if key in analyzed_keys:
+                continue
+            results.append(
+                _deferred_pair_result(
+                    ring,
+                    mouth,
+                    row["association"],
+                    row["preselection"],
+                    deferred_reason,
+                )
+            )
+        optimization_summary["deferred_pair_count"] = len(ranked_pairs) - len(analyzed_keys)
+        scene_timing["pair_geometry_initial_ms"] = float(pair_initial_ms)
+        scene_timing["neighbor_base_cache_ms"] = float(base_cache_ms)
+        scene_timing["adaptive_fallback_light_ms"] = float(fallback_light_ms)
+        scene_timing["full_candidate_evaluation_ms"] = float(full_evaluation_ms)
+
+    elif staged:
+        pair_started = time.perf_counter()
+        results = [
+            analyze_ring_pair(
+                ring,
+                mouth,
+                metrics,
+                rings,
+                ring_mouth_masks,
+                depth,
+                intrinsics,
+                config,
+                evaluation_mode="staged",
+            )
+            for ring, mouth, metrics in matches
+        ]
+        scene_timing["pair_geometry_initial_ms"] = _elapsed_ms(pair_started)
+        scene_timing["pair_preselection_ms"] = 0.0
+        scene_timing["adaptive_fallback_light_ms"] = 0.0
+        candidate_refs: List[Tuple[Tuple[Any, ...], int, int]] = []
+        pair_rows = [
+            (index, item)
+            for index, item in enumerate(results)
+            if isinstance(item.get("_optimization_context"), Mapping)
+            and item.get("ring_center_camera_mm")
+            and (not bool(optimization.get("skip_rejected_pairs")) or not item.get("rejection_reasons"))
+        ]
+        optimization_summary["fully_analyzed_pair_count"] = len(results)
+        nearest_pair_z = min(
+            (float(item["ring_center_camera_mm"][2]) for _, item in pair_rows),
+            default=None,
+        )
+        top_tolerance = _safe_float(config.section("gripper").get("top_layer_tolerance_mm"), 15.0)
+        safe_tilt = _safe_float(config.section("gripper").get("robot_safe_max_tilt_deg"), 30.0)
+        for pair_index, item in pair_rows:
+            candidates = ((item.get("grasp") or {}).get("clock_candidates") or [])
+            z_value = float(item["ring_center_camera_mm"][2])
+            in_top_layer = nearest_pair_z is None or z_value <= nearest_pair_z + top_tolerance
+            for candidate_index, candidate in enumerate(candidates):
+                optimization_summary["light_candidate_count"] += 1
+                if not bool(candidate.get("light_valid")):
+                    continue
+                optimization_summary["light_valid_count"] += 1
+                rank = (
+                    bool(in_top_layer) if bool(optimization.get("prefer_top_layer")) else True,
+                    bool(float(item.get("tilt_deg", 180.0)) <= safe_tilt),
+                    float(candidate.get("light_score", candidate.get("score", 0.0))),
+                    0.5 * (float(item.get("ring_confidence", 0.0)) + float(item.get("mouth_confidence", 0.0))),
+                    -float(item.get("tilt_deg", 180.0)),
+                    -z_value,
+                )
+                candidate_refs.append((rank, pair_index, candidate_index))
+        candidate_refs.sort(key=lambda row: row[0], reverse=True)
+        if bool(optimization.get("round_robin_pairs")) and candidate_refs:
+            grouped: Dict[int, List[Tuple[Tuple[Any, ...], int, int]]] = {}
+            pair_order: List[int] = []
+            for row in candidate_refs:
+                pair_index = int(row[1])
+                if pair_index not in grouped:
+                    grouped[pair_index] = []
+                    pair_order.append(pair_index)
+                grouped[pair_index].append(row)
+            round_robin: List[Tuple[Tuple[Any, ...], int, int]] = []
+            offset = 0
+            while True:
+                appended = False
+                for pair_index in pair_order:
+                    rows = grouped[pair_index]
+                    if offset < len(rows):
+                        round_robin.append(rows[offset])
+                        appended = True
+                if not appended:
+                    break
+                offset += 1
+            candidate_refs = round_robin
+
+        base_cache: Optional[Dict[int, Dict[str, Any]]] = None
+        if candidate_refs and bool(optimization.get("cache_neighbor_point_clouds")):
+            cache_started = time.perf_counter()
+            base_cache, cache_summary = _build_neighbor_base_cache(
+                rings,
+                ring_mouth_masks,
+                depth,
+                intrinsics,
+                config,
+            )
+            scene_timing["neighbor_base_cache_ms"] = _elapsed_ms(cache_started)
+            optimization_summary["neighbor_base_cache"] = cache_summary
+        else:
+            scene_timing["neighbor_base_cache_ms"] = 0.0
+
+        full_started = time.perf_counter()
+        initial_budget = int(optimization["initial_full_candidate_budget"])
+        maximum_budget = int(optimization["maximum_full_candidate_budget"])
+        minimum_valid = int(optimization["minimum_valid_full_candidates"])
+        evaluated = 0
+        valid_count = 0
+        for _, pair_index, candidate_index in candidate_refs:
+            if evaluated >= maximum_budget:
+                optimization_summary["candidate_budget_exhausted"] = True
+                break
+            if evaluated >= initial_budget and valid_count >= minimum_valid:
+                break
+            if (
+                evaluated >= initial_budget
+                and valid_count == 0
+                and not bool(optimization.get("expand_if_no_valid"))
+            ):
+                break
+            pair_result = results[pair_index]
+            context = pair_result.get("_optimization_context")
+            if not isinstance(context, dict):
+                continue
+            if context.get("neighbor_clouds") is None:
+                neighbor_started = time.perf_counter()
+                neighbor_clouds, neighbor_summary = _prepare_neighbor_point_clouds(
+                    context["all_rings"],
+                    context["ring"],
+                    context["ring_mouth_masks"],
+                    context["depth"],
+                    context["intrinsics"],
+                    context["pose_plane"],
+                    config,
+                    base_cache=base_cache,
+                )
+                context["neighbor_clouds"] = neighbor_clouds
+                context["neighbor_cloud_summary"] = neighbor_summary
+                pair_result["neighbor_3d_point_clouds"] = neighbor_summary
+                pair_timing = pair_result.get("timing_ms") if isinstance(pair_result.get("timing_ms"), dict) else {}
+                pair_timing["neighbor_cloud_prepare_ms"] = _elapsed_ms(neighbor_started)
+                pair_result["timing_ms"] = pair_timing
+            original = pair_result["grasp"]["clock_candidates"][candidate_index]
+            full_candidate = _clock_candidate(
+                original,
+                context["ring"],
+                context["mouth"],
+                context["other_ring_mask"],
+                context["neighbor_clouds"],
+                context["depth"],
+                context["intrinsics"],
+                context["pose_plane"],
+                context["center_camera"],
+                float(context["tilt_deg"]),
+                config,
+                evaluation_level="full",
+                other_ring_distance_map=context["other_ring_distance_map"],
+            )
+            full_candidate["evaluation_stage"] = "full"
+            full_candidate["full_evaluated"] = True
+            full_candidate["light_score"] = original.get("light_score", original.get("score"))
+            full_candidate["light_rank_source"] = "M36.4.1_staged_candidate_ranking"
+            pair_result["grasp"]["clock_candidates"][candidate_index] = full_candidate
+            evaluated += 1
+            if bool(full_candidate.get("valid")):
+                valid_count += 1
+
+        scene_timing["full_candidate_evaluation_ms"] = _elapsed_ms(full_started)
+        optimization_summary["full_candidate_evaluated_count"] = evaluated
+        optimization_summary["full_candidate_valid_count"] = valid_count
+        for result in results:
+            candidates = ((result.get("grasp") or {}).get("clock_candidates") or [])
+            for candidate in candidates:
+                if not candidate.get("full_evaluated"):
+                    candidate["evaluation_stage"] = "deferred"
+                    candidate["deferred_reason"] = "outside_full_candidate_budget"
+            if isinstance(result.get("_optimization_context"), Mapping):
+                _finalize_staged_pair(result, config)
+                result.pop("_optimization_context", None)
+    else:
+        pair_started = time.perf_counter()
+        results = [
+            analyze_ring_pair(
+                ring,
+                mouth,
+                metrics,
+                rings,
+                ring_mouth_masks,
+                depth,
+                intrinsics,
+                config,
+                evaluation_mode="exhaustive",
+            )
+            for ring, mouth, metrics in matches
+        ]
+        scene_timing["pair_geometry_initial_ms"] = _elapsed_ms(pair_started)
+        scene_timing["pair_preselection_ms"] = 0.0
+        scene_timing["adaptive_fallback_light_ms"] = 0.0
+        scene_timing["neighbor_base_cache_ms"] = 0.0
+        scene_timing["full_candidate_evaluation_ms"] = 0.0
+        optimization_summary["fully_analyzed_pair_count"] = len(results)
+        exhaustive_candidates = [
+            candidate
+            for item in results
+            for candidate in (((item.get("grasp") or {}).get("clock_candidates") or []))
+        ]
+        optimization_summary["full_candidate_evaluated_count"] = len(
+            [candidate for candidate in exhaustive_candidates if candidate.get("full_evaluated")]
+        )
+        optimization_summary["full_candidate_valid_count"] = len(
+            [candidate for candidate in exhaustive_candidates if candidate.get("valid")]
+        )
+
+    selection_started = time.perf_counter()
     eligible = [item for item in results if item.get("eligible") and item.get("ring_center_camera_mm")]
     selected_ring_id: Optional[int] = None
     selected_clock: Optional[int] = None
+    selected_clock_angle: Optional[float] = None
+    selected_clock_search_batch: Optional[str] = None
     selected_robot_candidate: Optional[Dict[str, Any]] = None
     if eligible:
         nearest_z = min(float(item["ring_center_camera_mm"][2]) for item in eligible)
@@ -2618,6 +3739,13 @@ def analyze_scene(
         }
         selected_ring_id = int(selected["ring_instance_id"])
         selected_clock = int(best.get("clock_hour")) if best.get("clock_hour") is not None else None
+        selected_clock_angle = (
+            float(best.get("clock_angle_deg_cw_from_12"))
+            if best.get("clock_angle_deg_cw_from_12") is not None else None
+        )
+        selected_clock_search_batch = (
+            str(best.get("search_batch")) if best.get("search_batch") is not None else None
+        )
         selected_robot_candidate = {
             "schema_version": "1.0",
             "message_type": "foam_ring_rim_pinch_grasp_candidate",
@@ -2629,6 +3757,7 @@ def analyze_scene(
                 "mouth_instance_id": int(selected["mouth_instance_id"]),
                 "clock_hour": selected_clock,
                 "clock_angle_deg_cw_from_12": best.get("clock_angle_deg_cw_from_12"),
+                "clock_search_batch": best.get("search_batch"),
                 "candidate_score": best.get("score"),
                 "tilt_deg": selected.get("tilt_deg"),
                 "box_wall_status": best.get("box_wall_status"),
@@ -2676,8 +3805,24 @@ def analyze_scene(
                 "actual_wall_compression_each_side_mm": best.get("actual_wall_compression_each_side_mm"),
             },
         }
+    scene_timing["selection_ms"] = _elapsed_ms(selection_started)
     for item in results:
         item.setdefault("selected", False)
+    box_summary_started = time.perf_counter()
+    box_wall_model = _box_wall_model(depth.shape, config, intrinsics)
+    scene_timing["box_model_summary_ms"] = _elapsed_ms(box_summary_started)
+    scene_timing["total_ms"] = _elapsed_ms(scene_started)
+    full_candidate_rows = [
+        candidate
+        for item in results
+        for candidate in (((item.get("grasp") or {}).get("clock_candidates") or []))
+        if bool(candidate.get("full_evaluated"))
+    ]
+    timing_detail = {
+        "scene": dict(scene_timing),
+        "pairs": _aggregate_timing_rows(results),
+        "full_candidates": _aggregate_timing_rows(full_candidate_rows),
+    }
     return {
         "rings_detected": len(rings),
         "mouths_detected": len(mouths),
@@ -2688,8 +3833,21 @@ def analyze_scene(
         "eligible_count": len(eligible),
         "selected_ring_instance_id": selected_ring_id,
         "selected_clock_hour": selected_clock,
-        "selection_scope": "M35.2_12_clock_rim_pinch_complete_pregrasp_motion_no_post_grasp_lift",
-        "box_wall_model": _box_wall_model(depth.shape, config, intrinsics),
+        "selected_clock_angle_deg_cw_from_12": selected_clock_angle,
+        "selected_clock_search_batch": selected_clock_search_batch,
+        "selection_scope": (
+            "M36.4.2_first_valid_target_early_exit_adaptive_8_plus_4_clock_search"
+            if first_valid else
+            (
+                "M36.4.1_staged_light_ranking_budgeted_complete_collision"
+                if staged else
+                "M35.2_12_clock_rim_pinch_complete_pregrasp_motion_no_post_grasp_lift"
+            )
+        ),
+        "geometry_optimization": optimization_summary,
+        "timing_ms": scene_timing,
+        "timing_detail": timing_detail,
+        "box_wall_model": box_wall_model,
         "neighbor_3d_model": {
             "enabled": bool(config.section("neighbor_3d").get("enabled", True)),
             "source": "aligned_depth_points_inside_other_foam_ring_instance_masks",

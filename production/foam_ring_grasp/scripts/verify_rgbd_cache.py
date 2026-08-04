@@ -16,8 +16,10 @@ from urllib.request import Request, urlopen
 
 import numpy as np
 
+# When this file is executed directly (``python3 path/to/script.py``), Python
+# places only the script directory on sys.path.  Add the repository root so
+# the top-level ``production`` package is importable regardless of cwd.
 REPO_ROOT = Path(__file__).resolve().parents[3]
-
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -318,4 +320,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

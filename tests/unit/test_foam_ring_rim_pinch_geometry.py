@@ -944,3 +944,172 @@ def test_m35_2_opening_sweep_can_hit_box_when_final_closed_pose_fits() -> None:
     assert motion["status"] == "rejected"
     assert motion["box_status"] == "intersects"
     assert motion["worst_stage"] in {"preopen_near_target", "approach_open", "insert_open"}
+
+
+def test_m3641_staged_mode_limits_full_collision_candidates_and_reports_timing() -> None:
+    instances, depth, intrinsics = _synthetic_scene(with_neighbor=True)
+    raw = _config().raw
+    raw["geometry_optimization"] = {
+        "enabled": True,
+        "mode": "staged",
+        "initial_full_candidate_budget": 2,
+        "maximum_full_candidate_budget": 3,
+        "minimum_valid_full_candidates": 1,
+        "cache_neighbor_point_clouds": True,
+        "skip_rejected_pairs": True,
+    }
+    scene = analyze_scene(instances, depth, intrinsics, GeometryConfig(raw))
+    optimization = scene["geometry_optimization"]
+    assert optimization["mode"] == "staged"
+    assert optimization["light_candidate_count"] == 12
+    assert 1 <= optimization["full_candidate_evaluated_count"] <= 3
+    assert optimization["neighbor_base_cache"]["instance_count"] == 2
+    assert scene["timing_ms"]["pair_geometry_initial_ms"] >= 0.0
+    assert scene["timing_ms"]["full_candidate_evaluation_ms"] >= 0.0
+    item = scene["instances"][0]
+    candidates = item["grasp"]["clock_candidates"]
+    assert len(candidates) == 12
+    assert sum(bool(candidate.get("full_evaluated")) for candidate in candidates) == optimization["full_candidate_evaluated_count"]
+    assert any(candidate.get("evaluation_stage") == "deferred" for candidate in candidates)
+    assert item["candidate_evaluation"]["deferred_count"] > 0
+
+
+def test_m3641_missing_optimization_section_keeps_exhaustive_compatibility() -> None:
+    instances, depth, intrinsics = _synthetic_scene()
+    scene = analyze_scene(instances, depth, intrinsics, _config())
+    assert scene["geometry_optimization"]["mode"] == "exhaustive"
+    item = scene["instances"][0]
+    candidates = item["grasp"]["clock_candidates"]
+    assert len(candidates) == 12
+    assert all(candidate.get("full_evaluated") is True for candidate in candidates)
+    assert all(candidate.get("evaluation_stage") == "full" for candidate in candidates)
+    assert scene["eligible_count"] == 1
+
+
+def _first_valid_config(raw: dict) -> GeometryConfig:
+    raw["geometry_optimization"] = {
+        "enabled": True,
+        "mode": "first_valid",
+        "skip_rejected_pairs": True,
+        "prefer_top_layer": True,
+        "cache_neighbor_point_clouds": True,
+        "stop_after_first_valid_target": True,
+        "stop_after_first_valid_candidate": True,
+        "maximum_pairs_to_fully_analyze": 3,
+        "maximum_full_candidates_per_pair": 12,
+    }
+    raw["clock_search"] = {
+        "mode": "adaptive_8_plus_4",
+        "primary_clock_hours": [12, 2, 3, 5, 6, 8, 9, 11],
+        "fallback_to_remaining": True,
+    }
+    raw["pair_preselection"] = {
+        "depth_sample_stride": 4,
+        "ring_erode_px": 1,
+        "mouth_exclusion_px": 2,
+    }
+    return GeometryConfig(raw)
+
+
+def _two_pair_scene():
+    height, width = 260, 520
+    depth = np.zeros((height, width), dtype=np.uint16)
+    instances = []
+    for pair_index, (cx, z) in enumerate(((135, 760), (385, 920))):
+        ring = np.zeros((height, width), dtype=np.uint8)
+        mouth = np.zeros_like(ring)
+        cv2.circle(ring, (cx, 130), 42, 1, -1)
+        cv2.circle(mouth, (cx, 130), 20, 1, -1)
+        depth[ring.astype(bool)] = z
+        depth[mouth.astype(bool)] = z + 60
+        instances.extend(
+            [
+                _instance(pair_index * 2, 0, "foam_ring", ring),
+                _instance(pair_index * 2 + 1, 1, "ring_mouth", mouth),
+            ]
+        )
+    intrinsics = {"fx": 600.0, "fy": 600.0, "cx": width / 2.0, "cy": height / 2.0}
+    return instances, depth, intrinsics
+
+
+def test_m3642_first_valid_analyzes_only_first_successful_pair() -> None:
+    instances, depth, intrinsics = _two_pair_scene()
+    scene = analyze_scene(
+        instances,
+        depth,
+        intrinsics,
+        _first_valid_config(_config().raw),
+    )
+    optimization = scene["geometry_optimization"]
+    assert scene["matched_pairs"] == 2
+    assert scene["eligible_count"] == 1
+    assert optimization["mode"] == "first_valid"
+    assert optimization["fully_analyzed_pair_count"] == 1
+    assert optimization["deferred_pair_count"] == 1
+    assert optimization["early_exit_triggered"] is True
+    assert optimization["full_candidate_evaluated_count"] == 1
+    analyzed = [item for item in scene["instances"] if item.get("processing_status") != "deferred"]
+    deferred = [item for item in scene["instances"] if item.get("processing_status") == "deferred"]
+    assert len(analyzed) == 1
+    assert len(deferred) == 1
+    assert deferred[0]["deferred_reason"] == "after_first_valid_target"
+    candidates = analyzed[0]["grasp"]["clock_candidates"]
+    assert len(candidates) == 8
+    assert {candidate.get("search_batch") for candidate in candidates} == {"primary"}
+
+
+def test_m3642_adaptive_clock_adds_four_fallbacks_only_after_primary_failure(monkeypatch) -> None:
+    import production.foam_ring_grasp.tasks.foam_ring_grasp_vision.geometry as geometry_module
+
+    def fake_clock_candidate(clock, *args, evaluation_level="full", **kwargs):
+        light = str(evaluation_level).lower() != "full"
+        valid = (not light) and str(clock.get("search_batch")) == "fallback"
+        return {
+            **dict(clock),
+            "evaluation_stage": "light" if light else "full",
+            "full_evaluated": not light,
+            "light_valid": True,
+            "valid": bool(valid),
+            "score": 90.0 if valid else 50.0,
+            "light_score": 80.0,
+            "warnings": [],
+            "rejection_reasons": [] if valid or light else ["synthetic_primary_failure"],
+            "neighbor_3d": {"status": "clear" if valid else "rejected"},
+            "full_gripper_static": {"status": "clear" if valid else "rejected"},
+            "full_gripper_motion": {"status": "clear" if valid else "rejected"},
+        }
+
+    monkeypatch.setattr(geometry_module, "_clock_candidate", fake_clock_candidate)
+    instances, depth, intrinsics = _synthetic_scene()
+    scene = analyze_scene(
+        instances,
+        depth,
+        intrinsics,
+        _first_valid_config(_config().raw),
+    )
+    optimization = scene["geometry_optimization"]
+    assert optimization["adaptive_fallback_used"] is True
+    assert optimization["primary_light_candidate_count"] == 8
+    assert optimization["fallback_light_candidate_count"] == 4
+    assert optimization["full_candidate_evaluated_count"] == 9
+    assert optimization["full_candidate_valid_count"] == 1
+    assert optimization["first_valid_candidate_search_batch"] == "fallback"
+    candidates = scene["instances"][0]["grasp"]["clock_candidates"]
+    assert len(candidates) == 12
+    assert sum(candidate.get("search_batch") == "fallback" for candidate in candidates) == 4
+    assert scene["selected_clock_search_batch"] == "fallback"
+
+
+def test_m3642_command_mode_keeps_staged_and_exhaustive_compatibility() -> None:
+    instances, depth, intrinsics = _synthetic_scene()
+    raw = _config().raw
+    raw["geometry_optimization"] = {"enabled": True, "mode": "staged"}
+    staged_scene = analyze_scene(instances, depth, intrinsics, GeometryConfig(raw))
+    assert staged_scene["geometry_optimization"]["mode"] == "staged"
+    assert len(staged_scene["instances"][0]["grasp"]["clock_candidates"]) == 12
+
+    raw2 = _config().raw
+    raw2["geometry_optimization"] = {"enabled": False, "mode": "exhaustive"}
+    exhaustive_scene = analyze_scene(instances, depth, intrinsics, GeometryConfig(raw2))
+    assert exhaustive_scene["geometry_optimization"]["mode"] == "exhaustive"
+    assert len(exhaustive_scene["instances"][0]["grasp"]["clock_candidates"]) == 12

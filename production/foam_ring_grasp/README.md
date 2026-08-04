@@ -162,3 +162,70 @@ python3 production/foam_ring_grasp/scripts/verify_rgbd_cache.py \
 ```
 
 详细说明见 `docs/M36.3_EXACT_RGBD_FRAME_CACHE.md`。
+
+
+## M36.4：单次在线三维几何验证
+
+M36.4 将 Runtime 的 RKNN `legacy_proto` polygon 转成现有
+`SegmentationInstance`，按 `capture_timestamp_ms` 取得完全相同的 RGB-D，
+再调用既有 `analyze_scene()`。当前箱体模型在 Runtime input ROI
+（528×455）中标定，因此在线处理会同步裁剪 RGB、Depth 和 mask，并将
+内参变换为 `cx-=roi_x1`、`cy-=roi_y1`。
+
+```bash
+cd /opt/visionops_v3
+bash production/foam_ring_grasp/scripts/run_online_geometry_once.sh
+```
+
+输出位于 `data/foam_ring_online_geometry/<timestamp>/`。该阶段仅用于在线
+诊断，结果始终保持 `robot_ready=false`。详细说明见
+`docs/M36.4_ONLINE_GEOMETRY_ONCE.md`。
+
+## M36.4.1：分段计时与候选分级计算
+
+M36.4.1 将在线默认模式改为 `staged`：全部钟点先做轻量评分，只对全场排名靠前的少数候选运行完整 3-D 箱壁、邻环和整夹爪碰撞；同时缓存每个圆环的基础点云和每个目标的二维距离变换。原始全部候选完整检查保留为 `exhaustive` 模式。
+
+```bash
+cd /opt/visionops_v3
+bash production/foam_ring_grasp/scripts/run_online_geometry_once.sh
+
+python3 production/foam_ring_grasp/scripts/summarize_geometry_timing.py
+```
+
+A/B 对照：
+
+```bash
+VISIONOPS_FOAM_RING_GEOMETRY_MODE=staged \
+  bash production/foam_ring_grasp/scripts/run_online_geometry_once.sh
+
+VISIONOPS_FOAM_RING_GEOMETRY_MODE=exhaustive \
+  bash production/foam_ring_grasp/scripts/run_online_geometry_once.sh
+```
+
+详细说明见 `docs/M36.4.1_STAGED_GEOMETRY_TIMING_OPTIMIZATION.md`。
+## M36.4.2：首个有效目标提前退出与自适应钟点搜索
+
+在线默认模式改为 `first_valid`。成功配对先用稀疏前表面深度、配对质量和分割置信度进行低成本排序；只逐个执行目标的 RANSAC、姿态和碰撞计算。找到第一个完整有效抓取后立即停止，未处理目标标记为 `deferred`。每个目标先搜索 8 个主钟点，全部失败时才补充剩余 4 个钟点。
+
+```bash
+cd /opt/visionops_v3
+bash production/foam_ring_grasp/scripts/run_online_geometry_once.sh
+
+python3 production/foam_ring_grasp/scripts/summarize_geometry_timing.py
+```
+
+模式对照：
+
+```bash
+VISIONOPS_FOAM_RING_GEOMETRY_MODE=first_valid \
+  bash production/foam_ring_grasp/scripts/run_online_geometry_once.sh
+
+VISIONOPS_FOAM_RING_GEOMETRY_MODE=staged \
+  bash production/foam_ring_grasp/scripts/run_online_geometry_once.sh
+
+VISIONOPS_FOAM_RING_GEOMETRY_MODE=exhaustive \
+  bash production/foam_ring_grasp/scripts/run_online_geometry_once.sh
+```
+
+详细说明见 `docs/M36.4.2_FIRST_VALID_ADAPTIVE_CLOCK_OPTIMIZATION.md`。
+

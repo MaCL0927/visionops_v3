@@ -360,6 +360,50 @@ candidate:
     segmentation_confidence: 0.06
     image_border: 0.04
 
+# M36.4.2 online geometry acceleration. The online default now ranks matched
+# ring/mouth pairs cheaply, analyzes them one by one, and returns immediately
+# after the first target obtains one complete collision-checked grasp. M36.4.1
+# staged and the historical exhaustive modes remain available for A/B diagnosis.
+geometry_optimization:
+  enabled: true
+  mode: first_valid            # first_valid | staged | exhaustive
+  timing_enabled: true
+
+  skip_rejected_pairs: true
+  prefer_top_layer: true
+  round_robin_pairs: true       # used by staged mode
+  cache_neighbor_point_clouds: true
+
+  # first_valid mode: normally only the highest-ranked pair is fully analyzed.
+  # If it fails geometry/collision checks, try the next pair, up to this limit.
+  stop_after_first_valid_target: true
+  stop_after_first_valid_candidate: true
+  maximum_pairs_to_fully_analyze: 3
+  maximum_full_candidates_per_pair: 12
+
+  # M36.4.1 staged-mode compatibility settings.
+  initial_full_candidate_budget: 4
+  maximum_full_candidate_budget: 8
+  minimum_valid_full_candidates: 2
+  expand_if_no_valid: true
+
+# Low-cost target ordering performed before RANSAC or point-cloud generation.
+# Sparse front-rim depth prioritizes the nearest/top-layer target, then pairing
+# quality and segmentation confidence break ties.
+pair_preselection:
+  enabled: true
+  depth_sample_stride: 4
+  ring_erode_px: 1
+  mouth_exclusion_px: 2
+
+# Adaptive direction search over the original 12 integer clock positions.
+# The eight primary positions are checked first. Only if none yields a complete
+# valid grasp are the remaining 1/4/7/10 o'clock positions added.
+clock_search:
+  mode: adaptive_8_plus_4
+  primary_clock_hours: [12, 2, 3, 5, 6, 8, 9, 11]
+  fallback_to_remaining: true
+
 quality:
   minimum_depth_valid_ratio: 0.32
   minimum_ellipse_points: 12
@@ -402,6 +446,37 @@ online_rgbd:
   # Safety contract. M36.3 rejects configurations that weaken either value.
   require_exact_timestamp: true
   allow_nearest_fallback: false
+
+online_geometry:
+  # M36.4 one-shot diagnostic pipeline. This stage invokes the existing
+  # analyze_scene() only after a Runtime capture timestamp has matched an exact
+  # RGB-D cache entry. It never enables robot output.
+  enabled: true
+  runtime_url: http://127.0.0.1:28081
+  runtime_timeout_s: 8.0
+  cache_ready_timeout_s: 3.0
+
+  # Geometry accepts only real coeff×proto masks. bbox_fallback is suitable for
+  # Web preview only and must not silently select depth pixels.
+  # Existing box_model.json and M35 geometry were calibrated in Runtime input
+  # ROI coordinates (528x455). Crop exact RGB-D to that ROI and shift cx/cy.
+  coordinate_space: runtime_input_roi
+  require_proto_mask: true
+  reject_bbox_fallback: true
+  minimum_mask_area_px: 20
+
+  # Keep Raw Local HTTP as the preferred localhost transport.
+  raw_http_enabled: true
+  raw_http_fallback_urllib: true
+  max_response_bytes: 67108864
+
+  # M36.4 is one-shot diagnostics, so saving exact inputs is intentional.
+  # Continuous M36.5 processing must not write these files every frame.
+  save_exact_rgb_png: true
+  save_exact_depth_png: true
+  save_depth_colormap: true
+  save_runtime_result: true
+  save_overlay: true
 
 axis_direction:
   # M35.4 diagnostic master switch. When false, skip fixed-length 3-D rod

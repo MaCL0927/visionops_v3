@@ -135,7 +135,9 @@ def draw_overlay(
             midpoint = (int(round((inner[0] + outer[0]) * 0.5)), int(round((inner[1] + outer[1]) * 0.5)))
             valid = bool(candidate.get("valid"))
             warnings = candidate.get("warnings") or []
-            color = (0, 200, 0) if valid else (0, 0, 220)
+            evaluation_stage = str(candidate.get("evaluation_stage") or "full")
+            deferred = evaluation_stage == "deferred"
+            color = (128, 128, 128) if deferred else ((0, 200, 0) if valid else (0, 0, 220))
             if valid and warnings:
                 color = (0, 165, 255)
             is_best = best_index is not None and int(candidate.get("clock_index", -1)) == int(best_index)
@@ -144,6 +146,8 @@ def draw_overlay(
             radius = 6 if is_best else 4
             cv2.circle(output, midpoint, radius, color, -1, cv2.LINE_AA)
             candidate_label = str(candidate.get("clock_hour", "?"))
+            if deferred:
+                candidate_label += "d"
             reject_reasons = candidate.get("rejection_reasons") or []
             if any(("box_wall" in str(reason) or "box_3d" in str(reason)) for reason in reject_reasons):
                 candidate_label += "W"
