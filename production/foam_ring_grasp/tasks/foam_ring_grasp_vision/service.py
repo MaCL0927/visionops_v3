@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M36.5 persistent trigger service for foam-ring exact RGB-D geometry.
+"""M37.3 persistent hybrid trigger service for foam-ring exact RGB-D geometry.
 
 The service keeps the synchronized RGB-D cache, Runtime client, geometry config
 and box calibration resident. Explicit trigger requests are serialized by one
@@ -158,6 +158,9 @@ class FoamRingOnlineService:
         self.failed_count = 0
         self.rejected_queue_full_count = 0
         self.duplicate_request_count = 0
+        self.m36_branch_count = 0
+        self.m37_branch_count = 0
+        self.no_target_count = 0
         self.processing_times_ms: list[float] = []
         self.trigger_queue_wait_times_ms: list[float] = []
         self.geometry_queue_wait_times_ms: list[float] = []
@@ -377,7 +380,7 @@ class FoamRingOnlineService:
                     prepared,
                     save_debug=job.save_debug,
                     generate_overlay=bool(self.settings["latest_overlay_enabled"]),
-                    stage="M36.5_persistent_trigger_service",
+                    stage="M37.3_hybrid_persistent_trigger_service",
                     geometry_queue_wait_ms=geometry_wait_ms,
                 )
                 service_processing_ms = max(
@@ -403,6 +406,13 @@ class FoamRingOnlineService:
                             service_result.get("capture_timestamp_ms") or _timestamp_ms()
                         )
                     self.completed_count += 1
+                    branch = str(service_result.get("selected_grasp_branch") or "none")
+                    if branch == "m36_mouth_visible_rim_pinch":
+                        self.m36_branch_count += 1
+                    elif branch == "m37_side_ring_near_visible_crown":
+                        self.m37_branch_count += 1
+                    else:
+                        self.no_target_count += 1
                     self.last_error = None
             except Exception as error:
                 self._complete_error(job, error)
@@ -456,6 +466,21 @@ class FoamRingOnlineService:
             if isinstance(scene.get("geometry_optimization"), Mapping)
             else {}
         )
+        hybrid = (
+            scene.get("hybrid_grasp")
+            if isinstance(scene.get("hybrid_grasp"), Mapping)
+            else {}
+        )
+        side_branch = (
+            scene.get("side_ring_branch")
+            if isinstance(scene.get("side_ring_branch"), Mapping)
+            else {}
+        )
+        hybrid_timing = (
+            hybrid.get("timing_ms")
+            if isinstance(hybrid.get("timing_ms"), Mapping)
+            else {}
+        )
         timing = payload.get("timing_ms") if isinstance(payload.get("timing_ms"), Mapping) else {}
         runtime_timing = (
             ((payload.get("runtime") or {}).get("timing"))
@@ -471,11 +496,13 @@ class FoamRingOnlineService:
         return {
             "schema_version": "1.0",
             "message_type": "foam_ring_trigger_result",
-            "stage": "M36.5_persistent_trigger_service",
+            "stage": str(payload.get("stage") or "M37.3_hybrid_persistent_trigger_service"),
             "status": "ok",
             "request_id": job.request_id,
             "idempotent_replay": False,
             "target_found": candidate is not None,
+            "selected_grasp_branch": hybrid.get("selected_branch") or scene.get("selected_grasp_branch") or "none",
+            "fallback_triggered": bool(hybrid.get("fallback_triggered", False)),
             "robot_ready": False,
             "robot_ready_reason": payload.get("robot_ready_reason"),
             "capture_timestamp_ms": payload.get("capture_timestamp_ms"),
@@ -496,6 +523,13 @@ class FoamRingOnlineService:
                 "full_candidate_evaluated_count": geometry_optimization.get("full_candidate_evaluated_count"),
                 "adaptive_fallback_used": geometry_optimization.get("adaptive_fallback_used"),
                 "early_exit_triggered": geometry_optimization.get("early_exit_triggered"),
+                "selected_grasp_branch": hybrid.get("selected_branch") or scene.get("selected_grasp_branch"),
+                "m36_candidate_found": hybrid.get("m36_candidate_found"),
+                "m37_candidate_found": hybrid.get("m37_candidate_found"),
+                "m37_candidate_count": side_branch.get("candidate_count"),
+                "m37_evaluated_count": side_branch.get("evaluated_count"),
+                "m37_deferred_count": side_branch.get("deferred_count"),
+                "m37_selected_ring_instance_id": side_branch.get("selected_ring_instance_id"),
             },
             "candidate": deepcopy(candidate),
             "timing_ms": {
@@ -505,6 +539,11 @@ class FoamRingOnlineService:
                 "prepare_total_ms": timing.get("prepare_total_ms"),
                 "polygon_to_mask_ms": timing.get("polygon_to_mask_ms"),
                 "geometry_ms": timing.get("geometry_ms"),
+                "m36_branch_ms": hybrid_timing.get("m36_branch_ms"),
+                "m37_candidate_filter_sort_ms": hybrid_timing.get("m37_candidate_filter_sort_ms"),
+                "m37_fit_loop_ms": hybrid_timing.get("m37_fit_loop_ms"),
+                "m37_evaluated_instance_total_ms": hybrid_timing.get("m37_evaluated_instance_total_ms"),
+                "hybrid_branch_total_ms": hybrid_timing.get("total_ms"),
                 "visualization_ms": timing.get("visualization_ms"),
                 "save_outputs_ms": timing.get("save_outputs_ms"),
                 "processor_total_ms": timing.get("total_ms"),
@@ -586,6 +625,11 @@ class FoamRingOnlineService:
                     "failed_count": self.failed_count,
                     "duplicate_request_count": self.duplicate_request_count,
                     "rejected_queue_full_count": self.rejected_queue_full_count,
+                    "branch_counts": {
+                        "m36_mouth_visible_rim_pinch": self.m36_branch_count,
+                        "m37_side_ring_near_visible_crown": self.m37_branch_count,
+                        "none": self.no_target_count,
+                    },
                     "default_save_debug": bool(self.settings["default_save_debug"]),
                     "latest_overlay_enabled": bool(self.settings["latest_overlay_enabled"]),
                     "latest_overlay_available": self.latest_overlay_jpeg is not None,
@@ -811,11 +855,13 @@ def run(
     )
     thread.start()
     print(
-        "Foam Ring Online Service started: http={}:{} runtime={} mode={} queue={}".format(
+        "Foam Ring M37.3 Hybrid Service started: http={}:{} runtime={} "
+        "m36_mode={} hybrid={} queue={}".format(
             settings["listen_host"],
             settings["listen_port"],
             processor.runtime_url,
             (processor.raw_config.get("geometry_optimization") or {}).get("mode"),
+            bool((processor.raw_config.get("hybrid_grasp") or {}).get("enabled", False)),
             settings["trigger_queue_capacity"],
         ),
         flush=True,
@@ -832,7 +878,7 @@ def run(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="M36.5 foam-ring persistent trigger service")
+    parser = argparse.ArgumentParser(description="M37.3 hybrid foam-ring persistent trigger service (M36.5-compatible API)")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--runtime-url")
     parser.add_argument("--host")
@@ -855,7 +901,7 @@ def main() -> int:
             geometry_mode=args.geometry_mode,
         )
     except (OSError, ValueError, RuntimeError) as error:
-        print(f"[FAIL] M36.5 service startup failed: {error}", file=sys.stderr)
+        print(f"[FAIL] M37.3 hybrid service startup failed: {error}", file=sys.stderr)
         return 2
 
 

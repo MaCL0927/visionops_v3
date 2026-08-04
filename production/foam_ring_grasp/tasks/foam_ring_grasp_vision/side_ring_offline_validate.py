@@ -124,7 +124,7 @@ def _project_polyline(
     return pixels
 
 
-def _draw_fit_overlay(
+def draw_side_ring_fit_overlay(
     rgb_bgr: np.ndarray,
     instances: Sequence[SegmentationInstance],
     fits: Sequence[Mapping[str, Any]],
@@ -237,6 +237,9 @@ def _draw_fit_overlay(
     )
     return overlay
 
+
+# Backward-compatible private alias used by early M37 scripts/tests.
+_draw_fit_overlay = draw_side_ring_fit_overlay
 
 def _mouth_matches(
     instances: Sequence[SegmentationInstance],
@@ -456,7 +459,7 @@ def _process(
     output_started = time.perf_counter()
     output_dir = output_root / capture_id
     output_dir.mkdir(parents=True, exist_ok=True)
-    overlay = _draw_fit_overlay(rgb_bgr, instances, fits, intrinsics, selected_id)
+    overlay = draw_side_ring_fit_overlay(rgb_bgr, instances, fits, intrinsics, selected_id)
     cv2.imwrite(str(output_dir / "side_ring_template_overlay.jpg"), overlay)
 
     if save_ply:

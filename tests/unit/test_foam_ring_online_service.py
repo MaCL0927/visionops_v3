@@ -226,3 +226,76 @@ def test_service_direct_script_can_import_repository():
     )
     assert completed.returncode == 0, completed.stderr
     assert "M36.5" in completed.stdout
+
+
+def test_compact_result_exposes_m37_3_selected_branch_and_timing():
+    processor = _FakeProcessor()
+    service = service_module.FoamRingOnlineService(
+        processor=processor,
+        settings=_settings(),
+    )
+    job = service_module.TriggerJob(
+        request_id="hybrid-side",
+        save_debug=False,
+        submitted_timestamp_ms=1,
+        submitted_monotonic=time.monotonic(),
+        started_timestamp_ms=2,
+        inference_completed_timestamp_ms=3,
+        geometry_started_timestamp_ms=4,
+        started_monotonic=time.monotonic(),
+    )
+    process = OnlineProcessResult(
+        payload={
+            "stage": "M37.3_hybrid_persistent_trigger_service",
+            "robot_ready_reason": "test",
+            "capture_timestamp_ms": 123,
+            "rgbd_match": {"timestamp_delta_ms": 0},
+            "runtime": {"result_id": "r", "frame_id": "f", "timing": {"total_ms": 50}},
+            "timing_ms": {"geometry_ms": 900, "total_ms": 1000},
+            "scene": {
+                "rings_detected": 3,
+                "mouths_detected": 0,
+                "matched_pairs": 0,
+                "eligible_count": 1,
+                "selected_ring_instance_id": 7,
+                "selected_grasp_branch": "m37_side_ring_near_visible_crown",
+                "hybrid_grasp": {
+                    "selected_branch": "m37_side_ring_near_visible_crown",
+                    "fallback_triggered": True,
+                    "m36_candidate_found": False,
+                    "m37_candidate_found": True,
+                    "timing_ms": {
+                        "m36_branch_ms": 20.0,
+                        "m37_fit_loop_ms": 850.0,
+                        "total_ms": 875.0,
+                    },
+                },
+                "side_ring_branch": {
+                    "candidate_count": 3,
+                    "evaluated_count": 1,
+                    "deferred_count": 2,
+                    "selected_ring_instance_id": 7,
+                },
+                "geometry_optimization": {"mode": "first_valid"},
+            },
+            "candidate": {
+                "message_type": "foam_ring_side_crown_grasp_candidate",
+                "grasp_branch": "m37_side_ring_near_visible_crown",
+                "target": {"ring_instance_id": 7},
+            },
+            "files": {},
+        },
+        overlay_jpeg=None,
+    )
+    compact = service._compact_result(
+        process,
+        job=job,
+        trigger_queue_wait_ms=0.1,
+        geometry_queue_wait_ms=0.2,
+        service_processing_ms=1000.0,
+    )
+    assert compact["stage"] == "M37.3_hybrid_persistent_trigger_service"
+    assert compact["selected_grasp_branch"] == "m37_side_ring_near_visible_crown"
+    assert compact["fallback_triggered"] is True
+    assert compact["scene_summary"]["m37_evaluated_count"] == 1
+    assert compact["timing_ms"]["m37_fit_loop_ms"] == 850.0

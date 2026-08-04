@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M36.5 acceptance test for the persistent foam-ring trigger service."""
+"""M37.3 acceptance test for the persistent hybrid foam-ring trigger service."""
 
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ def _json_request(*args: Any, **kwargs: Any) -> tuple[int, Dict[str, Any]]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Verify M36.5 persistent trigger service")
+    parser = argparse.ArgumentParser(description="Verify M37.3 hybrid M36/M37 persistent trigger service")
     parser.add_argument("--service-url", default="http://127.0.0.1:19213")
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--timeout-s", type=float, default=30.0)
@@ -93,6 +93,7 @@ def main() -> int:
 
     results: list[Dict[str, Any]] = []
     elapsed_values: list[float] = []
+    branch_values: list[str] = []
     prefix = f"m36-5-{int(time.time() * 1000)}"
     for index in range(max(1, int(args.samples))):
         request_id = f"{prefix}-{index:03d}"
@@ -120,7 +121,14 @@ def main() -> int:
         if result.get("rgbd_timestamp_delta_ms") != 0:
             failures.append(f"{request_id} exact RGB-D delta is not zero")
         if result.get("robot_ready") is not False:
-            failures.append(f"{request_id} robot_ready must remain false in M36.5")
+            failures.append(f"{request_id} robot_ready must remain false in M37.3")
+        branch = str(result.get("selected_grasp_branch") or "none")
+        branch_values.append(branch)
+        if result.get("target_found") and branch not in {
+            "m36_mouth_visible_rim_pinch",
+            "m37_side_ring_near_visible_crown",
+        }:
+            failures.append(f"{request_id} has invalid selected_grasp_branch={branch!r}")
         if not (args.save_debug_once and index == 0) and result.get("files"):
             failures.append(f"{request_id} production trigger unexpectedly wrote debug files")
 
@@ -165,12 +173,17 @@ def main() -> int:
 
     report = {
         "schema_version": "1.0",
-        "stage": "M36.5",
+        "stage": "M37.3",
         "status": "passed" if not failures else "failed",
         "service_url": args.service_url,
         "samples": len(results),
         "target_found_count": sum(bool(row.get("target_found")) for row in results),
         "exact_match_count": sum(row.get("rgbd_timestamp_delta_ms") == 0 for row in results),
+        "branch_counts": {
+            "m36_mouth_visible_rim_pinch": branch_values.count("m36_mouth_visible_rim_pinch"),
+            "m37_side_ring_near_visible_crown": branch_values.count("m37_side_ring_near_visible_crown"),
+            "none": branch_values.count("none"),
+        },
         "latency_ms": {
             "mean": round(statistics.fmean(elapsed_values), 3) if elapsed_values else 0.0,
             "p50": round(_percentile(elapsed_values, 0.50), 3),
@@ -197,16 +210,17 @@ def main() -> int:
         "samples": report["samples"],
         "target_found_count": report["target_found_count"],
         "exact_match_count": report["exact_match_count"],
+        "branch_counts": report["branch_counts"],
         "latency_ms": report["latency_ms"],
         "report": str(args.report),
         "failures": failures,
     }, ensure_ascii=False, indent=2))
     if failures:
-        print("[FAIL] M36.5 acceptance failed:", file=sys.stderr)
+        print("[FAIL] M37.3 acceptance failed:", file=sys.stderr)
         for failure in failures:
             print(f"  - {failure}", file=sys.stderr)
         return 2
-    print("[PASS] M36.5 persistent trigger service is healthy.")
+    print("[PASS] M37.3 hybrid persistent trigger service is healthy.")
     return 0
 
 

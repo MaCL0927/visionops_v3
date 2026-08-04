@@ -33,6 +33,10 @@ from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.geometry import (  
     GeometryConfig,
     analyze_scene,
 )
+from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.hybrid_grasp import (  # noqa: E402
+    HybridGraspConfig,
+    run_hybrid_grasp,
+)
 from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.io_utils import (  # noqa: E402
     load_yaml,
     write_json,
@@ -49,6 +53,9 @@ from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.segmentation import
 from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.visualization import (  # noqa: E402
     depth_colormap,
     draw_overlay,
+)
+from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.side_ring_offline_validate import (  # noqa: E402
+    draw_side_ring_fit_overlay,
 )
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "line.yaml"
@@ -323,6 +330,7 @@ class OnlineGeometryProcessor:
             cache_rgb=True,
         )
         self.geometry_config = GeometryConfig(self.raw_config)
+        self.hybrid_config = HybridGraspConfig.from_mapping(self.raw_config)
         self._analyze_fn = analyze_fn
         self._started = False
         self._lifecycle_lock = threading.Lock()
@@ -436,6 +444,11 @@ class OnlineGeometryProcessor:
                     or "exhaustive"
                 ),
                 "exact_match_timeout_ms": int(self.match_timeout_ms),
+                "hybrid_grasp_enabled": bool(self.hybrid_config.enabled),
+                "branch_priority": [
+                    "m36_mouth_visible_rim_pinch",
+                    "m37_side_ring_near_visible_crown",
+                ],
             },
         }
 
@@ -603,12 +616,22 @@ class OnlineGeometryProcessor:
         timings["geometry_queue_wait_ms"] = max(0.0, float(geometry_queue_wait_ms))
 
         geometry_started = time.perf_counter()
-        scene = self._analyze_fn(
-            prepared.adaptation.instances,
-            prepared.depth_geometry,
-            prepared.intrinsics,
-            self.geometry_config,
-        )
+        if self.hybrid_config.enabled:
+            scene = run_hybrid_grasp(
+                prepared.adaptation.instances,
+                prepared.depth_geometry,
+                prepared.intrinsics,
+                raw_config=self.raw_config,
+                geometry_config=self.geometry_config,
+                analyze_fn=self._analyze_fn,
+            )
+        else:
+            scene = self._analyze_fn(
+                prepared.adaptation.instances,
+                prepared.depth_geometry,
+                prepared.intrinsics,
+                self.geometry_config,
+            )
         timings["geometry_ms"] = _perf_ms(geometry_started)
         scene_clean = _strip_debug(scene)
         selected = scene_clean.get("robot_candidate") if isinstance(scene_clean, Mapping) else None
@@ -650,6 +673,41 @@ class OnlineGeometryProcessor:
                 prepared.adaptation.instances,
                 scene,
                 prepared.intrinsics,
+            )
+            side_branch = (
+                scene.get("side_ring_branch")
+                if isinstance(scene, Mapping)
+                and isinstance(scene.get("side_ring_branch"), Mapping)
+                else {}
+            )
+            side_fits = side_branch.get("fits") if isinstance(side_branch, Mapping) else []
+            selected_side_id = (
+                side_branch.get("selected_ring_instance_id")
+                if isinstance(side_branch, Mapping)
+                else None
+            )
+            if side_fits:
+                overlay = draw_side_ring_fit_overlay(
+                    overlay,
+                    prepared.adaptation.instances,
+                    side_fits,
+                    prepared.intrinsics,
+                    int(selected_side_id) if selected_side_id is not None else None,
+                )
+            branch_label = str(
+                scene.get("selected_grasp_branch")
+                if isinstance(scene, Mapping)
+                else "none"
+            )
+            cv2.putText(
+                overlay,
+                "M37.3 branch: " + branch_label,
+                (10, max(36, overlay.shape[0] - 12)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
             )
             ok, encoded = cv2.imencode(
                 ".jpg",
@@ -792,6 +850,8 @@ class OnlineGeometryProcessor:
                     )
                 ),
                 "geometry_optimization": self.raw_config.get("geometry_optimization") or {},
+                "hybrid_grasp": self.raw_config.get("hybrid_grasp") or {},
+                "side_ring_template": self.raw_config.get("side_ring_template") or {},
             },
             "timing_ms": {
                 key: round(float(value), 3) for key, value in timings.items()

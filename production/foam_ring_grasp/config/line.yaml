@@ -506,6 +506,26 @@ online_geometry:
   save_runtime_result: true
   save_overlay: true
 
+hybrid_grasp:
+  # M37.3 unified trigger policy. One Runtime result and one exact RGB-D frame
+  # are shared by both branches. The caller never specifies target posture.
+  enabled: true
+
+  # Always prefer the established M36 mouth-visible rim-pinch result. M37 runs
+  # only when M36 has no valid robot_candidate.
+  prefer_mouth_visible: true
+  side_ring_fallback_enabled: true
+
+  # M37 must not reinterpret a ring already paired with ring_mouth. Only M36
+  # unmatched foam_ring instances enter the side-lying short-cylinder fitter.
+  side_ring_only_unmatched: true
+
+  # M37.2 confidence-first fast fitting with conservative accurate fallback.
+  side_ring_search_profile: auto
+  stop_after_first_side_eligible: true
+  maximum_side_ring_attempts: 0  # 0 = keep trying by confidence until success
+
+
 axis_direction:
   # M35.4 diagnostic master switch. When false, skip fixed-length 3-D rod
   # endpoint calculation, 2-D projection, overlay drawing and diagnostic JSON.

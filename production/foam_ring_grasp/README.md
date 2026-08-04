@@ -253,3 +253,27 @@ python3 production/foam_ring_grasp/scripts/verify_online_service.py \
 ## M37 侧躺圆环参数化 3D 模板
 
 对于没有可靠 `ring_mouth` 的侧躺圆环，M37 使用已知外径、内径和轴向长度的短空心圆柱模型拟合 `foam_ring` 内部 RGB-D 点云。轴线从远端指向距离深度相机更近的端面。M37.1 在近端后方的真实可见圆柱弧面上计算抓取点，不再使用开口端投影最高点。M37.2 默认按 `foam_ring` 置信度排序，逐个尝试并在首个有效抓取点后立即退出，同时使用快速粗到细轴线搜索和保守高精度回退。该流程当前仅用于离线验证，详见 `docs/M37_SIDE_RING_PARAMETERIZED_TEMPLATE.md`、`docs/M37.1_NEAR_VISIBLE_CROWN_GRASP_POINT.md` 和 `docs/M37.2_CONFIDENCE_FIRST_FAST_TEMPLATE_FITTING.md`。
+
+## M37.3 统一触发：开口可见优先、侧躺自动回退
+
+M37.3 沿用 M36.5 的 `/api/foam_ring/infer_once` 接口。调用方不需要指定
+目标姿态。每次触发只执行一次 Runtime 分割和一次精确 RGB-D 匹配：
+
+1. 先运行 M36 `foam_ring + ring_mouth` 抓取；
+2. M36 没有有效候选时，才对其未匹配的 `foam_ring` 按置信度降序运行
+   M37.2 短圆柱模板拟合；
+3. M37 首个有效目标成功后立即退出。
+
+响应中的 `selected_grasp_branch` 为：
+
+- `m36_mouth_visible_rim_pinch`
+- `m37_side_ring_near_visible_crown`
+- `none`
+
+查看分支耗时：
+
+```bash
+python3 production/foam_ring_grasp/scripts/summarize_hybrid_timing.py
+```
+
+完整说明见 `docs/M37.3_HYBRID_REALTIME_GRASP.md`。
