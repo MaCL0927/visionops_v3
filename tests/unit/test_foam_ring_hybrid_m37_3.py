@@ -161,9 +161,17 @@ def test_m374_shallower_m37_precedes_deeper_m36():
             "eligible_count": 0,
         }
 
+    side_profiles: list[str] = []
+
     def side_fit(instance, *_args, **kwargs):
-        assert kwargs["search_profile"] == "fast"
-        return _fit_payload(instance, accepted=True)
+        profile = kwargs["search_profile"]
+        side_profiles.append(profile)
+        assert profile in {"screen", "final_verify"}
+        payload = _fit_payload(instance, accepted=True, score=4.2)
+        payload["search_profile_used"] = profile
+        payload["preliminary_pose_safe"] = profile == "screen"
+        payload["final_pose_safe"] = profile == "final_verify"
+        return payload
 
     scene = run_hybrid_grasp(
         [shallow, deep, mouth],
@@ -175,6 +183,7 @@ def test_m374_shallower_m37_precedes_deeper_m36():
         side_fit_fn=side_fit,
         associate_fn=associate,
     )
+    assert side_profiles == ["screen", "final_verify"]
     assert scene["selected_grasp_branch"] == "m37_side_ring_near_visible_crown"
     assert scene["robot_candidate"]["target"]["ring_instance_id"] == 1
     assert scene["robot_candidate"]["target"]["depth_layer_index"] == 0
@@ -211,7 +220,7 @@ def test_m374_side_candidates_follow_depth_not_confidence():
         side_fit_fn=side_fit,
         associate_fn=associate,
     )
-    assert calls == [1]
+    assert calls == [1, 1]
     assert scene["robot_candidate"]["target"]["ring_instance_id"] == 1
     assert scene["depth_layering"]["selected_depth_rank"] == 1
 
@@ -252,7 +261,108 @@ def test_m374_uses_only_one_warm_start_local_accurate_refinement():
         side_fit_fn=side_fit,
         associate_fn=associate,
     )
-    assert calls == [(1, "fast"), (2, "fast"), (2, "local_accurate")]
+    assert calls == [(1, "screen"), (2, "screen"), (2, "local_accurate")]
     assert scene["side_ring_branch"]["accurate_refinement_count"] == 1
     assert scene["side_ring_branch"]["global_accurate_search_used"] is False
     assert scene["robot_candidate"]["target"]["ring_instance_id"] == 2
+
+
+
+def test_m3751_pose_safety_is_decoupled_from_legacy_fast_score():
+    raw = _config()
+    ring = _ring(1, 0.95, 5)
+    depth = np.zeros((40, 60), dtype=np.uint16)
+    depth[ring.mask] = 500
+    calls: list[str] = []
+
+    def associate(_rings, _mouths, _config):
+        return [], [ring], [], []
+
+    def analyze(*_args):
+        return {"robot_candidate": None, "eligible_count": 0}
+
+    def side_fit(instance, *_args, **kwargs):
+        profile = kwargs["search_profile"]
+        calls.append(profile)
+        payload = _fit_payload(instance, accepted=True, score=4.8)
+        payload["search_profile_used"] = profile
+        payload["fast_acceptance_passed"] = False
+        payload["preliminary_pose_safe"] = profile == "screen"
+        payload["final_pose_safe"] = profile == "final_verify"
+        return payload
+
+    scene = run_hybrid_grasp(
+        [ring],
+        depth,
+        {"fx": 600.0, "fy": 600.0, "cx": 30.0, "cy": 20.0},
+        raw_config=raw,
+        geometry_config=GeometryConfig(raw),
+        analyze_fn=analyze,
+        side_fit_fn=side_fit,
+        associate_fn=associate,
+    )
+    assert calls == ["screen", "final_verify"]
+    assert scene["selected_grasp_branch"] == "m37_side_ring_near_visible_crown"
+    assert scene["side_ring_branch"]["accurate_refinement_count"] == 0
+    assert scene["side_ring_branch"]["final_validation_count"] == 1
+
+
+def test_m3751_lightweight_preselection_limits_expensive_candidates():
+    raw = _config()
+    raw["hybrid_grasp"]["lightweight_preselection"] = {
+        "enabled": True,
+        "maximum_candidates_per_layer": 2,
+        "mask_erode_px": 0,
+        "sample_stride": 1,
+        "minimum_valid_points": 5,
+        "minimum_valid_ratio": 0.01,
+    }
+    rings = [_ring(index, 0.9 - 0.01 * index, 4 + 9 * index) for index in range(1, 5)]
+    # Expand canvas for four non-overlapping synthetic rings.
+    fixed = []
+    for index, ring in enumerate(rings, start=1):
+        x1 = 2 + (index - 1) * 14
+        fixed.append(_ring(index, ring.confidence, x1))
+    rings = fixed
+    depth = np.zeros((40, 80), dtype=np.uint16)
+    # Rebuild masks to width 80.
+    expanded = []
+    for ring in rings:
+        mask = np.zeros((40, 80), dtype=bool)
+        x1 = ring.bbox_xyxy[0]
+        mask[5:25, x1:x1+12] = True
+        expanded.append(SegmentationInstance(
+            instance_id=ring.instance_id,
+            class_id=0,
+            class_name="foam_ring",
+            confidence=ring.confidence,
+            mask=mask,
+            bbox_xyxy=(x1,5,x1+12,25),
+        ))
+        depth[mask] = 500 + ring.instance_id
+    calls: list[int] = []
+
+    def associate(_rings, _mouths, _config):
+        return [], list(expanded), [], []
+
+    def analyze(*_args):
+        return {"robot_candidate": None, "eligible_count": 0}
+
+    def side_fit(instance, *_args, **kwargs):
+        calls.append(int(instance.instance_id))
+        return _fit_payload(instance, accepted=False, score=5.0)
+
+    scene = run_hybrid_grasp(
+        expanded,
+        depth,
+        {"fx": 600.0, "fy": 600.0, "cx": 40.0, "cy": 20.0},
+        raw_config=raw,
+        geometry_config=GeometryConfig(raw),
+        analyze_fn=analyze,
+        side_fit_fn=side_fit,
+        associate_fn=associate,
+    )
+    # Two screen calls plus one bounded local refinement of the best screen seed.
+    assert calls[:2] == [1, 2]
+    assert len([fit for fit in scene["side_ring_branch"]["fits"] if fit.get("processing_status") != "deferred"]) <= 2
+    assert scene["side_ring_branch"]["screen_attempt_count"] == 2

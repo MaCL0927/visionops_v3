@@ -89,6 +89,18 @@ class HybridGraspConfig:
     m37_fast_first_enabled: bool = True
     maximum_accurate_refinements_per_trigger: int = 1
 
+    # M37.5.1 lightweight preselection and delayed final pose validation.
+    lightweight_preselection_enabled: bool = True
+    lightweight_maximum_candidates_per_layer: int = 3
+    lightweight_mask_erode_px: int = 2
+    lightweight_sample_stride: int = 3
+    lightweight_neighbor_contact_dilate_px: int = 2
+    lightweight_depth_iqr_reference_mm: float = 40.0
+    lightweight_depth_edge_threshold_mm: float = 20.0
+    lightweight_minimum_valid_points: int = 30
+    lightweight_minimum_valid_ratio: float = 0.20
+    delayed_final_validation_enabled: bool = True
+
     @classmethod
     def from_mapping(cls, raw_config: Mapping[str, Any]) -> "HybridGraspConfig":
         section = raw_config.get("hybrid_grasp") or {}
@@ -100,6 +112,9 @@ class HybridGraspConfig:
         bounded = section.get("bounded_refinement") or {}
         if not isinstance(bounded, Mapping):
             bounded = {}
+        lightweight = section.get("lightweight_preselection") or {}
+        if not isinstance(lightweight, Mapping):
+            lightweight = {}
         depth_cfg = raw_config.get("depth") or {}
         if not isinstance(depth_cfg, Mapping):
             depth_cfg = {}
@@ -159,6 +174,36 @@ class HybridGraspConfig:
                 _safe_int(
                     bounded.get("maximum_accurate_refinements_per_trigger"), 1
                 ),
+            ),
+            lightweight_preselection_enabled=bool(
+                lightweight.get("enabled", True)
+            ),
+            lightweight_maximum_candidates_per_layer=max(
+                1, _safe_int(lightweight.get("maximum_candidates_per_layer"), 3)
+            ),
+            lightweight_mask_erode_px=max(
+                0, _safe_int(lightweight.get("mask_erode_px"), 2)
+            ),
+            lightweight_sample_stride=max(
+                1, _safe_int(lightweight.get("sample_stride"), 3)
+            ),
+            lightweight_neighbor_contact_dilate_px=max(
+                0, _safe_int(lightweight.get("neighbor_contact_dilate_px"), 2)
+            ),
+            lightweight_depth_iqr_reference_mm=max(
+                1.0, _safe_float(lightweight.get("depth_iqr_reference_mm"), 40.0)
+            ),
+            lightweight_depth_edge_threshold_mm=max(
+                2.0, _safe_float(lightweight.get("depth_edge_threshold_mm"), 20.0)
+            ),
+            lightweight_minimum_valid_points=max(
+                5, _safe_int(lightweight.get("minimum_valid_points"), 30)
+            ),
+            lightweight_minimum_valid_ratio=min(
+                1.0, max(0.0, _safe_float(lightweight.get("minimum_valid_ratio"), 0.20))
+            ),
+            delayed_final_validation_enabled=bool(
+                lightweight.get("delayed_final_validation_enabled", True)
             ),
         )
 
@@ -251,6 +296,161 @@ def _surface_depth_record(
         "timing_ms": _elapsed_ms(started),
     }
 
+
+
+def _lightweight_side_candidate_record(
+    ring: SegmentationInstance,
+    rings: Sequence[SegmentationInstance],
+    depth_mm: np.ndarray,
+    depth_record: Mapping[str, Any],
+    config: HybridGraspConfig,
+) -> Dict[str, Any]:
+    """Cheap per-instance quality estimate used before any cylinder fit.
+
+    This stage deliberately avoids 3-D circle fitting, Top-K hypotheses and
+    bootstrap. It only measures whether the mask contains a coherent, visible
+    and weakly contaminated depth surface. The score is a ranking signal; it is
+    never a pose-safety acceptance decision.
+    """
+
+    started = time.perf_counter()
+    x1, y1, x2, y2 = [int(value) for value in ring.bbox_xyxy]
+    x1 = max(0, min(depth_mm.shape[1], x1))
+    x2 = max(0, min(depth_mm.shape[1], x2))
+    y1 = max(0, min(depth_mm.shape[0], y1))
+    y2 = max(0, min(depth_mm.shape[0], y2))
+    base = {
+        "ring_instance_id": int(ring.instance_id),
+        "surface_depth_mm": depth_record.get("surface_depth_mm"),
+        "depth_layer_index": depth_record.get("depth_layer_index"),
+        "depth_rank": depth_record.get("depth_rank"),
+        "ring_confidence": float(ring.confidence),
+    }
+    if x2 <= x1 or y2 <= y1:
+        return {
+            **base,
+            "status": "invalid_bbox",
+            "eligible_for_screen": False,
+            "score": float("inf"),
+            "timing_ms": _elapsed_ms(started),
+        }
+
+    local_mask = ring.mask[y1:y2, x1:x2].astype(np.uint8, copy=True)
+    if config.lightweight_mask_erode_px > 0:
+        local_mask = cv2.erode(
+            local_mask,
+            _kernel(config.lightweight_mask_erode_px),
+            iterations=1,
+        )
+    retained_count = int(np.count_nonzero(local_mask))
+    if retained_count <= 0:
+        return {
+            **base,
+            "status": "empty_eroded_mask",
+            "eligible_for_screen": False,
+            "score": float("inf"),
+            "retained_pixel_count": 0,
+            "timing_ms": _elapsed_ms(started),
+        }
+
+    other = np.zeros_like(local_mask, dtype=np.uint8)
+    for candidate in rings:
+        if int(candidate.instance_id) == int(ring.instance_id):
+            continue
+        other |= candidate.mask[y1:y2, x1:x2].astype(np.uint8)
+    if config.lightweight_neighbor_contact_dilate_px > 0 and np.any(other):
+        other = cv2.dilate(
+            other,
+            _kernel(config.lightweight_neighbor_contact_dilate_px),
+            iterations=1,
+        )
+    contact_ratio = float(np.count_nonzero((local_mask > 0) & (other > 0))) / float(
+        max(1, retained_count)
+    )
+
+    stride = config.lightweight_sample_stride
+    sampled_mask = local_mask[::stride, ::stride] > 0
+    sampled_depth = depth_mm[y1:y2, x1:x2][::stride, ::stride].astype(np.float64)
+    values = sampled_depth[sampled_mask]
+    valid = values[
+        (values >= config.surface_depth_minimum_mm)
+        & (values <= config.surface_depth_maximum_mm)
+    ]
+    sample_count = int(values.size)
+    valid_count = int(valid.size)
+    valid_ratio = float(valid_count) / float(max(1, sample_count))
+
+    if valid_count:
+        q10, q25, q50, q75, q90 = [
+            float(value)
+            for value in np.percentile(valid, [10.0, 25.0, 50.0, 75.0, 90.0])
+        ]
+        depth_iqr = q75 - q25
+        depth_p80_span = q90 - q10
+    else:
+        q10 = q25 = q50 = q75 = q90 = None
+        depth_iqr = float("inf")
+        depth_p80_span = float("inf")
+
+    # A sparse organized-depth edge statistic catches masks dominated by
+    # discontinuities without computing 3-D normals.
+    edge_ratio = 1.0
+    if np.any(sampled_mask):
+        edge = np.zeros_like(sampled_mask, dtype=bool)
+        horizontal_valid = sampled_mask[:, 1:] & sampled_mask[:, :-1]
+        vertical_valid = sampled_mask[1:, :] & sampled_mask[:-1, :]
+        horizontal_jump = np.abs(sampled_depth[:, 1:] - sampled_depth[:, :-1])
+        vertical_jump = np.abs(sampled_depth[1:, :] - sampled_depth[:-1, :])
+        edge[:, 1:] |= horizontal_valid & (
+            horizontal_jump > config.lightweight_depth_edge_threshold_mm
+        )
+        edge[1:, :] |= vertical_valid & (
+            vertical_jump > config.lightweight_depth_edge_threshold_mm
+        )
+        edge_ratio = float(np.count_nonzero(edge & sampled_mask)) / float(
+            max(1, np.count_nonzero(sampled_mask))
+        )
+
+    bbox_area = max(1, (x2 - x1) * (y2 - y1))
+    mask_fill_ratio = float(retained_count) / float(bbox_area)
+    enough = bool(
+        valid_count >= config.lightweight_minimum_valid_points
+        and valid_ratio >= config.lightweight_minimum_valid_ratio
+    )
+    iqr_term = min(3.0, depth_iqr / config.lightweight_depth_iqr_reference_mm)
+    span_term = min(3.0, depth_p80_span / (2.0 * config.lightweight_depth_iqr_reference_mm))
+    # Lower is better. Depth layer remains the hard outer ordering; this score
+    # only ranks candidates inside the same physical layer.
+    score = (
+        2.0 * (1.0 - valid_ratio)
+        + 1.15 * iqr_term
+        + 0.60 * span_term
+        + 2.5 * contact_ratio
+        + 2.0 * edge_ratio
+        + 0.35 * max(0.0, 0.25 - mask_fill_ratio)
+        - 0.15 * float(ring.confidence)
+    )
+    return {
+        **base,
+        "status": "ok" if enough else "insufficient_depth_evidence",
+        "eligible_for_screen": enough,
+        "score": float(score) if enough else float("inf"),
+        "sample_count": sample_count,
+        "valid_count": valid_count,
+        "valid_ratio": float(valid_ratio),
+        "depth_q10_mm": q10,
+        "depth_q25_mm": q25,
+        "depth_median_mm": q50,
+        "depth_q75_mm": q75,
+        "depth_q90_mm": q90,
+        "depth_iqr_mm": float(depth_iqr),
+        "depth_p80_span_mm": float(depth_p80_span),
+        "neighbor_contact_ratio": float(contact_ratio),
+        "depth_edge_ratio": float(edge_ratio),
+        "mask_fill_ratio": float(mask_fill_ratio),
+        "retained_pixel_count": retained_count,
+        "timing_ms": _elapsed_ms(started),
+    }
 
 def _build_depth_layers(
     records: Sequence[Dict[str, Any]],
@@ -568,6 +768,12 @@ def run_hybrid_grasp(
     selected_layer_index: Optional[int] = None
     m36_total_ms = 0.0
     m36_attempt_count = 0
+    m37_lightweight_preselection_ms = 0.0
+    m37_screen_total_ms = 0.0
+    m37_screen_attempt_count = 0
+    m37_final_validation_ms = 0.0
+    m37_final_validation_count = 0
+    # Backward-compatible aliases populated from the new screen stage.
     m37_fast_total_ms = 0.0
     m37_fast_attempt_count = 0
     local_accurate_total_ms = 0.0
@@ -643,90 +849,194 @@ def run_hybrid_grasp(
                 or value not in matched_ids
             )
         ]
-        side_candidates.sort(
-            key=lambda instance: (
-                _safe_float(
-                    depth_by_id[int(instance.instance_id)].get("surface_depth_mm"),
-                    float("inf"),
-                ),
-                -_safe_float(
-                    depth_by_id[int(instance.instance_id)].get("depth_valid_ratio"),
-                    0.0,
-                ),
-                -float(instance.confidence),
-                int(instance.instance_id),
+
+        # M37.5.1 stage 1: millisecond-level candidate ranking. No cylinder
+        # search, Top-K ambiguity or bootstrap is executed here.
+        lightweight_started = time.perf_counter()
+        lightweight_records: List[Dict[str, Any]] = []
+        for instance in side_candidates:
+            instance_id = int(instance.instance_id)
+            record = _lightweight_side_candidate_record(
+                instance,
+                rings,
+                depth_mm,
+                depth_by_id[instance_id],
+                hybrid_config,
+            )
+            lightweight_records.append(record)
+        lightweight_records.sort(
+            key=lambda row: (
+                not bool(row.get("eligible_for_screen", False)),
+                # Physical top-surface order remains primary even inside one
+                # 30 mm layer; lightweight quality only breaks near ties.
+                _safe_float(row.get("surface_depth_mm"), float("inf")),
+                _safe_float(row.get("score"), float("inf")),
+                -_safe_float(row.get("ring_confidence"), 0.0),
+                _safe_int(row.get("ring_instance_id"), 10**9),
             )
         )
+        for rank, record in enumerate(lightweight_records, start=1):
+            record["preselection_rank"] = int(rank)
+        lightweight_elapsed = _elapsed_ms(lightweight_started)
+        m37_lightweight_preselection_ms += lightweight_elapsed
+        lightweight_by_id = {
+            int(row["ring_instance_id"]): row for row in lightweight_records
+        }
+        if hybrid_config.lightweight_preselection_enabled:
+            screen_candidates = [
+                ring_by_id[int(row["ring_instance_id"])]
+                for row in lightweight_records
+                if bool(row.get("eligible_for_screen", False))
+            ][: hybrid_config.lightweight_maximum_candidates_per_layer]
+        else:
+            screen_candidates = list(side_candidates)
+            screen_candidates.sort(
+                key=lambda instance: (
+                    _safe_float(
+                        depth_by_id[int(instance.instance_id)].get("surface_depth_mm"),
+                        float("inf"),
+                    ),
+                    -float(instance.confidence),
+                    int(instance.instance_id),
+                )
+            )
         layer_summary["m37_candidate_ring_ids"] = [
             int(item.instance_id) for item in side_candidates
         ]
-        layer_fast_fits: List[Dict[str, Any]] = []
+        layer_summary["m37_lightweight_preselection_ms"] = float(lightweight_elapsed)
+        layer_summary["m37_lightweight_candidates"] = lightweight_records
+        layer_summary["m37_screen_candidate_ring_ids"] = [
+            int(item.instance_id) for item in screen_candidates
+        ]
+        layer_summary["m37_screen_attempted_ids"] = []
+        layer_summary["m37_final_validated_ids"] = []
+        preliminary_fits: List[Dict[str, Any]] = []
+        final_failed_seeds: List[Dict[str, Any]] = []
 
-        for instance in side_candidates:
+        # M37.5.1 stage 2/3: cheap preliminary pose, then delayed full safety
+        # validation only for the current candidate. fit_score ranks quality but
+        # no longer vetoes an otherwise pose-safe result.
+        for instance in screen_candidates:
             if (
                 hybrid_config.maximum_side_ring_attempts > 0
-                and m37_fast_attempt_count >= hybrid_config.maximum_side_ring_attempts
+                and m37_screen_attempt_count >= hybrid_config.maximum_side_ring_attempts
             ):
                 maximum_side_attempts_reached = True
                 break
             global_side_attempt_rank += 1
-            fast_started = time.perf_counter()
-            fit = side_fit_fn(
+            screen_started = time.perf_counter()
+            screen_fit = side_fit_fn(
                 instance,
                 depth_mm,
                 intrinsics,
                 template_config,
                 mouth_matched=False,
-                search_profile="fast",
+                search_profile="screen",
                 exclusion_mask=_other_ring_exclusion_mask(instance, rings),
             )
-            fast_elapsed = _elapsed_ms(fast_started)
-            m37_fast_total_ms += fast_elapsed
+            screen_elapsed = _elapsed_ms(screen_started)
+            m37_screen_total_ms += screen_elapsed
+            m37_fast_total_ms += screen_elapsed
+            m37_screen_attempt_count += 1
             m37_fast_attempt_count += 1
             instance_id = int(instance.instance_id)
             fast_attempted_ids.add(instance_id)
-            fit["attempt_rank"] = int(global_side_attempt_rank)
-            fit["processing_status"] = "fast_evaluated"
-            fit["surface_depth_mm"] = depth_by_id[instance_id].get(
+            screen_fit["attempt_rank"] = int(global_side_attempt_rank)
+            screen_fit["processing_status"] = "screen_evaluated"
+            screen_fit["surface_depth_mm"] = depth_by_id[instance_id].get(
                 "surface_depth_mm"
             )
-            fit["depth_layer_index"] = depth_by_id[instance_id].get(
+            screen_fit["depth_layer_index"] = depth_by_id[instance_id].get(
                 "depth_layer_index"
             )
-            fit["depth_rank"] = depth_by_id[instance_id].get("depth_rank")
-            fit["depth_valid_ratio"] = depth_by_id[instance_id].get(
+            screen_fit["depth_rank"] = depth_by_id[instance_id].get("depth_rank")
+            screen_fit["depth_valid_ratio"] = depth_by_id[instance_id].get(
                 "depth_valid_ratio"
             )
-            fit["fast_wall_ms"] = float(fast_elapsed)
-            side_fits.append(fit)
-            layer_fast_fits.append(fit)
+            screen_fit["lightweight_preselection"] = deepcopy(
+                lightweight_by_id.get(instance_id) or {}
+            )
+            screen_fit["screen_wall_ms"] = float(screen_elapsed)
+            screen_fit["fast_wall_ms"] = float(screen_elapsed)
+            side_fits.append(screen_fit)
+            preliminary_fits.append(screen_fit)
+            layer_summary["m37_screen_attempted_ids"].append(instance_id)
             layer_summary["m37_fast_attempted_ids"].append(instance_id)
 
-            if bool(fit.get("fast_acceptance_passed", False)):
-                selected_side = fit
+            if not bool(screen_fit.get("preliminary_pose_safe", screen_fit.get("eligible", False))):
+                continue
+
+            if not hybrid_config.delayed_final_validation_enabled:
+                selected_side = screen_fit
                 selected_branch = "m37_side_ring_near_visible_crown"
                 selected_layer_index = layer_index
                 layer_summary["m37_fast_accepted_id"] = instance_id
                 layer_summary["selected_branch"] = selected_branch
                 break
 
+            final_started = time.perf_counter()
+            final_fit = side_fit_fn(
+                instance,
+                depth_mm,
+                intrinsics,
+                template_config,
+                mouth_matched=False,
+                search_profile="final_verify",
+                initial_axis=np.asarray(
+                    screen_fit["axis_toward_camera"], dtype=np.float64
+                ),
+                exclusion_mask=_other_ring_exclusion_mask(instance, rings),
+            )
+            final_elapsed = _elapsed_ms(final_started)
+            m37_final_validation_ms += final_elapsed
+            m37_final_validation_count += 1
+            final_fit["attempt_rank"] = screen_fit.get("attempt_rank")
+            final_fit["processing_status"] = "final_validated"
+            final_fit["surface_depth_mm"] = screen_fit.get("surface_depth_mm")
+            final_fit["depth_layer_index"] = screen_fit.get("depth_layer_index")
+            final_fit["depth_rank"] = screen_fit.get("depth_rank")
+            final_fit["depth_valid_ratio"] = screen_fit.get("depth_valid_ratio")
+            final_fit["lightweight_preselection"] = deepcopy(
+                screen_fit.get("lightweight_preselection") or {}
+            )
+            final_fit["screen_seed"] = _compact_fast_seed(screen_fit)
+            final_fit["screen_wall_ms"] = float(screen_elapsed)
+            final_fit["final_validation_wall_ms"] = float(final_elapsed)
+            for index, existing in enumerate(side_fits):
+                if existing is screen_fit:
+                    side_fits[index] = final_fit
+                    break
+            layer_summary["m37_final_validated_ids"].append(instance_id)
+
+            if bool(final_fit.get("final_pose_safe", final_fit.get("eligible", False))):
+                selected_side = final_fit
+                selected_branch = "m37_side_ring_near_visible_crown"
+                selected_layer_index = layer_index
+                layer_summary["m37_fast_accepted_id"] = instance_id
+                layer_summary["selected_branch"] = selected_branch
+                break
+            final_failed_seeds.append(final_fit)
+
         if selected_side is not None:
             active_layer_summaries.append(layer_summary)
             break
 
+        # M37.5.1 stage 4: only when no candidate passes delayed final safety,
+        # allow one bounded warm-start local refinement for the best preliminary
+        # axis. This path never re-runs a global direction search.
         if (
-            layer_fast_fits
+            preliminary_fits
             and accurate_refinement_count
             < hybrid_config.maximum_accurate_refinements_per_trigger
         ):
             refinable = [
                 fit
-                for fit in layer_fast_fits
+                for fit in preliminary_fits
                 if fit.get("axis_toward_camera") is not None
             ]
             if refinable:
-                best_fast = min(refinable, key=_fit_quality_rank)
-                best_id = int(best_fast["ring_instance_id"])
+                best_screen = min(refinable, key=_fit_quality_rank)
+                best_id = int(best_screen["ring_instance_id"])
                 best_instance = ring_by_id[best_id]
                 local_started = time.perf_counter()
                 refined = side_fit_fn(
@@ -737,7 +1047,7 @@ def run_hybrid_grasp(
                     mouth_matched=False,
                     search_profile="local_accurate",
                     initial_axis=np.asarray(
-                        best_fast["axis_toward_camera"], dtype=np.float64
+                        best_screen["axis_toward_camera"], dtype=np.float64
                     ),
                     exclusion_mask=_other_ring_exclusion_mask(best_instance, rings),
                 )
@@ -745,23 +1055,30 @@ def run_hybrid_grasp(
                 local_accurate_total_ms += local_elapsed
                 accurate_refinement_count += 1
                 accurate_refinement_candidate_id = best_id
-                refined["attempt_rank"] = best_fast.get("attempt_rank")
+                refined["attempt_rank"] = best_screen.get("attempt_rank")
                 refined["processing_status"] = "local_accurate_refined"
-                refined["surface_depth_mm"] = best_fast.get("surface_depth_mm")
-                refined["depth_layer_index"] = best_fast.get(
+                refined["surface_depth_mm"] = best_screen.get("surface_depth_mm")
+                refined["depth_layer_index"] = best_screen.get(
                     "depth_layer_index"
                 )
-                refined["depth_rank"] = best_fast.get("depth_rank")
-                refined["depth_valid_ratio"] = best_fast.get(
+                refined["depth_rank"] = best_screen.get("depth_rank")
+                refined["depth_valid_ratio"] = best_screen.get(
                     "depth_valid_ratio"
+                )
+                refined["lightweight_preselection"] = deepcopy(
+                    best_screen.get("lightweight_preselection") or {}
                 )
                 refined["local_accurate_refinement_used"] = True
                 refined["local_accurate_wall_ms"] = float(local_elapsed)
-                refined["fast_seed"] = _compact_fast_seed(best_fast)
+                refined["screen_seed"] = _compact_fast_seed(best_screen)
+                replaced = False
                 for index, existing in enumerate(side_fits):
-                    if existing is best_fast:
+                    if int(existing.get("ring_instance_id", -1)) == best_id:
                         side_fits[index] = refined
+                        replaced = True
                         break
+                if not replaced:
+                    side_fits.append(refined)
                 layer_summary["local_accurate_refined_id"] = best_id
                 if bool(refined.get("eligible", False)):
                     selected_side = refined
@@ -839,7 +1156,7 @@ def run_hybrid_grasp(
         fit
         for fit in side_fits
         if fit.get("processing_status")
-        in {"fast_evaluated", "local_accurate_refined"}
+        in {"screen_evaluated", "final_validated", "local_accurate_refined", "fast_evaluated"}
     ]
     deferred_side = [
         fit for fit in side_fits if fit.get("processing_status") == "deferred"
@@ -901,12 +1218,14 @@ def run_hybrid_grasp(
     }
     result["hybrid_grasp"] = {
         "enabled": True,
-        "policy_version": "M37.5",
+        "policy_version": "M37.5.1",
         "branch_priority": [
             "nearest_depth_layer",
             "same_layer_m36_mouth_visible_rim_pinch",
-            "same_layer_m37_side_ring_fast_first",
-            "single_warm_start_local_accurate_refinement",
+            "same_layer_m37_lightweight_preselection",
+            "preliminary_pose_screen",
+            "delayed_final_pose_validation",
+            "single_warm_start_local_accurate_refinement_if_needed",
             "next_depth_layer",
         ],
         "selected_branch": selected_branch,
@@ -921,6 +1240,9 @@ def run_hybrid_grasp(
             "depth_layer_build_ms": float(depth_layer_build_ms),
             "m36_branch_ms": float(m36_total_ms),
             "m36_base_scene_ms": float(m36_base_scene_ms),
+            "m37_lightweight_preselection_ms": float(m37_lightweight_preselection_ms),
+            "m37_screen_total_ms": float(m37_screen_total_ms),
+            "m37_final_validation_ms": float(m37_final_validation_ms),
             "m37_fast_total_ms": float(m37_fast_total_ms),
             "m37_local_accurate_ms": float(local_accurate_total_ms),
             "m37_evaluated_instance_total_ms": float(
@@ -937,9 +1259,15 @@ def run_hybrid_grasp(
         "executed": bool(m37_fast_attempt_count > 0),
         "candidate_order_rule": "depth_layer_then_surface_depth_ascending",
         "only_unmatched_m36_rings": bool(hybrid_config.side_ring_only_unmatched),
-        "search_policy": "all_fast_before_bounded_warm_start_local_accurate",
+        "search_policy": "lightweight_rank_then_screen_then_delayed_final_validation",
         "candidate_count": int(len(evaluated_side) + len(deferred_side)),
         "evaluated_count": int(len(evaluated_side)),
+        "lightweight_preselection_enabled": bool(hybrid_config.lightweight_preselection_enabled),
+        "lightweight_maximum_candidates_per_layer": int(
+            hybrid_config.lightweight_maximum_candidates_per_layer
+        ),
+        "screen_attempt_count": int(m37_screen_attempt_count),
+        "final_validation_count": int(m37_final_validation_count),
         "fast_attempt_count": int(m37_fast_attempt_count),
         "deferred_count": int(len(deferred_side)),
         "selected_ring_instance_id": selected_side_id,
@@ -981,7 +1309,7 @@ def run_hybrid_grasp(
             for reason in (fit.get("rejection_reasons") or [])
         )
     )
-    result["m37_5_pose_safety"] = {
+    result["m37_5_1_pose_safety"] = {
         "normal_constrained_axis_enabled": bool(template_config.normal_constrained_enabled),
         "neighbor_surface_exclusion_enabled": True,
         "m36_pose_conflict_rejection_count": int(m36_pose_conflict_rejections),
@@ -994,11 +1322,18 @@ def run_hybrid_grasp(
             else None
         ),
     }
+    # Backward-compatible M37.5 alias.
+    result["m37_5_pose_safety"] = deepcopy(result["m37_5_1_pose_safety"])
     result["m37_5_timing"] = {
         "depth_preselection_ms": float(depth_preselection_ms),
         "depth_layer_build_ms": float(depth_layer_build_ms),
         "m36_attempt_count": int(m36_attempt_count),
         "m36_total_ms": float(m36_total_ms),
+        "m37_lightweight_preselection_ms": float(m37_lightweight_preselection_ms),
+        "m37_screen_attempt_count": int(m37_screen_attempt_count),
+        "m37_screen_total_ms": float(m37_screen_total_ms),
+        "m37_final_validation_count": int(m37_final_validation_count),
+        "m37_final_validation_ms": float(m37_final_validation_ms),
         "m37_fast_attempt_count": int(m37_fast_attempt_count),
         "m37_fast_total_ms": float(m37_fast_total_ms),
         "m37_local_accurate_ms": float(local_accurate_total_ms),
@@ -1007,6 +1342,8 @@ def run_hybrid_grasp(
         ),
         "total_ms": float(total_ms),
     }
+
+    result["m37_5_1_timing"] = deepcopy(result["m37_5_timing"])
 
     # Backward-compatible M37.4 timing alias retained for existing dashboards.
     result["m37_4_timing"] = {

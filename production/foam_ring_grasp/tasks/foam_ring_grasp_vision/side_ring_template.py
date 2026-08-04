@@ -146,6 +146,27 @@ class SideRingTemplateConfig:
     fast_local_refine_azimuth_steps: int
     fast_fixed_radius_iterations: int
     fast_accept_max_score: float
+
+    # M37.5.1 two-stage online fitting. ``screen`` is a lightweight
+    # preliminary pose estimate; ``final_verify`` performs the delayed full
+    # safety checks only for the current best candidate.
+    screen_maximum_fit_points: int
+    screen_normal_maximum_points: int
+    screen_axis_hypothesis_count: int
+    screen_top_k_hypotheses: int
+    screen_local_refine_angles_deg: Tuple[float, ...]
+    screen_local_refine_radial_steps: int
+    screen_local_refine_azimuth_steps: int
+    screen_fixed_radius_iterations: int
+    final_validation_maximum_fit_points: int
+    final_validation_normal_maximum_points: int
+    final_validation_top_k_hypotheses: int
+    final_validation_refine_angles_deg: Tuple[float, ...]
+    final_validation_refine_radial_steps: int
+    final_validation_refine_azimuth_steps: int
+    final_validation_fixed_radius_iterations: int
+    final_validation_bootstrap_trials: int
+
     local_accurate_maximum_fit_points: int
     local_accurate_refine_angles_deg: Tuple[float, ...]
     local_accurate_refine_radial_steps: int
@@ -228,6 +249,22 @@ class SideRingTemplateConfig:
         if not isinstance(fast_refine_raw, (list, tuple)):
             fast_refine_raw = [12.0, 4.0, 1.5]
         fast_refine_angles = tuple(max(0.1, float(item)) for item in fast_refine_raw)
+        screen_refine_raw = section.get(
+            "screen_local_refine_angles_deg", [5.0, 1.5]
+        )
+        if not isinstance(screen_refine_raw, (list, tuple)):
+            screen_refine_raw = [5.0, 1.5]
+        screen_refine_angles = tuple(
+            max(0.1, float(item)) for item in screen_refine_raw
+        )
+        final_validation_raw = section.get(
+            "final_validation_refine_angles_deg", [2.0, 0.75]
+        )
+        if not isinstance(final_validation_raw, (list, tuple)):
+            final_validation_raw = [2.0, 0.75]
+        final_validation_angles = tuple(
+            max(0.1, float(item)) for item in final_validation_raw
+        )
         local_accurate_raw = section.get(
             "local_accurate_refine_angles_deg", [4.0, 1.5, 0.5]
         )
@@ -299,6 +336,50 @@ class SideRingTemplateConfig:
             ),
             fast_accept_max_score=max(
                 0.5, _float(section, "fast_accept_max_score", 3.0)
+            ),
+            screen_maximum_fit_points=max(
+                120, _int(section, "screen_maximum_fit_points", 320)
+            ),
+            screen_normal_maximum_points=max(
+                80, _int(section, "screen_normal_maximum_points", 320)
+            ),
+            screen_axis_hypothesis_count=max(
+                2, _int(section, "screen_axis_hypothesis_count", 8)
+            ),
+            screen_top_k_hypotheses=max(
+                1, _int(section, "screen_top_k_hypotheses", 1)
+            ),
+            screen_local_refine_angles_deg=screen_refine_angles,
+            screen_local_refine_radial_steps=max(
+                1, _int(section, "screen_local_refine_radial_steps", 1)
+            ),
+            screen_local_refine_azimuth_steps=max(
+                4, _int(section, "screen_local_refine_azimuth_steps", 8)
+            ),
+            screen_fixed_radius_iterations=max(
+                2, _int(section, "screen_fixed_radius_iterations", 4)
+            ),
+            final_validation_maximum_fit_points=max(
+                200, _int(section, "final_validation_maximum_fit_points", 900)
+            ),
+            final_validation_normal_maximum_points=max(
+                100, _int(section, "final_validation_normal_maximum_points", 700)
+            ),
+            final_validation_top_k_hypotheses=max(
+                2, _int(section, "final_validation_top_k_hypotheses", 2)
+            ),
+            final_validation_refine_angles_deg=final_validation_angles,
+            final_validation_refine_radial_steps=max(
+                1, _int(section, "final_validation_refine_radial_steps", 2)
+            ),
+            final_validation_refine_azimuth_steps=max(
+                4, _int(section, "final_validation_refine_azimuth_steps", 12)
+            ),
+            final_validation_fixed_radius_iterations=max(
+                3, _int(section, "final_validation_fixed_radius_iterations", 8)
+            ),
+            final_validation_bootstrap_trials=max(
+                0, _int(section, "final_validation_bootstrap_trials", 3)
             ),
             local_accurate_maximum_fit_points=max(
                 200, _int(section, "local_accurate_maximum_fit_points", 1200)
@@ -791,6 +872,9 @@ def _normal_axis_seeds(
     config: SideRingTemplateConfig,
     *,
     initial_axis: Optional[np.ndarray] = None,
+    maximum_count: Optional[int] = None,
+    pair_hypothesis_samples: Optional[int] = None,
+    fallback_global_samples: Optional[int] = None,
 ) -> Tuple[List[np.ndarray], Optional[np.ndarray]]:
     normals = np.asarray(normals, dtype=np.float64).reshape(-1, 3)
     raw: List[np.ndarray] = []
@@ -808,8 +892,13 @@ def _normal_axis_seeds(
         except np.linalg.LinAlgError:
             pass
 
+    pair_limit = (
+        config.normal_pair_hypothesis_samples
+        if pair_hypothesis_samples is None
+        else max(0, int(pair_hypothesis_samples))
+    )
     rng = np.random.default_rng(config.random_seed + 503)
-    pair_count = min(config.normal_pair_hypothesis_samples, max(0, len(normals) * 3))
+    pair_count = min(pair_limit, max(0, len(normals) * 3))
     for _ in range(pair_count):
         if len(normals) < 2:
             break
@@ -821,8 +910,13 @@ def _normal_axis_seeds(
             continue
         raw.append(cross)
 
-    if config.normal_fallback_global_samples > 0:
-        raw.extend(_fibonacci_hemisphere(config.normal_fallback_global_samples))
+    fallback_count = (
+        config.normal_fallback_global_samples
+        if fallback_global_samples is None
+        else max(0, int(fallback_global_samples))
+    )
+    if fallback_count > 0:
+        raw.extend(_fibonacci_hemisphere(fallback_count))
 
     # Rank seeds by the normal-perpendicular constraint before expensive circle fits.
     ranked: List[Tuple[float, np.ndarray]] = []
@@ -838,7 +932,11 @@ def _normal_axis_seeds(
     axes = _deduplicate_axes(
         [item[1] for item in ranked],
         minimum_angle_deg=config.normal_hypothesis_dedup_deg,
-        maximum_count=config.normal_axis_hypothesis_count,
+        maximum_count=(
+            config.normal_axis_hypothesis_count
+            if maximum_count is None
+            else max(1, int(maximum_count))
+        ),
     )
     return axes, covariance_axis
 
@@ -846,9 +944,16 @@ def _normal_axis_seeds(
 def _top_axis_evaluations(
     candidates: Sequence[_AxisEvaluation],
     config: SideRingTemplateConfig,
+    *,
+    maximum_count: Optional[int] = None,
 ) -> List[_AxisEvaluation]:
     ordered = sorted(candidates, key=lambda item: item.score)
     output: List[_AxisEvaluation] = []
+    limit = (
+        config.normal_top_k_hypotheses
+        if maximum_count is None
+        else max(1, int(maximum_count))
+    )
     for candidate in ordered:
         if any(
             _axis_angle_deg(candidate.axis, existing.axis)
@@ -857,17 +962,18 @@ def _top_axis_evaluations(
         ):
             continue
         output.append(candidate)
-        if len(output) >= config.normal_top_k_hypotheses:
+        if len(output) >= limit:
             break
     return output
-
 
 def _bootstrap_normal_axis_stability(
     normals: np.ndarray,
     reference_axis: np.ndarray,
     config: SideRingTemplateConfig,
+    *,
+    trials_override: Optional[int] = None,
 ) -> Dict[str, Any]:
-    trials = int(config.bootstrap_trials)
+    trials = int(config.bootstrap_trials if trials_override is None else trials_override)
     if trials <= 0 or len(normals) < config.minimum_normal_points:
         return {
             "trial_count": 0,
@@ -904,56 +1010,107 @@ def _fit_axis_normal_constrained(
     profile: str,
     initial_axis: Optional[np.ndarray] = None,
 ) -> Tuple[_AxisEvaluation, Dict[str, Any]]:
+    """Fit a normal-constrained cylinder axis with staged online profiles.
+
+    ``screen`` is intentionally cheap and defers Top-K ambiguity and bootstrap
+    checks. ``final_verify`` starts from the screen axis, performs only a small
+    local refinement, then executes the full pose-safety validation. The older
+    ``fast``/``accurate``/``local_accurate`` profiles remain available for
+    offline compatibility.
+    """
+
     profile = str(profile).strip().lower()
-    if profile not in {"fast", "accurate", "local_accurate"}:
+    if profile not in {
+        "screen",
+        "final_verify",
+        "fast",
+        "accurate",
+        "local_accurate",
+    }:
         profile = "fast"
+    screen = profile == "screen"
+    final_verify = profile == "final_verify"
     fast = profile == "fast"
     local_accurate = profile == "local_accurate"
-    maximum_points = (
-        config.fast_maximum_fit_points
-        if fast
-        else config.local_accurate_maximum_fit_points
-        if local_accurate
-        else config.maximum_fit_points
-    )
-    fixed_iterations = (
-        config.fast_fixed_radius_iterations
-        if fast
-        else config.local_accurate_fixed_radius_iterations
-        if local_accurate
-        else config.fixed_radius_iterations
-    )
-    refine_angles = (
-        config.fast_local_refine_angles_deg
-        if fast
-        else config.local_accurate_refine_angles_deg
-        if local_accurate
-        else config.local_refine_angles_deg
-    )
-    radial_steps = (
-        config.fast_local_refine_radial_steps
-        if fast
-        else config.local_accurate_refine_radial_steps
-        if local_accurate
-        else config.local_refine_radial_steps
-    )
-    azimuth_steps = (
-        config.fast_local_refine_azimuth_steps
-        if fast
-        else config.local_accurate_refine_azimuth_steps
-        if local_accurate
-        else config.local_refine_azimuth_steps
-    )
+
+    if screen:
+        maximum_points = config.screen_maximum_fit_points
+        normal_maximum = config.screen_normal_maximum_points
+        fixed_iterations = config.screen_fixed_radius_iterations
+        refine_angles = config.screen_local_refine_angles_deg
+        radial_steps = config.screen_local_refine_radial_steps
+        azimuth_steps = config.screen_local_refine_azimuth_steps
+        seed_limit = config.screen_axis_hypothesis_count
+        retained_limit = config.screen_top_k_hypotheses
+        pair_samples = min(config.normal_pair_hypothesis_samples, 48)
+        fallback_samples = min(config.normal_fallback_global_samples, 8)
+        bootstrap_trials = 0
+    elif final_verify:
+        if initial_axis is None:
+            raise ValueError("final_verify search requires initial_axis")
+        maximum_points = config.final_validation_maximum_fit_points
+        normal_maximum = config.final_validation_normal_maximum_points
+        fixed_iterations = config.final_validation_fixed_radius_iterations
+        refine_angles = config.final_validation_refine_angles_deg
+        radial_steps = config.final_validation_refine_radial_steps
+        azimuth_steps = config.final_validation_refine_azimuth_steps
+        seed_limit = 1
+        retained_limit = config.final_validation_top_k_hypotheses
+        pair_samples = 0
+        fallback_samples = 0
+        bootstrap_trials = config.final_validation_bootstrap_trials
+    else:
+        maximum_points = (
+            config.fast_maximum_fit_points
+            if fast
+            else config.local_accurate_maximum_fit_points
+            if local_accurate
+            else config.maximum_fit_points
+        )
+        normal_maximum = max(config.minimum_normal_points, 900)
+        fixed_iterations = (
+            config.fast_fixed_radius_iterations
+            if fast
+            else config.local_accurate_fixed_radius_iterations
+            if local_accurate
+            else config.fixed_radius_iterations
+        )
+        refine_angles = (
+            config.fast_local_refine_angles_deg
+            if fast
+            else config.local_accurate_refine_angles_deg
+            if local_accurate
+            else config.local_refine_angles_deg
+        )
+        radial_steps = (
+            config.fast_local_refine_radial_steps
+            if fast
+            else config.local_accurate_refine_radial_steps
+            if local_accurate
+            else config.local_refine_radial_steps
+        )
+        azimuth_steps = (
+            config.fast_local_refine_azimuth_steps
+            if fast
+            else config.local_accurate_refine_azimuth_steps
+            if local_accurate
+            else config.local_refine_azimuth_steps
+        )
+        seed_limit = config.normal_axis_hypothesis_count
+        retained_limit = config.normal_top_k_hypotheses
+        pair_samples = config.normal_pair_hypothesis_samples
+        fallback_samples = config.normal_fallback_global_samples
+        bootstrap_trials = config.bootstrap_trials
 
     started = time.perf_counter()
     search_points = _sample_search_points(
         points,
         maximum_points,
-        random_seed=config.random_seed + (71 if fast else 73),
+        random_seed=config.random_seed + (61 if screen else 67 if final_verify else 71 if fast else 73),
     )
-    normal_maximum = min(len(normals), max(config.minimum_normal_points, 900))
+    normal_maximum = min(len(normals), max(config.minimum_normal_points, int(normal_maximum)))
     if len(normals) > normal_maximum:
-        rng = np.random.default_rng(config.random_seed + 79)
+        rng = np.random.default_rng(config.random_seed + (69 if screen else 77 if final_verify else 79))
         idx = rng.choice(len(normals), size=normal_maximum, replace=False)
         search_normal_points = normal_points[idx]
         search_normals = normals[idx]
@@ -961,12 +1118,19 @@ def _fit_axis_normal_constrained(
         search_normal_points = normal_points
         search_normals = normals
 
-    seeds, covariance_axis = _normal_axis_seeds(
-        search_points,
-        search_normals,
-        config,
-        initial_axis=initial_axis,
-    )
+    covariance_axis = _normal_covariance_axis(search_normals)
+    if final_verify:
+        seeds = [_hemisphere_axis(np.asarray(initial_axis, dtype=np.float64))]
+    else:
+        seeds, covariance_axis = _normal_axis_seeds(
+            search_points,
+            search_normals,
+            config,
+            initial_axis=initial_axis,
+            maximum_count=seed_limit,
+            pair_hypothesis_samples=pair_samples,
+            fallback_global_samples=fallback_samples,
+        )
     if not seeds:
         raise ValueError("normal-constrained axis fitting has no valid hypotheses")
 
@@ -986,7 +1150,11 @@ def _fit_axis_normal_constrained(
         )
         candidate_evaluations += 1
     seed_ms = (time.perf_counter() - seed_started) * 1000.0
-    active = _top_axis_evaluations(seed_results, config)
+    active = _top_axis_evaluations(
+        seed_results,
+        config,
+        maximum_count=retained_limit,
+    )
 
     local_levels: List[Dict[str, Any]] = []
     local_total = 0.0
@@ -1011,7 +1179,11 @@ def _fit_axis_normal_constrained(
                     )
                 )
                 candidate_evaluations += 1
-        active = _top_axis_evaluations(level_results, config)
+        active = _top_axis_evaluations(
+            level_results,
+            config,
+            maximum_count=retained_limit,
+        )
         elapsed = (time.perf_counter() - level_started) * 1000.0
         local_total += elapsed
         local_levels.append(
@@ -1023,6 +1195,8 @@ def _fit_axis_normal_constrained(
             }
         )
 
+    # Re-evaluate only retained hypotheses on the full separated surface. This
+    # is cheap for the screen profile and preserves final metric comparability.
     final_results = [
         _evaluate_axis_normal_constrained(
             points,
@@ -1030,11 +1204,21 @@ def _fit_axis_normal_constrained(
             config,
             normal_points=normal_points,
             normals=normals,
-            fixed_radius_iterations=config.fixed_radius_iterations,
+            fixed_radius_iterations=(
+                config.final_validation_fixed_radius_iterations
+                if final_verify
+                else config.screen_fixed_radius_iterations
+                if screen
+                else config.fixed_radius_iterations
+            ),
         )
         for item in active
     ]
-    final_ranked = _top_axis_evaluations(final_results, config)
+    final_ranked = _top_axis_evaluations(
+        final_results,
+        config,
+        maximum_count=retained_limit,
+    )
     best = final_ranked[0]
     second = final_ranked[1] if len(final_ranked) > 1 else None
     second_angle = _axis_angle_deg(best.axis, second.axis) if second is not None else 0.0
@@ -1044,13 +1228,30 @@ def _fit_axis_normal_constrained(
         if covariance_axis is not None
         else 0.0
     )
-    bootstrap = _bootstrap_normal_axis_stability(normals, best.axis, config)
-    ambiguity = bool(
-        second is not None
-        and second_angle >= config.ambiguity_min_axis_separation_deg
-        and score_margin < config.ambiguity_min_score_margin
-    )
+    if screen:
+        bootstrap = {
+            "trial_count": 0,
+            "angles_deg": [],
+            "maximum_axis_spread_deg": 0.0,
+            "median_axis_spread_deg": 0.0,
+            "deferred_to_final_validation": True,
+        }
+        ambiguity = False
+    else:
+        bootstrap = _bootstrap_normal_axis_stability(
+            normals,
+            best.axis,
+            config,
+            trials_override=bootstrap_trials,
+        )
+        ambiguity = bool(
+            second is not None
+            and second_angle >= config.ambiguity_min_axis_separation_deg
+            and score_margin < config.ambiguity_min_score_margin
+        )
     uncertainty = {
+        "validation_stage": "preliminary" if screen else "final",
+        "deferred_full_validation": bool(screen),
         "ambiguous_top_hypotheses": ambiguity,
         "top2_axis_separation_deg": float(second_angle),
         "top2_score_margin": float(score_margin),
@@ -1072,13 +1273,12 @@ def _fit_axis_normal_constrained(
     timing = {
         "profile": profile,
         "normal_constrained": True,
+        "validation_stage": "preliminary" if screen else "final",
         "warm_start": bool(initial_axis is not None),
         "global_axis_samples": 0,
         "normal_seed_count": int(len(seeds)),
         "seed_evaluation_ms": float(seed_ms),
-        # Compatibility with M37.2/M37.4 timing consumers.  In M37.5 this is
-        # normal-hypothesis evaluation rather than a blind Fibonacci search.
-        "global_search_ms": 0.0 if local_accurate else float(seed_ms),
+        "global_search_ms": 0.0 if final_verify or local_accurate else float(seed_ms),
         "candidate_evaluations": int(candidate_evaluations),
         "local_refine_levels_ms": local_levels,
         "local_refine_ms": float(local_total),
@@ -1881,16 +2081,25 @@ def _fit_axis_m375(
     initial_axis: Optional[np.ndarray],
 ) -> Tuple[_AxisEvaluation, Dict[str, Any]]:
     if not config.normal_constrained_enabled:
+        legacy_profile = str(search_profile).strip().lower()
+        if legacy_profile == "screen":
+            legacy_profile = "fast"
+        elif legacy_profile == "final_verify":
+            legacy_profile = "local_accurate"
         return _fit_axis(
             points,
             config,
-            search_profile=search_profile,
+            search_profile=legacy_profile,
             initial_axis=initial_axis,
         )
 
     requested = str(search_profile).strip().lower()
-    if requested not in {"auto", "fast", "accurate", "local_accurate"}:
-        raise ValueError("search_profile must be auto, fast, accurate or local_accurate")
+    if requested not in {
+        "auto", "screen", "final_verify", "fast", "accurate", "local_accurate"
+    }:
+        raise ValueError(
+            "search_profile must be auto, screen, final_verify, fast, accurate or local_accurate"
+        )
     started = time.perf_counter()
     if requested == "auto":
         fast_eval, fast_timing = _fit_axis_normal_constrained(
@@ -1951,6 +2160,8 @@ def _fit_axis_m375(
         "fallback_used": False,
         "fallback_reasons": [],
         "normal_constrained": True,
+        "screen": profile_timing if key == "screen" else None,
+        "final_verify": profile_timing if key == "final_verify" else None,
         "fast": profile_timing if key == "fast" else None,
         "accurate": profile_timing if key == "accurate" else None,
         "local_accurate": profile_timing if key == "local_accurate" else None,
@@ -2125,6 +2336,9 @@ def fit_side_ring_instance(
 
     endpoint_and_grasp_ms = (time.perf_counter() - pose_started) * 1000.0
     quality_started = time.perf_counter()
+    profile_name = str(search_profile).strip().lower()
+    preliminary_validation = profile_name == "screen"
+    final_validation = not preliminary_validation
     fitted_radius = float(
         np.median(
             evaluation.radial_distance_mm[evaluation.radial_inlier_mask]
@@ -2150,25 +2364,41 @@ def fit_side_ring_instance(
 
     uncertainty = axis_search_timing.get("uncertainty") or {}
     bootstrap = uncertainty.get("bootstrap") or {}
+    deferred_safety_checks: List[str] = []
     if config.normal_constrained_enabled:
+        # Preliminary screening uses robust central evidence only. Tail P90,
+        # Top-K ambiguity, seed disagreement and bootstrap are intentionally
+        # delayed until the selected candidate reaches ``final_verify``.
         if evaluation.normal_inlier_ratio < config.minimum_normal_inlier_ratio:
             rejection_reasons.append("surface_normal_inlier_ratio_too_low")
         if evaluation.normal_axis_median_deg > config.maximum_normal_axis_median_deg:
             rejection_reasons.append("surface_normals_not_perpendicular_to_axis")
-        if evaluation.normal_axis_p90_deg > config.maximum_normal_axis_p90_deg:
-            rejection_reasons.append("surface_normal_axis_p90_too_high")
         if evaluation.normal_radial_median_deg > config.maximum_normal_radial_median_deg:
             rejection_reasons.append("surface_normals_not_radial")
-        if evaluation.normal_radial_p90_deg > config.maximum_normal_radial_p90_deg:
-            rejection_reasons.append("surface_normal_radial_p90_too_high")
         if evaluation.visible_normal_span_deg < config.minimum_visible_normal_span_deg:
             rejection_reasons.append("visible_cylindrical_normal_span_too_small")
-        if bool(uncertainty.get("ambiguous_top_hypotheses", False)):
-            rejection_reasons.append("axis_hypotheses_ambiguous")
-        if float(uncertainty.get("normal_seed_axis_disagreement_deg", 0.0)) > config.maximum_normal_seed_disagreement_deg:
-            rejection_reasons.append("axis_disagrees_with_surface_normal_seed")
-        if float(bootstrap.get("maximum_axis_spread_deg", 0.0)) > config.maximum_bootstrap_axis_spread_deg:
-            rejection_reasons.append("axis_bootstrap_unstable")
+
+        if preliminary_validation:
+            deferred_safety_checks.extend(
+                [
+                    "surface_normal_axis_p90",
+                    "surface_normal_radial_p90",
+                    "axis_hypotheses_ambiguity",
+                    "normal_seed_axis_disagreement",
+                    "axis_bootstrap_stability",
+                ]
+            )
+        else:
+            if evaluation.normal_axis_p90_deg > config.maximum_normal_axis_p90_deg:
+                rejection_reasons.append("surface_normal_axis_p90_too_high")
+            if evaluation.normal_radial_p90_deg > config.maximum_normal_radial_p90_deg:
+                rejection_reasons.append("surface_normal_radial_p90_too_high")
+            if bool(uncertainty.get("ambiguous_top_hypotheses", False)):
+                rejection_reasons.append("axis_hypotheses_ambiguous")
+            if float(uncertainty.get("normal_seed_axis_disagreement_deg", 0.0)) > config.maximum_normal_seed_disagreement_deg:
+                rejection_reasons.append("axis_disagrees_with_surface_normal_seed")
+            if float(bootstrap.get("maximum_axis_spread_deg", 0.0)) > config.maximum_bootstrap_axis_spread_deg:
+                rejection_reasons.append("axis_bootstrap_unstable")
 
     quality_gate_ms = (time.perf_counter() - quality_started) * 1000.0
     center_uv = project_point(center, intrinsics)
@@ -2186,15 +2416,33 @@ def fit_side_ring_instance(
         "search_profile_used": str(axis_search_timing.get("final_profile")),
         "accurate_fallback_used": bool(axis_search_timing.get("fallback_used", False)),
         "accurate_fallback_reasons": list(axis_search_timing.get("fallback_reasons") or []),
+        # ``fit_score`` is now a ranking/quality signal, not a pose-safety
+        # veto. The legacy fast fields remain for dashboards and offline tools.
         "fast_acceptance_passed": bool(
-            str(search_profile).strip().lower() == "fast"
+            profile_name in {"fast", "screen"}
             and len(rejection_reasons) == 0
             and float(evaluation.score) <= float(config.fast_accept_max_score)
         ),
         "fast_acceptance_reasons": list(
             _fast_fit_fallback_reasons(evaluation, config)
-            if str(search_profile).strip().lower() == "fast" else []
+            if profile_name in {"fast", "screen"} else []
         ),
+        "pose_safety_stage": "preliminary" if preliminary_validation else "final",
+        "preliminary_pose_safe": bool(
+            preliminary_validation and len(rejection_reasons) == 0
+        ),
+        "final_pose_safe": (
+            bool(len(rejection_reasons) == 0) if final_validation else None
+        ),
+        "pose_safe": bool(len(rejection_reasons) == 0),
+        "fit_quality_tier": (
+            "high"
+            if float(evaluation.score) <= float(config.fast_accept_max_score)
+            else "acceptable"
+            if len(rejection_reasons) == 0
+            else "rejected"
+        ),
+        "deferred_safety_checks": deferred_safety_checks,
         "warm_start_initial_axis": (
             np.asarray(initial_axis, dtype=np.float64).tolist()
             if initial_axis is not None else None

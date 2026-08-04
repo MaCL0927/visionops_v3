@@ -58,7 +58,7 @@ def run_once(
         return processor.process(
             save_debug=None,
             generate_overlay=False,
-            stage="M37.5_depth_layered_hybrid_online_geometry_once",
+            stage="M37.5.1_staged_pose_validation_online_geometry_once",
         ).payload
     finally:
         processor.stop()
@@ -142,11 +142,11 @@ def main() -> int:
             geometry_mode=args.geometry_mode,
         )
     except (OnlineGeometryError, OSError, ValueError, json.JSONDecodeError) as error:
-        print(f"[FAIL] M37.5 hybrid online geometry failed: {error}", file=sys.stderr)
+        print(f"[FAIL] M37.5.1 hybrid online geometry failed: {error}", file=sys.stderr)
         return 2
     document = payload if args.print_full_json else _summary(payload)
     print(json.dumps(document, ensure_ascii=False, indent=2))
-    print("[PASS] M37.5 depth-layered hybrid online geometry completed.")
+    print("[PASS] M37.5.1 staged pose-validation online geometry completed.")
     return 0
 
 

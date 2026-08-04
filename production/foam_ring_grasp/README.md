@@ -316,3 +316,7 @@ python3 production/foam_ring_grasp/scripts/replay_m37_5_result_set.py \
 ```
 
 完整说明见 `docs/M37.5_NORMAL_CONSTRAINED_POSE_SAFETY.md`。
+
+## M37.5.1：分阶段姿态验证
+
+M37.5.1 将侧躺圆环在线流程改为“轻量候选预筛选 → preliminary screen → 延迟 final validation → 单次局部精修兜底”。`fit_score` 只用于质量排序，只有 `final_pose_safe=true` 的候选能够输出抓取点。详细配置与输出字段见 `docs/M37.5.1_STAGED_POSE_VALIDATION.md`。

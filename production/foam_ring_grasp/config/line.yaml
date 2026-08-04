@@ -541,13 +541,26 @@ hybrid_grasp:
     maximum_depth_mm: 3000.0
 
   bounded_refinement:
-    # M37 candidates are searched with fast profile in depth order. A fast
-    # accepted candidate exits immediately. If every fast candidate in the
-    # active layer is uncertain, only the best one receives one warm-start
-    # local accurate refinement. Full global accurate search is forbidden in
-    # the online hybrid path.
+    # At most one warm-start local refinement is allowed after staged screen
+    # and final validation have failed. Full global accurate search is forbidden
+    # in the online hybrid path.
     fast_first_enabled: true
     maximum_accurate_refinements_per_trigger: 1
+
+  # M37.5.1: rank all same-layer rings with cheap 2-D/depth evidence, then run
+  # cylinder screening only on the best few. Full ambiguity/bootstrap checks are
+  # delayed until one preliminary pose-safe candidate is found.
+  lightweight_preselection:
+    enabled: true
+    maximum_candidates_per_layer: 3
+    mask_erode_px: 2
+    sample_stride: 3
+    neighbor_contact_dilate_px: 2
+    depth_iqr_reference_mm: 40.0
+    depth_edge_threshold_mm: 20.0
+    minimum_valid_points: 30
+    minimum_valid_ratio: 0.20
+    delayed_final_validation_enabled: true
 
 
 axis_direction:
@@ -636,9 +649,32 @@ side_ring_template:
   fast_local_refine_azimuth_steps: 12
   fast_fixed_radius_iterations: 6
 
-  # M37.4 online acceptance threshold. The online path never immediately runs
-  # a full accurate global fallback for one uncertain candidate.
+  # Fit score is a quality/ranking signal only. It no longer vetoes a pose that
+  # has passed final safety validation. The field remains for quality tiers and
+  # offline compatibility.
   fast_accept_max_score: 3.0
+
+  # M37.5.1 preliminary screen: one retained hypothesis, two small local levels,
+  # no Top-K ambiguity or bootstrap. This is the per-candidate online path.
+  screen_maximum_fit_points: 320
+  screen_normal_maximum_points: 320
+  screen_axis_hypothesis_count: 8
+  screen_top_k_hypotheses: 1
+  screen_local_refine_angles_deg: [5.0, 1.5]
+  screen_local_refine_radial_steps: 1
+  screen_local_refine_azimuth_steps: 8
+  screen_fixed_radius_iterations: 4
+
+  # Delayed final validation starts from the screen axis. It performs a bounded
+  # local refinement and then executes P90, ambiguity and bootstrap checks.
+  final_validation_maximum_fit_points: 900
+  final_validation_normal_maximum_points: 700
+  final_validation_top_k_hypotheses: 2
+  final_validation_refine_angles_deg: [2.0, 0.75]
+  final_validation_refine_radial_steps: 2
+  final_validation_refine_azimuth_steps: 12
+  final_validation_fixed_radius_iterations: 8
+  final_validation_bootstrap_trials: 3
 
   # One bounded warm-start local accurate refinement. It starts from the best
   # fast axis and therefore does not repeat the 320-direction global search.

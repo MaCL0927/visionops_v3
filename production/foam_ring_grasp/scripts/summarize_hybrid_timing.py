@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize M37.5 depth-layer selection and bounded-refinement timing."""
+"""Summarize M37.5.1 staged pose-validation timing."""
 from __future__ import annotations
 
 import argparse
@@ -27,7 +27,7 @@ def _number(value: Any) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Summarize M37.5 hybrid timing")
+    parser = argparse.ArgumentParser(description="Summarize M37.5.1 hybrid timing")
     parser.add_argument("result", type=Path, nargs="?")
     parser.add_argument("--root", type=Path, default=Path("data/foam_ring_online_geometry"))
     args = parser.parse_args()
@@ -52,10 +52,10 @@ def main() -> int:
         )
     )
     print(
-        "M37: fast_attempts={}, local_refines={}, global_accurate={}, selected={}".format(
-            side.get("fast_attempt_count"),
+        "M37: screen_attempts={}, final_validations={}, local_refines={}, selected={}".format(
+            side.get("screen_attempt_count", side.get("fast_attempt_count")),
+            side.get("final_validation_count"),
             side.get("accurate_refinement_count"),
-            side.get("global_accurate_search_used"),
             side.get("selected_ring_instance_id"),
         )
     )
@@ -100,6 +100,9 @@ def main() -> int:
         "depth_preselection_ms",
         "depth_layer_build_ms",
         "m36_branch_ms",
+        "m37_lightweight_preselection_ms",
+        "m37_screen_total_ms",
+        "m37_final_validation_ms",
         "m37_fast_total_ms",
         "m37_local_accurate_ms",
         "m37_evaluated_instance_total_ms",
