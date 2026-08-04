@@ -535,3 +535,59 @@ output:
   save_overlay: true
   save_paired_axis_overlay: true
   save_robot_candidate: true
+
+# M37 independent offline branch for side-lying rings whose opening is not
+# reliably segmented as ring_mouth. The object is fitted as a known-size short
+# hollow cylinder. This branch does not replace the M36 mouth-visible workflow.
+side_ring_template:
+  enabled: true
+
+  # Defaults are inherited from object_geometry when omitted.
+  outer_radius_mm: 42.5
+  inner_radius_mm: 30.0
+  axial_length_mm: 70.0
+
+  # Use interior mask depth so legacy polygon stair steps and D2C edge mixing do
+  # not dominate the 3-D fit.
+  mask_erode_px: 2
+  minimum_depth_mm: 150.0
+  maximum_depth_mm: 3000.0
+  depth_lower_quantile: 0.01
+  depth_upper_quantile: 0.99
+  maximum_depth_behind_median_mm: 95.0
+
+  # NumPy-only deterministic axis search; no SciPy/Open3D dependency is added.
+  maximum_fit_points: 1200
+  global_axis_samples: 320
+  local_refine_angles_deg: [12.0, 4.0, 1.5]
+  local_refine_radial_steps: 3
+  local_refine_azimuth_steps: 16
+  fixed_radius_iterations: 12
+  random_seed: 3701
+
+  # Fit-quality gates for the nominal outer cylindrical surface.
+  radial_inlier_threshold_mm: 6.0
+  minimum_radial_inlier_ratio: 0.65
+  maximum_radial_residual_median_mm: 4.0
+  maximum_radial_residual_p90_mm: 16.0
+  minimum_observed_axis_span_mm: 35.0
+  maximum_observed_axis_span_mm: 105.0
+
+  # A mouth-facing ring has its axis close to the camera view direction. M37 is
+  # intended for side-lying rings, so require a sufficiently transverse axis.
+  minimum_side_lay_angle_deg: 45.0
+  endpoint_quantile_low: 0.05
+  endpoint_quantile_high: 0.95
+
+  # Resolve the axis sign exactly as requested for M37: the selected opening is
+  # the endpoint closer to the depth-camera origin, and the directed axis points
+  # from the far endpoint toward this near endpoint.
+  near_endpoint_metric: euclidean_camera_distance
+
+  # Compute the upper-arc point in 3-D on the near opening. wall_midline places
+  # it halfway between nominal inner and outer radii. An optional axial inset can
+  # later move the physical contact slightly inside the opening without changing
+  # the fitted geometric rim point.
+  top_arc_sample_count: 720
+  grasp_radius_mode: wall_midline   # wall_midline | outer_surface | inner_surface
+  grasp_axial_inset_mm: 0.0
