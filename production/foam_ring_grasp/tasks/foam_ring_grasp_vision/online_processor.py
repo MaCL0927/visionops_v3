@@ -887,6 +887,7 @@ class OnlineGeometryProcessor:
                     )
                 ),
                 "geometry_optimization": self.raw_config.get("geometry_optimization") or {},
+                "m38_branch_a": self.raw_config.get("m38_branch_a") or {},
                 "hybrid_grasp": self.raw_config.get("hybrid_grasp") or {},
                 "side_ring_template": self.raw_config.get("side_ring_template") or {},
             },

@@ -1,5 +1,5 @@
-schema_version: "6.0"
-task: foam_ring_rim_pinch_m35_2_pregrasp_motion_sweep
+schema_version: "6.1"
+task: foam_ring_rim_pinch_m38_1_front_annulus_branch_a
 
 classes:
   foam_ring: foam_ring
@@ -517,6 +517,47 @@ online_geometry:
   save_depth_colormap: true
   save_runtime_result: true
   save_overlay: true
+
+# M38.1 branch A: when a ring mouth is clearly visible, fit the directly
+# observed 3-D foam annulus around that mouth. The annulus plane normal is used
+# as the ring axis; the 2-D ellipse only localizes/measures the opening.
+# Legacy M36 remains an optional fallback and M37.6 remains fully retained.
+m38_branch_a:
+  enabled: true
+  fallback_to_m36: true
+
+  # Clear-opening gate. BBox-fallback associations and extremely flat or
+  # irregular mouth masks are not trusted by branch A.
+  require_strict_association: true
+  minimum_mouth_containment: 0.65
+  minimum_mouth_to_ring_area_ratio: 0.04
+  maximum_mouth_to_ring_area_ratio: 0.58
+  minimum_mouth_minor_major_ratio: 0.35
+  maximum_ellipse_normalized_residual_p90: 0.38
+
+  # Build a narrow 3-D annulus from target foam only. Depth-jump pixels and
+  # overlapping neighboring-ring masks are removed before plane fitting.
+  ring_mask_erode_px: 2
+  annulus_outer_expand_ratio: 0.55
+  minimum_annulus_outer_expand_px: 7
+  maximum_annulus_outer_expand_px: 32
+  mouth_inner_exclusion_px: 2
+  exclude_other_ring_masks: true
+  neighbor_exclusion_dilate_px: 1
+  depth_edge_threshold_mm: 22.0
+  depth_edge_dilate_px: 1
+  point_sample_stride: 1
+
+  # A real front annulus must be observable around a sufficiently wide angular
+  # span and must support one compact 3-D plane. Failure falls back to M36 and
+  # then to the retained M37.6 branch.
+  angular_sector_count: 16
+  minimum_angular_coverage_deg: 180.0
+  minimum_inlier_angular_coverage_deg: 160.0
+  minimum_valid_points: 80
+  minimum_depth_valid_ratio: 0.30
+  minimum_plane_inlier_ratio: 0.45
+  maximum_plane_residual_p95_mm: 7.0
 
 hybrid_grasp:
   # M37.4 unified trigger policy. All rings are ranked by robust front-surface

@@ -2827,6 +2827,291 @@ def _clock_candidate(
     return result
 
 
+
+def _m38a_runtime_enabled(config: GeometryConfig) -> bool:
+    runtime = config.section("_runtime")
+    return str(runtime.get("pose_strategy") or "").strip().lower() == "m38_1_front_annulus"
+
+
+def _m38a_depth_discontinuity_mask(
+    depth: np.ndarray,
+    *,
+    minimum_mm: float,
+    maximum_mm: float,
+    threshold_mm: float,
+) -> np.ndarray:
+    """Return pixels touching a large local depth jump.
+
+    M38.1 fits only the visible front annulus.  D2C edges around the mouth,
+    neighboring rings and the box floor are common outliers, so both sides of
+    every 4-neighbour jump are removed before RANSAC.
+    """
+    valid = (depth >= minimum_mm) & (depth <= maximum_mm)
+    edge = np.zeros(depth.shape, dtype=bool)
+    depth_f = depth.astype(np.float32, copy=False)
+    for dy, dx in ((0, 1), (1, 0)):
+        y0a = max(0, -dy)
+        y1a = depth.shape[0] - max(0, dy)
+        x0a = max(0, -dx)
+        x1a = depth.shape[1] - max(0, dx)
+        y0b = max(0, dy)
+        y1b = depth.shape[0] - max(0, -dy)
+        x0b = max(0, dx)
+        x1b = depth.shape[1] - max(0, -dx)
+        a = depth_f[y0a:y1a, x0a:x1a]
+        b = depth_f[y0b:y1b, x0b:x1b]
+        pair_valid = valid[y0a:y1a, x0a:x1a] & valid[y0b:y1b, x0b:x1b]
+        jumped = pair_valid & (np.abs(a - b) > float(threshold_mm))
+        edge[y0a:y1a, x0a:x1a] |= jumped
+        edge[y0b:y1b, x0b:x1b] |= jumped
+    return edge
+
+
+def _m38a_angular_coverage_deg(
+    pixels_xy: np.ndarray,
+    center_uv: Tuple[float, float],
+    sector_count: int,
+) -> Tuple[float, int, List[int]]:
+    if pixels_xy.size == 0:
+        return 0.0, 0, []
+    sectors = max(8, int(sector_count))
+    dx = pixels_xy[:, 0].astype(np.float64) - float(center_uv[0])
+    dy = pixels_xy[:, 1].astype(np.float64) - float(center_uv[1])
+    angles = (np.arctan2(dy, dx) + 2.0 * math.pi) % (2.0 * math.pi)
+    indexes = np.floor(angles * float(sectors) / (2.0 * math.pi)).astype(np.int32)
+    indexes = np.clip(indexes, 0, sectors - 1)
+    occupied = sorted(int(value) for value in np.unique(indexes))
+    return 360.0 * float(len(occupied)) / float(sectors), len(occupied), occupied
+
+
+def _m38a_ellipse_boundary_quality(ellipse: Mapping[str, Any]) -> Dict[str, float]:
+    contour_raw = ellipse.get("contour")
+    contour = (
+        np.asarray(contour_raw, dtype=np.float64).reshape(-1, 2)
+        if contour_raw is not None
+        else np.empty((0, 2), dtype=np.float64)
+    )
+    major = max(1e-6, float(ellipse.get("major_px") or 0.0))
+    minor = max(1e-6, float(ellipse.get("minor_px") or 0.0))
+    center = np.asarray(ellipse.get("center_uv") or (0.0, 0.0), dtype=np.float64)
+    if contour.size == 0:
+        return {
+            "minor_major_ratio": float(minor / major),
+            "normalized_residual_median": float("inf"),
+            "normalized_residual_p90": float("inf"),
+        }
+    theta = math.radians(float(ellipse.get("angle_deg") or 0.0))
+    cosine = math.cos(theta)
+    sine = math.sin(theta)
+    delta = contour - center
+    local_x = cosine * delta[:, 0] + sine * delta[:, 1]
+    local_y = -sine * delta[:, 0] + cosine * delta[:, 1]
+    radial = np.sqrt(
+        np.square(local_x / max(major * 0.5, 1e-6))
+        + np.square(local_y / max(minor * 0.5, 1e-6))
+    )
+    residual = np.abs(radial - 1.0)
+    return {
+        "minor_major_ratio": float(minor / major),
+        "normalized_residual_median": float(np.median(residual)),
+        "normalized_residual_p90": float(np.percentile(residual, 90)),
+    }
+
+
+def _m38a_front_annulus_pose(
+    ring: SegmentationInstance,
+    mouth: SegmentationInstance,
+    association: Mapping[str, Any],
+    all_rings: Sequence[SegmentationInstance],
+    depth: np.ndarray,
+    intrinsics: Mapping[str, float],
+    config: GeometryConfig,
+    ellipse: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Fit the directly observed 3-D front annulus for M38.1 branch A.
+
+    Unlike M36, the mouth ellipse is used only to localize the opening and
+    measure its size.  The ring axis is the normal of the robust 3-D annulus
+    plane; no ellipse-derived normal or local tangent-plane conflict gate is
+    involved.
+    """
+    section = config.section("m38_branch_a")
+    depth_cfg = config.section("depth")
+    quality_cfg = config.section("quality")
+    plane_cfg = config.section("plane")
+    reasons: List[str] = []
+    warnings: List[str] = []
+
+    containment = _safe_float(association.get("containment"), 0.0)
+    association_mode = str(association.get("association_mode") or "")
+    area_ratio = _safe_float(association.get("mouth_to_ring_area_ratio"), 0.0)
+    if bool(section.get("require_strict_association", True)) and association_mode != "strict_envelope":
+        reasons.append("m38a_opening_association_not_strict")
+    if containment < _safe_float(section.get("minimum_mouth_containment"), 0.65):
+        reasons.append("m38a_mouth_containment_too_low")
+    minimum_area_ratio = _safe_float(section.get("minimum_mouth_to_ring_area_ratio"), 0.04)
+    maximum_area_ratio = _safe_float(section.get("maximum_mouth_to_ring_area_ratio"), 0.58)
+    if not (minimum_area_ratio <= area_ratio <= maximum_area_ratio):
+        reasons.append("m38a_mouth_area_ratio_out_of_range")
+
+    ellipse_quality = _m38a_ellipse_boundary_quality(ellipse)
+    if ellipse_quality["minor_major_ratio"] < _safe_float(
+        section.get("minimum_mouth_minor_major_ratio"), 0.35
+    ):
+        reasons.append("m38a_mouth_ellipse_too_flat")
+    if ellipse_quality["normalized_residual_p90"] > _safe_float(
+        section.get("maximum_ellipse_normalized_residual_p90"), 0.38
+    ):
+        reasons.append("m38a_mouth_ellipse_boundary_residual_too_high")
+
+    mouth_area = max(1, int(mouth.area_px))
+    equivalent_radius = math.sqrt(float(mouth_area) / math.pi)
+    outer_expand = int(
+        round(equivalent_radius * _safe_float(section.get("annulus_outer_expand_ratio"), 0.55))
+    )
+    outer_expand = max(_safe_int(section.get("minimum_annulus_outer_expand_px"), 7), outer_expand)
+    outer_expand = min(_safe_int(section.get("maximum_annulus_outer_expand_px"), 32), outer_expand)
+    inner_exclusion = max(0, _safe_int(section.get("mouth_inner_exclusion_px"), 2))
+    ring_erode = max(0, _safe_int(section.get("ring_mask_erode_px"), 2))
+    neighbor_exclusion = max(0, _safe_int(section.get("neighbor_exclusion_dilate_px"), 1))
+
+    annulus_mask = (
+        _erode(ring.mask, ring_erode)
+        & _dilate(mouth.mask, outer_expand)
+        & ~_dilate(mouth.mask, inner_exclusion)
+    )
+    if bool(section.get("exclude_other_ring_masks", True)):
+        other_mask = np.zeros_like(annulus_mask, dtype=bool)
+        target_id = int(ring.instance_id)
+        for other in all_rings:
+            if int(other.instance_id) != target_id:
+                other_mask |= other.mask.astype(bool)
+        if neighbor_exclusion > 0:
+            other_mask = _dilate(other_mask, neighbor_exclusion)
+        annulus_mask &= ~other_mask
+
+    minimum_depth = _safe_float(depth_cfg.get("minimum_mm"), 150.0)
+    maximum_depth = _safe_float(depth_cfg.get("maximum_mm"), 3000.0)
+    depth_edge_threshold = max(
+        1.0, _safe_float(section.get("depth_edge_threshold_mm"), 22.0)
+    )
+    depth_edges = _m38a_depth_discontinuity_mask(
+        depth,
+        minimum_mm=minimum_depth,
+        maximum_mm=maximum_depth,
+        threshold_mm=depth_edge_threshold,
+    )
+    edge_dilate = max(0, _safe_int(section.get("depth_edge_dilate_px"), 1))
+    if edge_dilate > 0:
+        depth_edges = _dilate(depth_edges, edge_dilate)
+    annulus_mask &= ~depth_edges
+
+    stride = max(1, _safe_int(section.get("point_sample_stride"), 1))
+    points, pixels = depth_pixels_to_points(
+        depth,
+        annulus_mask,
+        intrinsics,
+        minimum_depth,
+        maximum_depth,
+        stride=stride,
+    )
+    pixel_count = int(np.count_nonzero(annulus_mask))
+    valid_ratio = float(len(points)) / float(max(1, pixel_count))
+    sector_count = max(8, _safe_int(section.get("angular_sector_count"), 16))
+    coverage_deg, occupied_count, occupied = _m38a_angular_coverage_deg(
+        pixels,
+        tuple(ellipse["center_uv"]),
+        sector_count,
+    )
+    minimum_points = max(
+        20,
+        _safe_int(
+            section.get("minimum_valid_points"),
+            _safe_int(depth_cfg.get("minimum_valid_points"), 80),
+        ),
+    )
+    if len(points) < minimum_points:
+        reasons.append("m38a_insufficient_annulus_depth")
+    minimum_valid_ratio = _safe_float(
+        section.get("minimum_depth_valid_ratio"),
+        _safe_float(quality_cfg.get("minimum_depth_valid_ratio"), 0.32),
+    )
+    if valid_ratio < minimum_valid_ratio:
+        reasons.append("m38a_low_annulus_depth_valid_ratio")
+    if coverage_deg < _safe_float(section.get("minimum_angular_coverage_deg"), 180.0):
+        reasons.append("m38a_annulus_angular_coverage_too_small")
+
+    plane = fit_plane_ransac(points, config) if len(points) >= 3 else None
+    inlier_coverage_deg = 0.0
+    inlier_occupied_count = 0
+    inlier_occupied: List[int] = []
+    if plane is None:
+        reasons.append("m38a_annulus_plane_fit_failed")
+    else:
+        inlier_pixels = pixels[plane.inlier_mask]
+        (
+            inlier_coverage_deg,
+            inlier_occupied_count,
+            inlier_occupied,
+        ) = _m38a_angular_coverage_deg(
+            inlier_pixels,
+            tuple(ellipse["center_uv"]),
+            sector_count,
+        )
+        minimum_inlier_ratio = _safe_float(
+            section.get("minimum_plane_inlier_ratio"),
+            max(0.40, _safe_float(plane_cfg.get("minimum_inlier_ratio"), 0.34)),
+        )
+        if plane.inlier_ratio < minimum_inlier_ratio:
+            reasons.append("m38a_annulus_plane_inlier_ratio_too_low")
+        if plane.residual_p95_mm > _safe_float(
+            section.get("maximum_plane_residual_p95_mm"), 7.0
+        ):
+            reasons.append("m38a_annulus_plane_residual_too_high")
+        if inlier_coverage_deg < _safe_float(
+            section.get("minimum_inlier_angular_coverage_deg"), 160.0
+        ):
+            reasons.append("m38a_annulus_inlier_angular_coverage_too_small")
+
+    diagnostics: Dict[str, Any] = {
+        "strategy": "m38_1_front_annulus",
+        "normal_source": "m38_1_front_annulus_depth_plane",
+        "opening_clear": bool(len(reasons) == 0 and plane is not None),
+        "association_mode": association_mode,
+        "mouth_containment": float(containment),
+        "mouth_to_ring_area_ratio": float(area_ratio),
+        "ellipse_quality": ellipse_quality,
+        "annulus_outer_expand_px": int(outer_expand),
+        "mouth_inner_exclusion_px": int(inner_exclusion),
+        "ring_mask_erode_px": int(ring_erode),
+        "annulus_pixel_count": int(pixel_count),
+        "annulus_point_count": int(len(points)),
+        "annulus_depth_valid_ratio": float(valid_ratio),
+        "angular_sector_count": int(sector_count),
+        "angular_coverage_deg": float(coverage_deg),
+        "occupied_sector_count": int(occupied_count),
+        "occupied_sectors": occupied,
+        "inlier_angular_coverage_deg": float(inlier_coverage_deg),
+        "inlier_occupied_sector_count": int(inlier_occupied_count),
+        "inlier_occupied_sectors": inlier_occupied,
+        "depth_edge_threshold_mm": float(depth_edge_threshold),
+        "normal_disagreement_deg": 0.0,
+        "pose_conflict_signals": [],
+        "handoff_to_m37": False,
+    }
+    return {
+        "plane": plane,
+        "annulus_mask": annulus_mask,
+        "depth_edge_mask": depth_edges,
+        "points": points,
+        "pixels": pixels,
+        "pixel_count": int(pixel_count),
+        "valid_ratio": float(valid_ratio),
+        "diagnostics": diagnostics,
+        "warnings": warnings,
+        "rejection_reasons": reasons,
+    }
+
 def analyze_ring_pair(
     ring: SegmentationInstance,
     mouth: SegmentationInstance,
@@ -2852,6 +3137,9 @@ def analyze_ring_pair(
     gripper_cfg = config.section("gripper")
     reasons: List[str] = []
     warnings: List[str] = []
+    pose_strategy = (
+        "m38_1_front_annulus" if _m38a_runtime_enabled(config) else "legacy_m36"
+    )
     ring_area = ring.area_px
     mouth_area = mouth.area_px
     if ring_area < _safe_int(quality_cfg.get("minimum_ring_area_px"), 300):
@@ -2863,120 +3151,188 @@ def analyze_ring_pair(
     ellipse = fit_mouth_ellipse(mouth.mask)
     timing_ms["ellipse_fit_ms"] = _elapsed_ms(ellipse_started)
     if ellipse is None or len(ellipse.get("contour", [])) < _safe_int(quality_cfg.get("minimum_ellipse_points"), 12):
-        reasons.append("mouth_ellipse_unavailable")
-        timing_ms["total_ms"] = _elapsed_ms(pair_started)
-        return {
-            "ring_instance_id": ring.instance_id,
-            "mouth_instance_id": mouth.instance_id,
-            "ring_confidence": float(ring.confidence),
-            "mouth_confidence": float(mouth.confidence),
-            "association": association,
-            "eligible": False,
-            "robot_ready": False,
-            "warnings": warnings,
-            "rejection_reasons": reasons,
-            "grasp": {"clock_candidates": [], "best_clock_candidate": None},
-            "timing_ms": timing_ms,
-        }
-
-    depth_points_started = time.perf_counter()
-    equivalent_radius = math.sqrt(max(1.0, float(mouth_area)) / math.pi)
-    expand = int(round(equivalent_radius * _safe_float(depth_cfg.get("front_band_expand_ratio"), 0.40)))
-    expand = max(_safe_int(depth_cfg.get("minimum_front_band_px"), 6), expand)
-    expand = min(_safe_int(depth_cfg.get("maximum_front_band_px"), 26), expand)
-    exclusion = _safe_int(depth_cfg.get("mouth_exclusion_px"), 2)
-    ring_erode = _safe_int(depth_cfg.get("mask_erode_px"), 2)
-    front_band = _erode(ring.mask, ring_erode) & _dilate(mouth.mask, expand) & ~_dilate(mouth.mask, exclusion)
-    minimum_depth = _safe_float(depth_cfg.get("minimum_mm"), 150.0)
-    maximum_depth = _safe_float(depth_cfg.get("maximum_mm"), 3000.0)
-    points, pixels = depth_pixels_to_points(depth, front_band, intrinsics, minimum_depth, maximum_depth)
-    band_pixel_count = int(np.count_nonzero(front_band))
-    valid_ratio = float(len(points)) / float(max(1, band_pixel_count))
-    timing_ms["front_depth_points_ms"] = _elapsed_ms(depth_points_started)
-    if len(points) < _safe_int(depth_cfg.get("minimum_valid_points"), 80):
-        reasons.append("insufficient_front_pose_depth")
-    if valid_ratio < _safe_float(quality_cfg.get("minimum_depth_valid_ratio"), 0.32):
-        reasons.append("low_front_pose_depth_valid_ratio")
-
-    plane_started = time.perf_counter()
-    depth_plane = fit_plane_ransac(points, config) if len(points) >= 3 else None
-    timing_ms["plane_ransac_ms"] = _elapsed_ms(plane_started)
-    if depth_plane is None:
-        reasons.append("front_pose_fit_failed")
-        timing_ms["total_ms"] = _elapsed_ms(pair_started)
-        return {
-            "ring_instance_id": ring.instance_id,
-            "mouth_instance_id": mouth.instance_id,
-            "ring_confidence": float(ring.confidence),
-            "mouth_confidence": float(mouth.confidence),
-            "association": association,
-            "front_band_pixel_count": band_pixel_count,
-            "front_plane_point_count": int(len(points)),
-            "depth_valid_ratio": valid_ratio,
-            "eligible": False,
-            "robot_ready": False,
-            "warnings": warnings,
-            "rejection_reasons": reasons,
-            "grasp": {"clock_candidates": [], "best_clock_candidate": None},
-            "timing_ms": timing_ms,
-        }
-    if depth_plane.inlier_ratio < _safe_float(plane_cfg.get("minimum_inlier_ratio"), 0.34):
-        reasons.append("low_plane_inlier_ratio")
-
-    pose_started = time.perf_counter()
-    pose_plane, pose_diagnostics = build_pose_plane(ellipse, intrinsics, points, depth_plane, config)
-    pose_cfg = config.section("pose")
-    disagreement = float(pose_diagnostics.get("normal_disagreement_deg", 0.0))
-    disagreement_warn = _safe_float(pose_cfg.get("normal_disagreement_warning_deg"), 20.0)
-    if disagreement > disagreement_warn:
-        warnings.append("depth_plane_ellipse_pose_disagreement")
-
-    # M37.6.1 stop-loss policy.  A large disagreement between the mouth
-    # ellipse and the local depth plane is still treated as uncertain, but it
-    # no longer has to be reported as an M36 hard geometry failure.  The
-    # default production policy hands the pair to the M37 fallback branch,
-    # where the matched mouth remains available as a soft annular constraint.
-    pose_conflict_signals: List[str] = []
-    hard_limit = _safe_float(pose_cfg.get("maximum_normal_disagreement_deg"), 25.0)
-    if disagreement > hard_limit:
-        pose_conflict_signals.append("depth_plane_ellipse_pose_conflict")
-    conditional_limit = _safe_float(
-        pose_cfg.get("conditional_normal_disagreement_deg"), 18.0
-    )
-    minimum_depth_support = _safe_float(
-        pose_cfg.get("conditional_minimum_depth_plane_inlier_ratio"), 0.55
-    )
-    if (
-        str(pose_diagnostics.get("normal_source")) == "ellipse_stabilized"
-        and disagreement > conditional_limit
-        and depth_plane.inlier_ratio < minimum_depth_support
-    ):
-        pose_conflict_signals.append("ellipse_pose_has_insufficient_depth_support")
-    stabilized_p95 = pose_diagnostics.get("stabilized_residual_p95_mm")
-    if (
-        stabilized_p95 is not None
-        and float(stabilized_p95)
-        > _safe_float(pose_cfg.get("maximum_stabilized_residual_p95_mm"), 8.0)
-    ):
-        pose_conflict_signals.append("ellipse_stabilized_pose_residual_too_high")
-
-    configured_policy = _resolve_pose_conflict_policy(pose_cfg)
-    pose_conflict_handoff_to_m37 = bool(
-        pose_conflict_signals and configured_policy == "fallback_to_m37"
-    )
-    if pose_conflict_signals:
-        warnings.extend(
-            signal for signal in pose_conflict_signals if signal not in warnings
+        reasons.append(
+            "m38a_mouth_ellipse_unavailable"
+            if pose_strategy == "m38_1_front_annulus"
+            else "mouth_ellipse_unavailable"
         )
-        if configured_policy == "hard_reject":
-            reasons.extend(
-                signal for signal in pose_conflict_signals if signal not in reasons
+        timing_ms["total_ms"] = _elapsed_ms(pair_started)
+        return {
+            "ring_instance_id": ring.instance_id,
+            "mouth_instance_id": mouth.instance_id,
+            "ring_confidence": float(ring.confidence),
+            "mouth_confidence": float(mouth.confidence),
+            "association": association,
+            "pose_strategy": pose_strategy,
+            "eligible": False,
+            "robot_ready": False,
+            "warnings": warnings,
+            "rejection_reasons": reasons,
+            "grasp": {"clock_candidates": [], "best_clock_candidate": None},
+            "timing_ms": timing_ms,
+        }
+
+    if pose_strategy == "m38_1_front_annulus":
+        depth_points_started = time.perf_counter()
+        annulus = _m38a_front_annulus_pose(
+            ring,
+            mouth,
+            association,
+            all_rings,
+            depth,
+            intrinsics,
+            config,
+            ellipse,
+        )
+        timing_ms["m38a_annulus_pose_ms"] = _elapsed_ms(depth_points_started)
+        front_band = annulus["annulus_mask"]
+        points = annulus["points"]
+        pixels = annulus["pixels"]
+        band_pixel_count = int(annulus["pixel_count"])
+        valid_ratio = float(annulus["valid_ratio"])
+        depth_plane = annulus.get("plane")
+        reasons.extend(
+            reason
+            for reason in annulus.get("rejection_reasons", [])
+            if reason not in reasons
+        )
+        warnings.extend(
+            warning for warning in annulus.get("warnings", []) if warning not in warnings
+        )
+        if depth_plane is None:
+            timing_ms["total_ms"] = _elapsed_ms(pair_started)
+            return {
+                "ring_instance_id": ring.instance_id,
+                "mouth_instance_id": mouth.instance_id,
+                "ring_confidence": float(ring.confidence),
+                "mouth_confidence": float(mouth.confidence),
+                "association": association,
+                "pose_strategy": pose_strategy,
+                "m38_branch_a": annulus.get("diagnostics") or {},
+                "front_band_pixel_count": band_pixel_count,
+                "front_plane_point_count": int(len(points)),
+                "depth_valid_ratio": valid_ratio,
+                "eligible": False,
+                "robot_ready": False,
+                "warnings": warnings,
+                "rejection_reasons": reasons,
+                "grasp": {"clock_candidates": [], "best_clock_candidate": None},
+                "timing_ms": timing_ms,
+                "_debug": {
+                    "front_band_mask": front_band,
+                    "m38_depth_edge_mask": annulus.get("depth_edge_mask"),
+                    "plane_points": points,
+                    "plane_pixels": pixels,
+                },
+            }
+        pose_plane = depth_plane
+        pose_diagnostics = dict(annulus.get("diagnostics") or {})
+        configured_policy = "m38_1_direct_annulus_plane"
+        pose_conflict_signals: List[str] = []
+        pose_conflict_handoff_to_m37 = False
+        timing_ms["front_depth_points_ms"] = timing_ms["m38a_annulus_pose_ms"]
+        timing_ms["plane_ransac_ms"] = 0.0
+        pose_started = time.perf_counter()
+    else:
+        depth_points_started = time.perf_counter()
+        equivalent_radius = math.sqrt(max(1.0, float(mouth_area)) / math.pi)
+        expand = int(round(equivalent_radius * _safe_float(depth_cfg.get("front_band_expand_ratio"), 0.40)))
+        expand = max(_safe_int(depth_cfg.get("minimum_front_band_px"), 6), expand)
+        expand = min(_safe_int(depth_cfg.get("maximum_front_band_px"), 26), expand)
+        exclusion = _safe_int(depth_cfg.get("mouth_exclusion_px"), 2)
+        ring_erode = _safe_int(depth_cfg.get("mask_erode_px"), 2)
+        front_band = _erode(ring.mask, ring_erode) & _dilate(mouth.mask, expand) & ~_dilate(mouth.mask, exclusion)
+        minimum_depth = _safe_float(depth_cfg.get("minimum_mm"), 150.0)
+        maximum_depth = _safe_float(depth_cfg.get("maximum_mm"), 3000.0)
+        points, pixels = depth_pixels_to_points(depth, front_band, intrinsics, minimum_depth, maximum_depth)
+        band_pixel_count = int(np.count_nonzero(front_band))
+        valid_ratio = float(len(points)) / float(max(1, band_pixel_count))
+        timing_ms["front_depth_points_ms"] = _elapsed_ms(depth_points_started)
+        if len(points) < _safe_int(depth_cfg.get("minimum_valid_points"), 80):
+            reasons.append("insufficient_front_pose_depth")
+        if valid_ratio < _safe_float(quality_cfg.get("minimum_depth_valid_ratio"), 0.32):
+            reasons.append("low_front_pose_depth_valid_ratio")
+
+        plane_started = time.perf_counter()
+        depth_plane = fit_plane_ransac(points, config) if len(points) >= 3 else None
+        timing_ms["plane_ransac_ms"] = _elapsed_ms(plane_started)
+        if depth_plane is None:
+            reasons.append("front_pose_fit_failed")
+            timing_ms["total_ms"] = _elapsed_ms(pair_started)
+            return {
+                "ring_instance_id": ring.instance_id,
+                "mouth_instance_id": mouth.instance_id,
+                "ring_confidence": float(ring.confidence),
+                "mouth_confidence": float(mouth.confidence),
+                "association": association,
+                "pose_strategy": pose_strategy,
+                "front_band_pixel_count": band_pixel_count,
+                "front_plane_point_count": int(len(points)),
+                "depth_valid_ratio": valid_ratio,
+                "eligible": False,
+                "robot_ready": False,
+                "warnings": warnings,
+                "rejection_reasons": reasons,
+                "grasp": {"clock_candidates": [], "best_clock_candidate": None},
+                "timing_ms": timing_ms,
+            }
+        if depth_plane.inlier_ratio < _safe_float(plane_cfg.get("minimum_inlier_ratio"), 0.34):
+            reasons.append("low_plane_inlier_ratio")
+
+        pose_started = time.perf_counter()
+        pose_plane, pose_diagnostics = build_pose_plane(ellipse, intrinsics, points, depth_plane, config)
+        pose_cfg = config.section("pose")
+        disagreement = float(pose_diagnostics.get("normal_disagreement_deg", 0.0))
+        disagreement_warn = _safe_float(pose_cfg.get("normal_disagreement_warning_deg"), 20.0)
+        if disagreement > disagreement_warn:
+            warnings.append("depth_plane_ellipse_pose_disagreement")
+
+        # M37.6.1 stop-loss policy.  A large disagreement between the mouth
+        # ellipse and the local depth plane is still treated as uncertain, but it
+        # no longer has to be reported as an M36 hard geometry failure.  The
+        # default production policy hands the pair to the M37 fallback branch,
+        # where the matched mouth remains available as a soft annular constraint.
+        pose_conflict_signals = []
+        hard_limit = _safe_float(pose_cfg.get("maximum_normal_disagreement_deg"), 25.0)
+        if disagreement > hard_limit:
+            pose_conflict_signals.append("depth_plane_ellipse_pose_conflict")
+        conditional_limit = _safe_float(
+            pose_cfg.get("conditional_normal_disagreement_deg"), 18.0
+        )
+        minimum_depth_support = _safe_float(
+            pose_cfg.get("conditional_minimum_depth_plane_inlier_ratio"), 0.55
+        )
+        if (
+            str(pose_diagnostics.get("normal_source")) == "ellipse_stabilized"
+            and disagreement > conditional_limit
+            and depth_plane.inlier_ratio < minimum_depth_support
+        ):
+            pose_conflict_signals.append("ellipse_pose_has_insufficient_depth_support")
+        stabilized_p95 = pose_diagnostics.get("stabilized_residual_p95_mm")
+        if (
+            stabilized_p95 is not None
+            and float(stabilized_p95)
+            > _safe_float(pose_cfg.get("maximum_stabilized_residual_p95_mm"), 8.0)
+        ):
+            pose_conflict_signals.append("ellipse_stabilized_pose_residual_too_high")
+
+        configured_policy = _resolve_pose_conflict_policy(pose_cfg)
+        pose_conflict_handoff_to_m37 = bool(
+            pose_conflict_signals and configured_policy == "fallback_to_m37"
+        )
+        if pose_conflict_signals:
+            warnings.extend(
+                signal for signal in pose_conflict_signals if signal not in warnings
             )
-        elif configured_policy == "fallback_to_m37":
-            reasons.append("pose_conflict_fallback_to_m37")
-            warnings.append("m36_pose_conflict_handoff_to_m37")
-        else:
-            warnings.append("m36_pose_conflict_warning_only")
+            if configured_policy == "hard_reject":
+                reasons.extend(
+                    signal for signal in pose_conflict_signals if signal not in reasons
+                )
+            elif configured_policy == "fallback_to_m37":
+                reasons.append("pose_conflict_fallback_to_m37")
+                warnings.append("m36_pose_conflict_handoff_to_m37")
+            else:
+                warnings.append("m36_pose_conflict_warning_only")
 
     center_uv = tuple(ellipse["center_uv"])
     center_camera = ray_plane_intersection(center_uv, intrinsics, pose_plane)
@@ -3088,6 +3444,10 @@ def analyze_ring_pair(
         "ring_confidence": float(ring.confidence),
         "mouth_confidence": float(mouth.confidence),
         "association": association,
+        "pose_strategy": pose_strategy,
+        "m38_branch_a": (
+            dict(pose_diagnostics) if pose_strategy == "m38_1_front_annulus" else None
+        ),
         "ring_area_px": int(ring_area),
         "mouth_area_px": int(mouth_area),
         "front_band_pixel_count": band_pixel_count,
@@ -3151,6 +3511,11 @@ def analyze_ring_pair(
         "timing_ms": timing_ms,
         "_debug": {
             "front_band_mask": front_band,
+            "m38_depth_edge_mask": (
+                annulus.get("depth_edge_mask")
+                if pose_strategy == "m38_1_front_annulus"
+                else None
+            ),
             "plane_points": points,
             "plane_pixels": pixels,
             "plane_inlier_mask": depth_plane.inlier_mask,
@@ -3244,6 +3609,9 @@ def analyze_scene(
     scene_started = time.perf_counter()
     scene_timing: Dict[str, float] = {}
     optimization = _optimization_settings(config)
+    scene_pose_strategy = (
+        "m38_1_front_annulus" if _m38a_runtime_enabled(config) else "legacy_m36"
+    )
     mode = str(optimization.get("mode") or "exhaustive")
     staged = bool(optimization.get("enabled")) and mode == "staged"
     first_valid = bool(optimization.get("enabled")) and mode == "first_valid"
@@ -3912,6 +4280,7 @@ def analyze_scene(
     return {
         "rings_detected": len(rings),
         "mouths_detected": len(mouths),
+        "pose_strategy": scene_pose_strategy,
         "matched_pairs": len(matches),
         "global_matched_pairs": len(all_matches),
         "candidate_scope": {
@@ -3933,6 +4302,8 @@ def analyze_scene(
         "selected_clock_angle_deg_cw_from_12": selected_clock_angle,
         "selected_clock_search_batch": selected_clock_search_batch,
         "selection_scope": (
+            "M38.1_front_annulus_first_valid_target_early_exit_adaptive_8_plus_4_clock_search"
+            if scene_pose_strategy == "m38_1_front_annulus" and first_valid else
             "M36.4.2_first_valid_target_early_exit_adaptive_8_plus_4_clock_search"
             if first_valid else
             (

@@ -101,6 +101,15 @@ def draw_overlay(
                 _draw_polygon(output, box_polygon, (255, 220, 0), 2)
 
     for item in scene.get("instances", []):
+        if str(item.get("pose_strategy") or "") == "m38_1_front_annulus":
+            annulus_mask = ((item.get("_debug") or {}).get("front_band_mask"))
+            if (
+                isinstance(annulus_mask, np.ndarray)
+                and annulus_mask.shape == output.shape[:2]
+            ):
+                annulus_overlay = output.copy()
+                annulus_overlay[annulus_mask.astype(bool)] = (255, 220, 0)
+                output = cv2.addWeighted(annulus_overlay, 0.28, output, 0.72, 0.0)
         center_uv = (item.get("mouth_ellipse") or {}).get("center_uv")
         if not center_uv:
             continue
@@ -112,7 +121,11 @@ def draw_overlay(
         ring_color = (0, 255, 255) if selected else ((0, 220, 0) if eligible else (0, 0, 255))
         cv2.circle(output, center, 5, ring_color, -1, cv2.LINE_AA)
         pose_source = str((item.get("pose") or {}).get("normal_source") or "depth_plane")
-        source_tag = "E" if pose_source == "ellipse_stabilized" else "D"
+        source_tag = (
+            "A"
+            if pose_source == "m38_1_front_annulus_depth_plane"
+            else ("E" if pose_source == "ellipse_stabilized" else "D")
+        )
         best = (item.get("grasp") or {}).get("best_clock_candidate") or {}
         best_hour = best.get("clock_hour")
         label = "R%d %s z=%.0f tilt=%.1f[%s] best=%s" % (

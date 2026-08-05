@@ -1,16 +1,13 @@
-"""M37.6 depth-layer-first hollow-cylinder multi-surface grasp selection.
+"""M38.1 depth-layer-first hybrid foam-ring grasp selection.
 
-A single Runtime segmentation result and exact RGB-D frame feed both branches.
-All foam rings are first assigned a robust front-surface depth and grouped into
-layers.  Layers are processed from nearest to farthest.  Within one layer the
-established M36 mouth-visible branch is attempted first; only then are
-unmatched side-lying rings evaluated by M37.
+A single Runtime segmentation result and exact RGB-D frame feed all retained
+branches. Rings are grouped by robust front-surface depth. Within each layer,
+M38.1 branch A first handles clearly visible openings by fitting the directly
+observed 3-D front annulus. Legacy M36 remains an optional mouth-visible
+fallback, followed by the unchanged M37.6 hollow-cylinder side-ring branch.
 
-M37 uses a bounded fast-first policy: candidates are tried in surface-depth
-order with staged screen/final validation.  M37.6.1 disables online
-``local_accurate`` refinement, so an uncertain scene returns without spending
-another long refinement cycle.  Saved RGB-D bundles may still be replayed
-offline for diagnosis.
+M37.6.1 stop-loss behavior remains active: depth-gradient is diagnostic only
+and online ``local_accurate`` refinement is disabled.
 """
 
 from __future__ import annotations
@@ -106,6 +103,11 @@ class HybridGraspConfig:
     # constraint rather than a reason to exclude the ring from M37.6.
     multi_surface_include_m36_rejected: bool = True
 
+    # M38.1 branch A: clear mouth -> direct 3-D front-annulus plane.  M36 and
+    # M37.6 remain available as controlled fallbacks during validation.
+    m38_branch_a_enabled: bool = False
+    m38_branch_a_fallback_to_m36: bool = True
+
     @classmethod
     def from_mapping(cls, raw_config: Mapping[str, Any]) -> "HybridGraspConfig":
         section = raw_config.get("hybrid_grasp") or {}
@@ -123,6 +125,9 @@ class HybridGraspConfig:
         depth_cfg = raw_config.get("depth") or {}
         if not isinstance(depth_cfg, Mapping):
             depth_cfg = {}
+        m38_branch_a = raw_config.get("m38_branch_a") or {}
+        if not isinstance(m38_branch_a, Mapping):
+            m38_branch_a = {}
         return cls(
             enabled=bool(section.get("enabled", False)),
             prefer_mouth_visible=bool(section.get("prefer_mouth_visible", True)),
@@ -212,6 +217,10 @@ class HybridGraspConfig:
             ),
             multi_surface_include_m36_rejected=bool(
                 section.get("multi_surface_include_m36_rejected", True)
+            ),
+            m38_branch_a_enabled=bool(m38_branch_a.get("enabled", False)),
+            m38_branch_a_fallback_to_m36=bool(
+                m38_branch_a.get("fallback_to_m36", True)
             ),
         )
 
@@ -553,6 +562,22 @@ def _scoped_geometry_config(
     return GeometryConfig(raw)
 
 
+def _scoped_m38a_geometry_config(
+    geometry_config: GeometryConfig,
+    allowed_ring_ids: Sequence[int],
+) -> GeometryConfig:
+    raw = deepcopy(geometry_config.raw)
+    raw["candidate_scope"] = {
+        "allowed_ring_instance_ids": [int(value) for value in allowed_ring_ids],
+        "reason": "M38.1_clear_mouth_front_annulus_scope",
+    }
+    runtime = raw.get("_runtime")
+    runtime = dict(runtime) if isinstance(runtime, Mapping) else {}
+    runtime["pose_strategy"] = "m38_1_front_annulus"
+    raw["_runtime"] = runtime
+    return GeometryConfig(raw)
+
+
 def _deferred_side_record(
     instance: SegmentationInstance,
     *,
@@ -701,6 +726,23 @@ def _m37_candidate(fit: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _m38a_candidate(
+    candidate: Mapping[str, Any],
+    depth_record: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    document = deepcopy(dict(candidate))
+    document["grasp_branch"] = "m38_1_clear_mouth_front_annulus_rim_pinch"
+    document["grasp_mode"] = "rim_pinch"
+    document["pose_source"] = "m38_1_front_annulus_depth_plane"
+    target = document.get("target") if isinstance(document.get("target"), dict) else {}
+    if depth_record:
+        target["surface_depth_mm"] = depth_record.get("surface_depth_mm")
+        target["depth_layer_index"] = depth_record.get("depth_layer_index")
+        target["depth_rank"] = depth_record.get("depth_rank")
+    document["target"] = target
+    return document
+
+
 def _m36_candidate(
     candidate: Mapping[str, Any],
     depth_record: Optional[Mapping[str, Any]],
@@ -805,11 +847,16 @@ def run_hybrid_grasp(
     side_fits: List[Dict[str, Any]] = []
     fast_attempted_ids: set[int] = set()
     selected_side: Optional[Dict[str, Any]] = None
+    selected_m38a_candidate: Optional[Dict[str, Any]] = None
+    selected_m38a_scene: Optional[Dict[str, Any]] = None
+    last_m38a_scene: Optional[Dict[str, Any]] = None
     selected_m36_candidate: Optional[Dict[str, Any]] = None
     selected_m36_scene: Optional[Dict[str, Any]] = None
     last_m36_scene: Optional[Dict[str, Any]] = None
     selected_branch = "none"
     selected_layer_index: Optional[int] = None
+    m38a_total_ms = 0.0
+    m38a_attempt_count = 0
     m36_total_ms = 0.0
     m36_attempt_count = 0
     m37_lightweight_preselection_ms = 0.0
@@ -835,8 +882,11 @@ def run_hybrid_grasp(
             "anchor_depth_mm": layer.get("anchor_depth_mm"),
             "maximum_depth_mm": layer.get("maximum_depth_mm"),
             "ring_instance_ids": layer_ids,
+            "m38a_candidate_ring_ids": [],
             "m36_candidate_ring_ids": [],
             "m37_candidate_ring_ids": [],
+            "m38a_attempted": False,
+            "m38a_candidate_found": False,
             "m36_attempted": False,
             "m36_candidate_found": False,
             "m37_fast_attempted_ids": [],
@@ -845,40 +895,86 @@ def run_hybrid_grasp(
             "selected_branch": "none",
         }
 
-        m36_ids = [value for value in layer_ids if value in matched_ids]
-        layer_summary["m36_candidate_ring_ids"] = list(m36_ids)
-        if m36_ids and hybrid_config.prefer_mouth_visible:
-            m36_attempt_count += 1
-            layer_summary["m36_attempted"] = True
-            m36_started = time.perf_counter()
-            m36_scene = analyze_fn(
-                instances,
-                depth_mm,
-                intrinsics,
-                _scoped_geometry_config(geometry_config, m36_ids),
-            )
-            m36_elapsed = _elapsed_ms(m36_started)
-            m36_total_ms += m36_elapsed
-            last_m36_scene = m36_scene
-            layer_summary["m36_ms"] = float(m36_elapsed)
-            original = (
-                m36_scene.get("robot_candidate")
-                if isinstance(m36_scene.get("robot_candidate"), Mapping)
-                else None
-            )
-            if original is not None:
-                ring_id = int((original.get("target") or {}).get("ring_instance_id"))
-                selected_m36_candidate = _m36_candidate(
-                    original,
-                    depth_by_id.get(ring_id),
+        mouth_visible_ids = [value for value in layer_ids if value in matched_ids]
+        layer_summary["m38a_candidate_ring_ids"] = list(mouth_visible_ids)
+        layer_summary["m36_candidate_ring_ids"] = list(mouth_visible_ids)
+        if mouth_visible_ids and hybrid_config.prefer_mouth_visible:
+            if hybrid_config.m38_branch_a_enabled:
+                m38a_attempt_count += 1
+                layer_summary["m38a_attempted"] = True
+                m38a_started = time.perf_counter()
+                m38a_scene = analyze_fn(
+                    instances,
+                    depth_mm,
+                    intrinsics,
+                    _scoped_m38a_geometry_config(
+                        geometry_config,
+                        mouth_visible_ids,
+                    ),
                 )
-                selected_m36_scene = m36_scene
-                selected_branch = "m36_mouth_visible_rim_pinch"
-                selected_layer_index = layer_index
-                layer_summary["m36_candidate_found"] = True
-                layer_summary["selected_branch"] = selected_branch
-                active_layer_summaries.append(layer_summary)
-                break
+                m38a_elapsed = _elapsed_ms(m38a_started)
+                m38a_total_ms += m38a_elapsed
+                last_m38a_scene = m38a_scene
+                layer_summary["m38a_ms"] = float(m38a_elapsed)
+                original_m38a = (
+                    m38a_scene.get("robot_candidate")
+                    if isinstance(m38a_scene.get("robot_candidate"), Mapping)
+                    else None
+                )
+                if original_m38a is not None:
+                    ring_id = int(
+                        (original_m38a.get("target") or {}).get("ring_instance_id")
+                    )
+                    selected_m38a_candidate = _m38a_candidate(
+                        original_m38a,
+                        depth_by_id.get(ring_id),
+                    )
+                    selected_m38a_scene = m38a_scene
+                    selected_branch = "m38_1_clear_mouth_front_annulus_rim_pinch"
+                    selected_layer_index = layer_index
+                    layer_summary["m38a_candidate_found"] = True
+                    layer_summary["selected_branch"] = selected_branch
+                    active_layer_summaries.append(layer_summary)
+                    break
+
+            if (
+                selected_m38a_candidate is None
+                and (
+                    not hybrid_config.m38_branch_a_enabled
+                    or hybrid_config.m38_branch_a_fallback_to_m36
+                )
+            ):
+                m36_attempt_count += 1
+                layer_summary["m36_attempted"] = True
+                m36_started = time.perf_counter()
+                m36_scene = analyze_fn(
+                    instances,
+                    depth_mm,
+                    intrinsics,
+                    _scoped_geometry_config(geometry_config, mouth_visible_ids),
+                )
+                m36_elapsed = _elapsed_ms(m36_started)
+                m36_total_ms += m36_elapsed
+                last_m36_scene = m36_scene
+                layer_summary["m36_ms"] = float(m36_elapsed)
+                original = (
+                    m36_scene.get("robot_candidate")
+                    if isinstance(m36_scene.get("robot_candidate"), Mapping)
+                    else None
+                )
+                if original is not None:
+                    ring_id = int((original.get("target") or {}).get("ring_instance_id"))
+                    selected_m36_candidate = _m36_candidate(
+                        original,
+                        depth_by_id.get(ring_id),
+                    )
+                    selected_m36_scene = m36_scene
+                    selected_branch = "m36_mouth_visible_rim_pinch"
+                    selected_layer_index = layer_index
+                    layer_summary["m36_candidate_found"] = True
+                    layer_summary["selected_branch"] = selected_branch
+                    active_layer_summaries.append(layer_summary)
+                    break
 
         if not hybrid_config.side_ring_fallback_enabled:
             active_layer_summaries.append(layer_summary)
@@ -1129,13 +1225,18 @@ def run_hybrid_grasp(
         if selected_side is not None or maximum_side_attempts_reached:
             break
 
-    # Reuse the latest scoped M36 scene when available.  Only a scene with no
-    # M36 layer attempt needs the cheap empty-scope diagnostic pass.
+    # Reuse the selected branch scene so its pose diagnostics and instance
+    # rejection reasons remain visible.  The cheap empty M36 scope is only
+    # needed when neither mouth-visible branch ran.
     m36_base_scene_ms = 0.0
-    if selected_m36_scene is not None:
+    if selected_m38a_scene is not None:
+        result_scene = selected_m38a_scene
+    elif selected_m36_scene is not None:
         result_scene = selected_m36_scene
     elif last_m36_scene is not None:
         result_scene = last_m36_scene
+    elif last_m38a_scene is not None:
+        result_scene = last_m38a_scene
     else:
         base_started = time.perf_counter()
         result_scene = analyze_fn(
@@ -1147,7 +1248,7 @@ def run_hybrid_grasp(
         m36_base_scene_ms = _elapsed_ms(base_started)
         m36_total_ms += m36_base_scene_ms
     if not isinstance(result_scene, dict):
-        raise ValueError("M36 analyze_scene must return a dict")
+        raise ValueError("mouth-visible analyze_scene must return a dict")
 
     # Explicitly mark every unattempted side candidate as deferred.
     side_candidate_ids = {
@@ -1178,13 +1279,21 @@ def run_hybrid_grasp(
         )
 
     selected_candidate: Optional[Dict[str, Any]]
+    original_m38a_candidate = (
+        selected_m38a_scene.get("robot_candidate")
+        if selected_m38a_scene is not None
+        and isinstance(selected_m38a_scene.get("robot_candidate"), Mapping)
+        else None
+    )
     original_m36_candidate = (
         selected_m36_scene.get("robot_candidate")
         if selected_m36_scene is not None
         and isinstance(selected_m36_scene.get("robot_candidate"), Mapping)
         else None
     )
-    if selected_m36_candidate is not None:
+    if selected_m38a_candidate is not None:
+        selected_candidate = selected_m38a_candidate
+    elif selected_m36_candidate is not None:
         selected_candidate = selected_m36_candidate
     elif selected_side is not None:
         selected_candidate = _m37_candidate(selected_side)
@@ -1222,20 +1331,30 @@ def run_hybrid_grasp(
     result["association_debug"] = association_debug
     result["unmatched_ring_ids"] = [int(item.instance_id) for item in unmatched_rings]
     result["unmatched_mouth_ids"] = [int(item.instance_id) for item in unmatched_mouths]
-    result["m36_eligible_count"] = result_scene.get("eligible_count")
+    result["m38_1_eligible_count"] = (
+        selected_m38a_scene.get("eligible_count")
+        if selected_m38a_scene is not None
+        else (last_m38a_scene.get("eligible_count") if last_m38a_scene is not None else 0)
+    )
+    result["m36_eligible_count"] = (
+        selected_m36_scene.get("eligible_count")
+        if selected_m36_scene is not None
+        else (last_m36_scene.get("eligible_count") if last_m36_scene is not None else 0)
+    )
     if selected_side is not None:
         result["eligible_count"] = 1
         result["selected_ring_instance_id"] = selected_side_id
         result["selected_clock_hour"] = None
         result["selected_clock_angle_deg_cw_from_12"] = None
         result["selected_clock_search_batch"] = None
+    result["m38_1_robot_candidate"] = deepcopy(original_m38a_candidate)
     result["m36_robot_candidate"] = deepcopy(original_m36_candidate)
     result["robot_candidate"] = selected_candidate
     result["selected_grasp_branch"] = selected_branch
     result["depth_layering"] = {
         "enabled": bool(hybrid_config.depth_layering_enabled),
         "ordering_rule": (
-            "depth_layer_ascending_then_m36_then_M37.6_multisurface"
+            "depth_layer_ascending_then_M38.1_annulus_then_m36_then_M37.6_multisurface"
         ),
         "surface_depth_statistic": f"p{hybrid_config.surface_depth_percentile:g}",
         "layer_tolerance_mm": float(hybrid_config.depth_layer_tolerance_mm),
@@ -1257,10 +1376,11 @@ def run_hybrid_grasp(
     }
     result["hybrid_grasp"] = {
         "enabled": True,
-        "policy_version": "M37.5.1",
+        "policy_version": "M38.1",
         "branch_priority": [
             "nearest_depth_layer",
-            "same_layer_m36_mouth_visible_rim_pinch",
+            "same_layer_M38.1_clear_mouth_front_annulus_rim_pinch",
+            "same_layer_m36_legacy_fallback",
             "same_layer_m37_lightweight_preselection",
             "preliminary_pose_screen",
             "delayed_final_pose_validation",
@@ -1269,7 +1389,13 @@ def run_hybrid_grasp(
         ],
         "selected_branch": selected_branch,
         "selected_depth_layer_index": selected_layer_index,
-        "fallback_triggered": bool(selected_branch == "m37_side_ring_near_visible_crown"),
+        "fallback_triggered": bool(
+            selected_branch in {
+                "m36_mouth_visible_rim_pinch",
+                "m37_side_ring_near_visible_crown",
+            }
+        ),
+        "m38_1_candidate_found": bool(selected_m38a_candidate is not None),
         "m36_candidate_found": bool(selected_m36_candidate is not None),
         "m37_candidate_found": bool(selected_side is not None),
         "target_found": bool(selected_candidate is not None),
@@ -1277,6 +1403,7 @@ def run_hybrid_grasp(
             "association_prepass_ms": float(association_ms),
             "depth_preselection_ms": float(depth_preselection_ms),
             "depth_layer_build_ms": float(depth_layer_build_ms),
+            "m38_1_branch_a_ms": float(m38a_total_ms),
             "m36_branch_ms": float(m36_total_ms),
             "m36_base_scene_ms": float(m36_base_scene_ms),
             "m37_lightweight_preselection_ms": float(m37_lightweight_preselection_ms),
@@ -1292,6 +1419,47 @@ def run_hybrid_grasp(
             ),
             "total_ms": float(total_ms),
         },
+    }
+    m38a_diagnostic_scene = selected_m38a_scene or last_m38a_scene
+    m38a_pair_results: List[Dict[str, Any]] = []
+    if isinstance(m38a_diagnostic_scene, Mapping):
+        for item in m38a_diagnostic_scene.get("instances") or []:
+            if not isinstance(item, Mapping):
+                continue
+            annulus = item.get("m38_branch_a")
+            if not isinstance(annulus, Mapping):
+                continue
+            plane = item.get("plane") if isinstance(item.get("plane"), Mapping) else {}
+            m38a_pair_results.append({
+                "ring_instance_id": item.get("ring_instance_id"),
+                "mouth_instance_id": item.get("mouth_instance_id"),
+                "eligible": bool(item.get("eligible", False)),
+                "tilt_deg": item.get("tilt_deg"),
+                "opening_clear": bool(annulus.get("opening_clear", False)),
+                "annulus_point_count": annulus.get("annulus_point_count"),
+                "annulus_depth_valid_ratio": annulus.get("annulus_depth_valid_ratio"),
+                "angular_coverage_deg": annulus.get("angular_coverage_deg"),
+                "inlier_angular_coverage_deg": annulus.get("inlier_angular_coverage_deg"),
+                "plane_inlier_ratio": plane.get("inlier_ratio"),
+                "plane_residual_p95_mm": plane.get("residual_p95_mm"),
+                "rejection_reasons": list(item.get("rejection_reasons") or []),
+                "warnings": list(item.get("warnings") or []),
+            })
+    result["m38_1_branch_a"] = {
+        "enabled": bool(hybrid_config.m38_branch_a_enabled),
+        "pose_source": "direct_3d_front_annulus_plane",
+        "fallback_to_m36": bool(hybrid_config.m38_branch_a_fallback_to_m36),
+        "attempt_count": int(m38a_attempt_count),
+        "candidate_found": bool(selected_m38a_candidate is not None),
+        "selected_ring_instance_id": (
+            int((selected_m38a_candidate.get("target") or {}).get("ring_instance_id"))
+            if selected_m38a_candidate is not None
+            else None
+        ),
+        "pair_results": m38a_pair_results,
+        "timing_ms": float(m38a_total_ms),
+        "legacy_m36_retained": True,
+        "m37_6_retained": True,
     }
     result["side_ring_branch"] = {
         "enabled": bool(hybrid_config.side_ring_fallback_enabled),
