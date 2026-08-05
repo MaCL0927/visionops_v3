@@ -1,5 +1,5 @@
-schema_version: "6.2"
-task: foam_ring_rim_pinch_m38_3_depth_partial_opening_constrained_cylinder
+schema_version: "6.3"
+task: foam_ring_rim_pinch_m38_4_branch_c_fast_reject
 
 classes:
   foam_ring: foam_ring
@@ -521,10 +521,10 @@ online_geometry:
 # M38.1 branch A: when a ring mouth is clearly visible, fit the directly
 # observed 3-D foam annulus around that mouth. The annulus plane normal is used
 # as the ring axis; the 2-D ellipse only localizes/measures the opening.
-# Legacy M36 remains an optional fallback and M37.6 remains fully retained.
+# Legacy M36/M37.6 code remains retained but is disabled by M38.4 production policy.
 m38_branch_a:
   enabled: true
-  fallback_to_m36: true
+  fallback_to_m36: false
 
   # Clear-opening gate. BBox-fallback associations and extremely flat or
   # irregular mouth masks are not trusted by branch A.
@@ -549,8 +549,8 @@ m38_branch_a:
   point_sample_stride: 1
 
   # A real front annulus must be observable around a sufficiently wide angular
-  # span and must support one compact 3-D plane. Failure falls back to M36 and
-  # then to the retained M37.6 branch.
+  # span and must support one compact 3-D plane. Failure proceeds to M38.3 and
+  # then to the explicit M38.4 branch-C decision.
   angular_sector_count: 16
   minimum_angular_coverage_deg: 180.0
   minimum_inlier_angular_coverage_deg: 160.0
@@ -567,7 +567,7 @@ m38_branch_a:
 # only an outer side surface and no opening/end evidence is never accepted.
 m38_branch_b:
   enabled: true
-  fallback_to_m36: true
+  fallback_to_m36: false
   maximum_candidates_per_trigger: 4
 
   # M38.3 opening evidence. A segmented mouth enters branch B only when it is
@@ -654,12 +654,25 @@ m38_branch_b:
   maximum_candidate_tilt_deg: 90.0
   robot_safe_max_tilt_deg: 82.0
 
+# M38.4 branch C: after M38.1 and M38.3 exhaust observable opening evidence,
+# explicitly reject the trigger instead of asking M36/M37.6 to infer a hidden
+# opening from a nearly pure side surface. This is required by the current
+# gripper, which supports inner/outer rim pinch only.
+m38_branch_c:
+  enabled: true
+  fast_terminate: true
+  fallback_to_m36: false
+  fallback_to_m37_6: false
+  operator_action: turn_or_agitate_box
+
 hybrid_grasp:
-  # M37.4 unified trigger policy. All rings are ranked by robust front-surface
-  # depth and grouped into layers before either branch performs expensive work.
+  # M38.4 evidence-first trigger policy. Depth records remain available for
+  # diagnostics and optional legacy comparison, but production does not run M36/M37.6.
   enabled: true
   prefer_mouth_visible: true
-  side_ring_fallback_enabled: true
+  # M38.4 temporarily disables the legacy branches while retaining their code.
+  legacy_m36_enabled: false
+  side_ring_fallback_enabled: false
   side_ring_only_unmatched: true
   # M37.6 keeps a mouth-matched ring eligible after M36 rejects it. The mouth
   # becomes an optional annular-face constraint for the unified hollow model.
@@ -670,9 +683,8 @@ hybrid_grasp:
   depth_layering:
     enabled: true
     # Rings whose robust front-surface depths differ by no more than this value
-    # are treated as the same physical layer for retained M36/M37.6 fallback.
-    # M38.1 and M38.3 scan all evidence-backed openings globally so an
-    # opening is not delayed by a shallower expensive M37.6 fit.
+    # remain grouped for diagnostics and optional legacy comparison. M38.1 and
+    # M38.3 scan all evidence-backed openings globally.
     layer_tolerance_mm: 30.0
     surface_percentile: 25.0
     mask_erode_px: 3

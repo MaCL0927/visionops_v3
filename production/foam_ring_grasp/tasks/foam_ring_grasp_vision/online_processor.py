@@ -738,7 +738,7 @@ class OnlineGeometryProcessor:
             )
             cv2.putText(
                 overlay,
-                "M38.3 hybrid branch: " + branch_label,
+                "M38.4 hybrid branch: " + branch_label,
                 (10, max(36, overlay.shape[0] - 12)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.45,
@@ -819,7 +819,7 @@ class OnlineGeometryProcessor:
             "request_id": prepared.request_id,
             "robot_ready": False,
             "robot_ready_reason": (
-                "M36.5 returns camera-frame candidate data only; hand-eye transform, "
+                "M38.4 returns camera-frame candidate/rejection data only; hand-eye transform, "
                 "robot reachability and final robot protocol are not enabled"
             ),
             "capture_id": capture_id,
@@ -889,6 +889,7 @@ class OnlineGeometryProcessor:
                 "geometry_optimization": self.raw_config.get("geometry_optimization") or {},
                 "m38_branch_a": self.raw_config.get("m38_branch_a") or {},
                 "m38_branch_b": self.raw_config.get("m38_branch_b") or {},
+                "m38_branch_c": self.raw_config.get("m38_branch_c") or {},
                 "hybrid_grasp": self.raw_config.get("hybrid_grasp") or {},
                 "side_ring_template": self.raw_config.get("side_ring_template") or {},
             },

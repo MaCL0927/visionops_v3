@@ -334,9 +334,13 @@ M37.6.1 将 depth-gradient 降为纯诊断证据，关闭在线 `local_accurate`
 
 M38.1 全局优先处理 `foam_ring + ring_mouth` 配对且开口证据清楚的实例。算法从开口外围构造泡沫端面环带，剔除内孔、其他圆环、分割边缘和深度跳变区域，再使用三维点云 RANSAC/SVD 直接拟合端面平面；二维椭圆只负责开口定位与完整性检查，不再用于推导三维倾角。通过 M38.1 后继续沿用原有钟点搜索、内外夹持和全夹爪碰撞验证。
 
-原 M36 和 M37.6 均保留：M38.1 失败时可按配置回退 M36，随后仍可进入未改动的 M37.6 侧躺分支。生产开关为 `m38_branch_a.enabled`，M36 回退开关为 `m38_branch_a.fallback_to_m36`。完整算法、配置、输出字段和回放方式见 `docs/M38.1_CLEAR_MOUTH_FRONT_ANNULUS.md`。
+原 M36 和 M37.6 代码仍保留；M38.4 生产配置暂时关闭两者，仅执行 M38.1、M38.3 和显式分支 C。完整算法、配置、输出字段和回放方式见 `docs/M38.1_CLEAR_MOUTH_FRONT_ANNULUS.md`。
 ## M38.3 分支 B：深度开口证据约束的局部圆柱
 
 M38.3 修复 M38.2 对 `ring_mouth` 分割过度依赖的问题。对于未配对的 `foam_ring`，算法会在实例自身深度中查找偏心深孔及其周围近侧端部支撑；对于已经分割的 mouth，只有明显偏心的部分开口才进入分支 B。轴线不再自由三维搜索，而是约束其图像投影必须从 ring 主体指向观测开口，仅采样有限的相机视向分量，并以已知外半径执行小规模局部精修。
 
-拟合通过后，M38.3 在恢复的三维开口平面上使用名义内外半径生成内外夹持边界，避免半侧躺投影下二维 mask 射线边界退化。只看到外侧壁、没有开口/端部证据的实例仍会拒绝；邻居、箱体、完整夹爪和运动碰撞检查继续拥有最终否决权。当前顺序为：全局 M38.1 → 全局 M38.3 → 按深度层回退 M36/M37.6，旧 M38.2 实现仅作为历史回放保留。生产开关仍为 `m38_branch_b.enabled`，独立回放脚本为 `production/foam_ring_grasp/scripts/replay_m38_3_branch_b.py`。完整说明见 `docs/M38.3_DEPTH_PARTIAL_OPENING_CONSTRAINED_CYLINDER.md`。
+拟合通过后，M38.3 在恢复的三维开口平面上使用名义内外半径生成内外夹持边界，避免半侧躺投影下二维 mask 射线边界退化。只看到外侧壁、没有开口/端部证据的实例仍会拒绝；邻居、箱体、完整夹爪和运动碰撞检查继续拥有最终否决权。旧 M38.2 实现仅作为历史回放保留。生产开关仍为 `m38_branch_b.enabled`，独立回放脚本为 `production/foam_ring_grasp/scripts/replay_m38_3_branch_b.py`。完整说明见 `docs/M38.3_DEPTH_PARTIAL_OPENING_CONSTRAINED_CYLINDER.md`。
+
+## M38.4 分支 C：显式拒绝与快速终止
+
+M38.4 将 M38.1/M38.3 都无法提供安全内外夹持候选的场景显式归入分支 C。纯侧面、疑似深孔但端部证据不足、或所有钟点均碰撞时，系统返回 `m38_4_branch_c_fast_reject` 和 `turn_or_agitate_box`，不再进入 M36/M37.6 的昂贵欠约束搜索。生产配置默认 `legacy_m36_enabled: false`、`side_ring_fallback_enabled: false`，旧代码仍保留，可通过 YAML 恢复。完整说明见 `docs/M38.4_BRANCH_C_FAST_REJECT.md`。

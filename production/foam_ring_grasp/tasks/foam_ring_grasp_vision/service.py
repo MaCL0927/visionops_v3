@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M37.5 depth-layer-first hybrid trigger service for foam-ring exact RGB-D geometry.
+"""M38.4 evidence-first trigger service with explicit branch-C rejection.
 
 The service keeps the synchronized RGB-D cache, Runtime client, geometry config
 and box calibration resident. Explicit trigger requests are serialized by one
@@ -380,7 +380,7 @@ class FoamRingOnlineService:
                     prepared,
                     save_debug=job.save_debug,
                     generate_overlay=bool(self.settings["latest_overlay_enabled"]),
-                    stage="M38.3_depth_partial_opening_constrained_cylinder_hybrid_persistent_trigger_service",
+                    stage="M38.4_branch_c_fast_reject_hybrid_persistent_trigger_service",
                     geometry_queue_wait_ms=geometry_wait_ms,
                 )
                 service_processing_ms = max(
@@ -476,6 +476,11 @@ class FoamRingOnlineService:
             if isinstance(scene.get("side_ring_branch"), Mapping)
             else {}
         )
+        branch_c = (
+            scene.get("m38_4_branch_c")
+            if isinstance(scene.get("m38_4_branch_c"), Mapping)
+            else {}
+        )
         hybrid_timing = (
             hybrid.get("timing_ms")
             if isinstance(hybrid.get("timing_ms"), Mapping)
@@ -496,13 +501,16 @@ class FoamRingOnlineService:
         return {
             "schema_version": "1.0",
             "message_type": "foam_ring_trigger_result",
-            "stage": str(payload.get("stage") or "M38.3_depth_partial_opening_constrained_cylinder_hybrid_persistent_trigger_service"),
+            "stage": str(payload.get("stage") or "M38.4_branch_c_fast_reject_hybrid_persistent_trigger_service"),
             "status": "ok",
             "request_id": job.request_id,
             "idempotent_replay": False,
             "target_found": candidate is not None,
             "selected_grasp_branch": hybrid.get("selected_branch") or scene.get("selected_grasp_branch") or "none",
             "fallback_triggered": bool(hybrid.get("fallback_triggered", False)),
+            "terminal_reject": bool(branch_c.get("fast_terminated", False)),
+            "terminal_reject_reason": branch_c.get("decision"),
+            "operator_action": branch_c.get("operator_action"),
             "robot_ready": False,
             "robot_ready_reason": payload.get("robot_ready_reason"),
             "capture_timestamp_ms": payload.get("capture_timestamp_ms"),
@@ -524,6 +532,9 @@ class FoamRingOnlineService:
                 "adaptive_fallback_used": geometry_optimization.get("adaptive_fallback_used"),
                 "early_exit_triggered": geometry_optimization.get("early_exit_triggered"),
                 "selected_grasp_branch": hybrid.get("selected_branch") or scene.get("selected_grasp_branch"),
+                "terminal_reject": bool(branch_c.get("fast_terminated", False)),
+                "terminal_reject_reason": branch_c.get("decision"),
+                "operator_action": branch_c.get("operator_action"),
                 "m36_candidate_found": hybrid.get("m36_candidate_found"),
                 "m37_candidate_found": hybrid.get("m37_candidate_found"),
                 "m37_candidate_count": side_branch.get("candidate_count"),
@@ -881,7 +892,7 @@ def run(
     )
     thread.start()
     print(
-        "Foam Ring M38.3 Depth-Evidence Constrained-Cylinder Hybrid Service started: http={}:{} runtime={} "
+        "Foam Ring M38.4 Branch-C Fast-Reject Hybrid Service started: http={}:{} runtime={} "
         "m36_mode={} hybrid={} queue={}".format(
             settings["listen_host"],
             settings["listen_port"],
