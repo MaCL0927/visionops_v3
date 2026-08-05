@@ -72,7 +72,7 @@ def _fit_payload(ring: SegmentationInstance, mouth: SegmentationInstance) -> dic
         "warnings": [],
         "association": {"association_mode": "bbox_fallback"},
         "diagnostics": {
-            "pose_source": "partial_mouth_plus_local_outer_cylinder",
+            "pose_source": "depth_or_segmented_partial_opening_constrained_cylinder",
             "radial_inlier_ratio": 0.85,
             "axis_view_angle_deg": 62.0,
         },
@@ -87,7 +87,7 @@ def _fit_payload(ring: SegmentationInstance, mouth: SegmentationInstance) -> dic
             "side_residual_median_mm": 2.0,
             "side_residual_p95_mm": 5.0,
             "diagnostics": {
-                "pose_source": "partial_mouth_plus_local_outer_cylinder",
+                "pose_source": "depth_or_segmented_partial_opening_constrained_cylinder",
                 "axis_view_angle_deg": 62.0,
             },
         },
@@ -101,7 +101,7 @@ def test_m382_production_configuration_enables_branch_b_and_retains_legacy() -> 
     raw = load_yaml(LINE_CONFIG)
     hybrid = HybridGraspConfig.from_mapping(raw)
     assert raw["schema_version"] == "6.2"
-    assert raw["task"] == "foam_ring_rim_pinch_m38_2_partial_opening_branch_b"
+    assert raw["task"] == "foam_ring_rim_pinch_m38_3_depth_partial_opening_constrained_cylinder"
     assert hybrid.m38_branch_a_enabled is True
     assert hybrid.m38_branch_b_enabled is True
     assert hybrid.m38_branch_b_fallback_to_m36 is True
@@ -144,7 +144,7 @@ def test_m382_branch_a_still_has_priority_and_skips_branch_b() -> None:
     assert calls == ["m38_1_front_annulus"]
     assert fit_calls == []
     assert scene["selected_grasp_branch"] == "m38_1_clear_mouth_front_annulus_rim_pinch"
-    assert scene["hybrid_grasp"]["policy_version"] == "M38.2"
+    assert scene["hybrid_grasp"]["policy_version"] == "M38.3"
 
 
 def test_m382_uses_partial_opening_cylinder_before_m36_and_m376() -> None:
@@ -189,11 +189,11 @@ def test_m382_uses_partial_opening_cylinder_before_m36_and_m376() -> None:
     )
     assert calls == ["m38_1_front_annulus", "m38_2_partial_opening_cylinder"]
     assert side_calls == []
-    assert scene["selected_grasp_branch"] == "m38_2_partial_opening_local_cylinder_rim_pinch"
-    assert scene["robot_candidate"]["pose_source"] == "partial_mouth_plus_local_outer_cylinder"
-    assert scene["m38_2_branch_b"]["candidate_found"] is True
-    assert scene["m38_2_branch_b"]["legacy_m36_retained"] is True
-    assert scene["m38_2_branch_b"]["m37_6_retained"] is True
+    assert scene["selected_grasp_branch"] == "m38_3_partial_opening_constrained_cylinder_rim_pinch"
+    assert scene["robot_candidate"]["pose_source"] == "depth_or_segmented_partial_opening_constrained_cylinder"
+    assert scene["m38_3_branch_b"]["candidate_found"] is True
+    assert scene["m38_3_branch_b"]["legacy_m36_retained"] is True
+    assert scene["m38_3_branch_b"]["m37_6_retained"] is True
 
 
 def test_m382_failed_a_and_b_fall_back_to_legacy_m36() -> None:
@@ -235,7 +235,7 @@ def test_m382_failed_a_and_b_fall_back_to_legacy_m36() -> None:
     )
     assert calls == ["m38_1_front_annulus", "legacy"]
     assert scene["selected_grasp_branch"] == "m36_mouth_visible_rim_pinch"
-    assert scene["m38_2_branch_b"]["fit_results"][0]["eligible"] is False
+    assert scene["m38_3_branch_b"]["fit_results"][0]["eligible"] is False
 
 
 def test_m382_global_m38_search_prevents_shallow_m376_from_delaying_deeper_opening() -> None:

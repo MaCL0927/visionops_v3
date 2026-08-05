@@ -738,7 +738,7 @@ class OnlineGeometryProcessor:
             )
             cv2.putText(
                 overlay,
-                "M38.2 hybrid branch: " + branch_label,
+                "M38.3 hybrid branch: " + branch_label,
                 (10, max(36, overlay.shape[0] - 12)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.45,

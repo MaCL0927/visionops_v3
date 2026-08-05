@@ -2010,6 +2010,65 @@ def _check_neighbor_collision_3d(
     return result
 
 
+
+def _m38b_nominal_rim_boundaries(
+    angle_deg: float,
+    center_camera: np.ndarray,
+    normal_toward_camera: np.ndarray,
+    intrinsics: Mapping[str, float],
+    config: GeometryConfig,
+) -> Optional[Dict[str, Any]]:
+    """Return nominal inner/outer rim points for a branch-B clock direction.
+
+    A near side-on opening projects to a very thin ellipse. Reusing the M36
+    pixel-ray boundary search makes the outer edge ambiguous and tests the
+    finger against camera-view foreshortening rather than physical clearance.
+    M38.3 instead selects the 3-D radial direction whose projection best matches
+    the requested image clock and uses the known inner/outer radii.
+    """
+
+    axis = _normalize(np.asarray(normal_toward_camera, dtype=np.float64))
+    reference = np.asarray([0.0, 0.0, 1.0], dtype=np.float64)
+    if abs(float(np.dot(axis, reference))) > 0.90:
+        reference = np.asarray([1.0, 0.0, 0.0], dtype=np.float64)
+    basis_u = _normalize(np.cross(axis, reference))
+    basis_v = _normalize(np.cross(axis, basis_u))
+    object_cfg = config.section("object_geometry")
+    inner_radius = 0.5 * _safe_float(object_cfg.get("nominal_inner_diameter_mm"), 60.0)
+    outer_radius = 0.5 * _safe_float(object_cfg.get("nominal_outer_diameter_mm"), 85.0)
+    sample_count = max(96, _safe_int(config.section("m38_branch_b").get("clock_radial_sample_count"), 180))
+    center_uv = project_point(center_camera, intrinsics)
+    if center_uv is None:
+        return None
+    target = math.radians(float(angle_deg))
+    best: Optional[Dict[str, Any]] = None
+    for theta in np.linspace(0.0, 2.0 * math.pi, sample_count, endpoint=False):
+        radial = math.cos(float(theta)) * basis_u + math.sin(float(theta)) * basis_v
+        inner_camera = center_camera + inner_radius * radial
+        outer_camera = center_camera + outer_radius * radial
+        inner_uv = project_point(inner_camera, intrinsics)
+        outer_uv = project_point(outer_camera, intrinsics)
+        if inner_uv is None or outer_uv is None:
+            continue
+        du = float(inner_uv[0] - center_uv[0])
+        dv = float(inner_uv[1] - center_uv[1])
+        if math.hypot(du, dv) <= 1e-6:
+            continue
+        projected_angle = math.atan2(dv, du)
+        delta = abs(math.atan2(math.sin(projected_angle - target), math.cos(projected_angle - target)))
+        if best is None or delta < float(best["angle_error_rad"]):
+            best = {
+                "inner_camera": np.asarray(inner_camera, dtype=np.float64),
+                "outer_camera": np.asarray(outer_camera, dtype=np.float64),
+                "inner_uv": (float(inner_uv[0]), float(inner_uv[1])),
+                "outer_uv": (float(outer_uv[0]), float(outer_uv[1])),
+                "radial_direction": _normalize(radial),
+                "angle_error_rad": float(delta),
+                "inner_radius_mm": float(inner_radius),
+                "outer_radius_mm": float(outer_radius),
+            }
+    return best
+
 def _clock_candidate(
     clock: Mapping[str, Any],
     ring: SegmentationInstance,
@@ -2053,60 +2112,88 @@ def _clock_candidate(
             "timing_ms": timing_ms,
         }
 
-    inner_info = _mouth_boundary_on_ray(mouth.mask, center_uv, angle_deg)
-    if inner_info is None:
-        return fail_early("mouth_boundary_unavailable")
-    inner_uv = inner_info["uv"]
-    inner_camera = ray_plane_intersection(inner_uv, intrinsics, pose_plane)
-    if inner_camera is None:
-        return fail_early("inner_boundary_ray_plane_failed")
-
-    pixel_radius = max(1e-6, float(inner_info["distance_px"]))
-    radial_mm = float(np.linalg.norm(inner_camera - center_camera))
-    mm_per_px = radial_mm / pixel_radius
-    maximum_wall = _safe_float(object_cfg.get("maximum_wall_thickness_mm"), 45.0)
-    search_ratio = _safe_float(object_cfg.get("maximum_outer_search_radius_ratio"), 1.35)
-    maximum_search_px = min(
-        maximum_wall / max(mm_per_px, 1e-6) * 1.10,
-        pixel_radius * max(0.50, search_ratio),
-    )
-    maximum_gap_px = _safe_int(object_cfg.get("maximum_ring_mask_gap_px"), 2)
-    outer_boundary_source = "raw_ring_mask"
-    outer_info = _outer_boundary_on_ray(
-        ring.mask,
-        center_uv,
-        angle_deg,
-        float(inner_info["distance_px"]),
-        maximum_search_px,
-        maximum_gap_px,
-    )
-    if outer_info is None:
-        association_cfg = config.section("association")
-        envelope = filled_outer_envelope(
-            ring.mask,
-            dilate_px=0,
-            close_px=_safe_int(association_cfg.get("envelope_close_px"), 3),
-            minimum_component_area_ratio=_safe_float(association_cfg.get("minimum_component_area_ratio"), 0.03),
+    m38b_nominal = _m38b_runtime_enabled(config)
+    nominal_boundary = (
+        _m38b_nominal_rim_boundaries(
+            angle_deg, center_camera, pose_plane.normal, intrinsics, config
         )
+        if m38b_nominal
+        else None
+    )
+    if m38b_nominal:
+        if nominal_boundary is None:
+            return fail_early("m383_nominal_rim_projection_failed")
+        inner_uv = nominal_boundary["inner_uv"]
+        outer_uv = nominal_boundary["outer_uv"]
+        inner_camera = np.asarray(nominal_boundary["inner_camera"], dtype=np.float64)
+        outer_camera = np.asarray(nominal_boundary["outer_camera"], dtype=np.float64)
+        inner_info = {
+            "uv": inner_uv,
+            "distance_px": float(math.hypot(inner_uv[0] - center_uv[0], inner_uv[1] - center_uv[1])),
+        }
+        outer_info = {
+            "uv": outer_uv,
+            "distance_px": float(math.hypot(outer_uv[0] - center_uv[0], outer_uv[1] - center_uv[1])),
+            "ambiguous": False,
+        }
+        pixel_radius = max(1e-6, float(inner_info["distance_px"]))
+        mm_per_px = float(nominal_boundary["inner_radius_mm"]) / pixel_radius
+        outer_boundary_source = "m38_3_nominal_constrained_cylinder"
+    else:
+        inner_info = _mouth_boundary_on_ray(mouth.mask, center_uv, angle_deg)
+        if inner_info is None:
+            return fail_early("mouth_boundary_unavailable")
+        inner_uv = inner_info["uv"]
+        inner_camera = ray_plane_intersection(inner_uv, intrinsics, pose_plane)
+        if inner_camera is None:
+            return fail_early("inner_boundary_ray_plane_failed")
+
+        pixel_radius = max(1e-6, float(inner_info["distance_px"]))
+        radial_mm = float(np.linalg.norm(inner_camera - center_camera))
+        mm_per_px = radial_mm / pixel_radius
+        maximum_wall = _safe_float(object_cfg.get("maximum_wall_thickness_mm"), 45.0)
+        search_ratio = _safe_float(object_cfg.get("maximum_outer_search_radius_ratio"), 1.35)
+        maximum_search_px = min(
+            maximum_wall / max(mm_per_px, 1e-6) * 1.10,
+            pixel_radius * max(0.50, search_ratio),
+        )
+        maximum_gap_px = _safe_int(object_cfg.get("maximum_ring_mask_gap_px"), 2)
+        outer_boundary_source = "raw_ring_mask"
         outer_info = _outer_boundary_on_ray(
-            envelope,
+            ring.mask,
             center_uv,
             angle_deg,
             float(inner_info["distance_px"]),
             maximum_search_px,
             maximum_gap_px,
         )
-        if outer_info is not None:
-            outer_boundary_source = "filled_envelope_fallback"
-            warnings.append("outer_boundary_used_filled_envelope")
-    if outer_info is None:
-        return fail_early("outer_rim_boundary_unavailable")
-    if bool(outer_info.get("ambiguous")):
-        reasons.append("outer_rim_boundary_ambiguous")
-    outer_uv = outer_info["uv"]
-    outer_camera = ray_plane_intersection(outer_uv, intrinsics, pose_plane)
-    if outer_camera is None:
-        return fail_early("outer_boundary_ray_plane_failed")
+        if outer_info is None:
+            association_cfg = config.section("association")
+            envelope = filled_outer_envelope(
+                ring.mask,
+                dilate_px=0,
+                close_px=_safe_int(association_cfg.get("envelope_close_px"), 3),
+                minimum_component_area_ratio=_safe_float(association_cfg.get("minimum_component_area_ratio"), 0.03),
+            )
+            outer_info = _outer_boundary_on_ray(
+                envelope,
+                center_uv,
+                angle_deg,
+                float(inner_info["distance_px"]),
+                maximum_search_px,
+                maximum_gap_px,
+            )
+            if outer_info is not None:
+                outer_boundary_source = "filled_envelope_fallback"
+                warnings.append("outer_boundary_used_filled_envelope")
+        if outer_info is None:
+            return fail_early("outer_rim_boundary_unavailable")
+        if bool(outer_info.get("ambiguous")):
+            reasons.append("outer_rim_boundary_ambiguous")
+        outer_uv = outer_info["uv"]
+        outer_camera = ray_plane_intersection(outer_uv, intrinsics, pose_plane)
+        if outer_camera is None:
+            return fail_early("outer_boundary_ray_plane_failed")
 
     radial_vector = outer_camera - inner_camera
     wall_thickness = float(np.linalg.norm(radial_vector))
@@ -2191,7 +2278,17 @@ def _clock_candidate(
     outer_sweep = _polygon_mask(mouth.mask.shape, outer_polygon)
     inner_area = max(1, int(np.count_nonzero(inner_sweep)))
     outer_area = max(1, int(np.count_nonzero(outer_sweep)))
-    inner_containment = float(np.count_nonzero(inner_sweep & mouth.mask)) / float(inner_area)
+    if m38b_nominal:
+        nominal_inner_diameter = _safe_float(
+            object_cfg.get("nominal_inner_diameter_mm"), 60.0
+        )
+        physical_margin = _safe_float(
+            config.section("m38_branch_b").get("minimum_inner_finger_clearance_mm"), 3.0
+        )
+        required_inner_span = max(finger_thickness, finger_width) + 2.0 * physical_margin
+        inner_containment = 1.0 if nominal_inner_diameter >= required_inner_span else 0.0
+    else:
+        inner_containment = float(np.count_nonzero(inner_sweep & mouth.mask)) / float(inner_area)
     other_inner_overlap = float(np.count_nonzero(inner_sweep & other_ring_mask)) / float(inner_area)
     other_outer_overlap = float(np.count_nonzero(outer_sweep & other_ring_mask)) / float(outer_area)
     maximum_overlap = _safe_float(candidate_cfg.get("maximum_other_ring_overlap_ratio"), 0.10)
@@ -3316,8 +3413,8 @@ def analyze_ring_pair(
         pose_plane = depth_plane
         pose_diagnostics = dict(payload.get("diagnostics") or {})
         pose_diagnostics.update({
-            "normal_source": "m38_2_partial_mouth_local_outer_cylinder",
-            "pose_source": "partial_mouth_plus_local_outer_cylinder",
+            "normal_source": "m38_3_constrained_partial_opening_cylinder",
+            "pose_source": "depth_or_segmented_partial_opening_constrained_cylinder",
             "opening_partial": True,
             "normal_disagreement_deg": 0.0,
             "pose_conflict_signals": [],
@@ -3328,7 +3425,7 @@ def analyze_ring_pair(
         pixels = np.empty((0, 2), dtype=np.int32)
         band_pixel_count = point_count
         valid_ratio = 1.0
-        configured_policy = "m38_2_partial_opening_local_cylinder"
+        configured_policy = "m38_3_depth_or_segmented_partial_opening_constrained_cylinder"
         pose_conflict_signals = []
         pose_conflict_handoff_to_m37 = False
         timing_ms["m38b_precomputed_pose_ms"] = 0.0
@@ -4424,7 +4521,7 @@ def analyze_scene(
         "selection_scope": (
             "M38.1_front_annulus_first_valid_target_early_exit_adaptive_8_plus_4_clock_search"
             if scene_pose_strategy == "m38_1_front_annulus" and first_valid else
-            "M38.2_partial_opening_local_cylinder_first_valid_target_early_exit_adaptive_8_plus_4_clock_search"
+            "M38.3_depth_or_segmented_partial_opening_constrained_cylinder_first_valid_target_early_exit_adaptive_8_plus_4_clock_search"
             if scene_pose_strategy == "m38_2_partial_opening_cylinder" and first_valid else
             "M36.4.2_first_valid_target_early_exit_adaptive_8_plus_4_clock_search"
             if first_valid else
