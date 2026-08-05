@@ -58,7 +58,7 @@ def run_once(
         return processor.process(
             save_debug=None,
             generate_overlay=False,
-            stage="M37.5.1_staged_pose_validation_online_geometry_once",
+            stage="M37.6_hollow_cylinder_multisurface_online_geometry_once",
         ).payload
     finally:
         processor.stop()

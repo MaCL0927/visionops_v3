@@ -59,6 +59,20 @@ def _safe_int(value: Any, default: int) -> int:
         return int(default)
 
 
+def _resolve_pose_conflict_policy(pose_cfg: Mapping[str, Any]) -> str:
+    """Resolve M36 conflict behavior while preserving legacy configurations."""
+    configured = str(pose_cfg.get("pose_conflict_policy") or "").strip().lower()
+    if configured in {"hard_reject", "fallback_to_m37", "warn_only"}:
+        return configured
+    if "pose_conflict_hard_reject_enabled" in pose_cfg:
+        return (
+            "hard_reject"
+            if bool(pose_cfg.get("pose_conflict_hard_reject_enabled"))
+            else "warn_only"
+        )
+    return "fallback_to_m37"
+
+
 def _elapsed_ms(started: float) -> float:
     return (time.perf_counter() - started) * 1000.0
 
@@ -2917,32 +2931,52 @@ def analyze_ring_pair(
     if disagreement > disagreement_warn:
         warnings.append("depth_plane_ellipse_pose_disagreement")
 
-    # M37.5 safety gate: an ellipse-derived normal and a depth plane that
-    # disagree by tens of degrees do not define a trustworthy grasp axis.
-    # Reject the pair instead of forcing one source to win.
-    if bool(pose_cfg.get("pose_conflict_hard_reject_enabled", True)):
-        hard_limit = _safe_float(pose_cfg.get("maximum_normal_disagreement_deg"), 25.0)
-        if disagreement > hard_limit:
-            reasons.append("depth_plane_ellipse_pose_conflict")
-        conditional_limit = _safe_float(
-            pose_cfg.get("conditional_normal_disagreement_deg"), 18.0
+    # M37.6.1 stop-loss policy.  A large disagreement between the mouth
+    # ellipse and the local depth plane is still treated as uncertain, but it
+    # no longer has to be reported as an M36 hard geometry failure.  The
+    # default production policy hands the pair to the M37 fallback branch,
+    # where the matched mouth remains available as a soft annular constraint.
+    pose_conflict_signals: List[str] = []
+    hard_limit = _safe_float(pose_cfg.get("maximum_normal_disagreement_deg"), 25.0)
+    if disagreement > hard_limit:
+        pose_conflict_signals.append("depth_plane_ellipse_pose_conflict")
+    conditional_limit = _safe_float(
+        pose_cfg.get("conditional_normal_disagreement_deg"), 18.0
+    )
+    minimum_depth_support = _safe_float(
+        pose_cfg.get("conditional_minimum_depth_plane_inlier_ratio"), 0.55
+    )
+    if (
+        str(pose_diagnostics.get("normal_source")) == "ellipse_stabilized"
+        and disagreement > conditional_limit
+        and depth_plane.inlier_ratio < minimum_depth_support
+    ):
+        pose_conflict_signals.append("ellipse_pose_has_insufficient_depth_support")
+    stabilized_p95 = pose_diagnostics.get("stabilized_residual_p95_mm")
+    if (
+        stabilized_p95 is not None
+        and float(stabilized_p95)
+        > _safe_float(pose_cfg.get("maximum_stabilized_residual_p95_mm"), 8.0)
+    ):
+        pose_conflict_signals.append("ellipse_stabilized_pose_residual_too_high")
+
+    configured_policy = _resolve_pose_conflict_policy(pose_cfg)
+    pose_conflict_handoff_to_m37 = bool(
+        pose_conflict_signals and configured_policy == "fallback_to_m37"
+    )
+    if pose_conflict_signals:
+        warnings.extend(
+            signal for signal in pose_conflict_signals if signal not in warnings
         )
-        minimum_depth_support = _safe_float(
-            pose_cfg.get("conditional_minimum_depth_plane_inlier_ratio"), 0.55
-        )
-        if (
-            str(pose_diagnostics.get("normal_source")) == "ellipse_stabilized"
-            and disagreement > conditional_limit
-            and depth_plane.inlier_ratio < minimum_depth_support
-        ):
-            reasons.append("ellipse_pose_has_insufficient_depth_support")
-        stabilized_p95 = pose_diagnostics.get("stabilized_residual_p95_mm")
-        if (
-            stabilized_p95 is not None
-            and float(stabilized_p95)
-            > _safe_float(pose_cfg.get("maximum_stabilized_residual_p95_mm"), 8.0)
-        ):
-            reasons.append("ellipse_stabilized_pose_residual_too_high")
+        if configured_policy == "hard_reject":
+            reasons.extend(
+                signal for signal in pose_conflict_signals if signal not in reasons
+            )
+        elif configured_policy == "fallback_to_m37":
+            reasons.append("pose_conflict_fallback_to_m37")
+            warnings.append("m36_pose_conflict_handoff_to_m37")
+        else:
+            warnings.append("m36_pose_conflict_warning_only")
 
     center_uv = tuple(ellipse["center_uv"])
     center_camera = ray_plane_intersection(center_uv, intrinsics, pose_plane)
@@ -3075,6 +3109,9 @@ def analyze_ring_pair(
         },
         "pose": {
             **pose_diagnostics,
+            "pose_conflict_policy": configured_policy,
+            "pose_conflict_signals": list(pose_conflict_signals),
+            "handoff_to_m37": bool(pose_conflict_handoff_to_m37),
             "normal_toward_camera": _json_vector(pose_plane.normal),
             "offset": float(pose_plane.offset),
             "centroid_camera_mm": _json_vector(pose_plane.centroid),

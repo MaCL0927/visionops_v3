@@ -320,3 +320,12 @@ python3 production/foam_ring_grasp/scripts/replay_m37_5_result_set.py \
 ## M37.5.1：分阶段姿态验证
 
 M37.5.1 将侧躺圆环在线流程改为“轻量候选预筛选 → preliminary screen → 延迟 final validation → 单次局部精修兜底”。`fit_score` 只用于质量排序，只有 `final_pose_safe=true` 的候选能够输出抓取点。详细配置与输出字段见 `docs/M37.5.1_STAGED_POSE_VALIDATION.md`。
+
+
+## M37.6 空心短圆柱多曲面联合拟合
+
+M37.6 在 M37.5.1 上将外壁、内壁和两端环形面联合建模；`ring_mouth` 作为可选端面约束，未检测到 mouth 的混合姿态可使用浅/深 RGB-D 点云质心差提供轴线初值。详见 `docs/M37.6_HOLLOW_CYLINDER_MULTISURFACE.md`。
+
+## M37.6.1 快速止损
+
+M37.6.1 将 depth-gradient 降为纯诊断证据，关闭在线 `local_accurate`，并将 M36 椭圆/深度平面冲突显式转交 M37.6，避免错误梯度否决优质候选和单次十余秒的局部精修。详见 `docs/M37.6.1_FAST_STOPLOSS.md`。

@@ -81,9 +81,13 @@ pose:
   depth_direction_tiebreak_weight: 0.15
   normal_disagreement_warning_deg: 20.0
 
-  # M37.5 safety gate for the M36 mouth-visible branch.  The two pose cues
-  # must not disagree by tens of degrees and still produce a grasp axis.
-  pose_conflict_hard_reject_enabled: true
+  # M37.6.1 stop-loss: a large ellipse/depth-plane disagreement no longer
+  # forces M36 to choose one unreliable cue.  The pair is marked uncertain and
+  # handed to M37.6 with its matched mouth retained as a soft constraint.
+  pose_conflict_policy: fallback_to_m37
+  # Deprecated compatibility switch used only when pose_conflict_policy is
+  # absent. Keep false in the production configuration.
+  pose_conflict_hard_reject_enabled: false
   maximum_normal_disagreement_deg: 25.0
   conditional_normal_disagreement_deg: 18.0
   conditional_minimum_depth_plane_inlier_ratio: 0.55
@@ -521,6 +525,9 @@ hybrid_grasp:
   prefer_mouth_visible: true
   side_ring_fallback_enabled: true
   side_ring_only_unmatched: true
+  # M37.6 keeps a mouth-matched ring eligible after M36 rejects it. The mouth
+  # becomes an optional annular-face constraint for the unified hollow model.
+  multi_surface_include_m36_rejected: true
   stop_after_first_side_eligible: true
   maximum_side_ring_attempts: 0
 
@@ -541,11 +548,11 @@ hybrid_grasp:
     maximum_depth_mm: 3000.0
 
   bounded_refinement:
-    # At most one warm-start local refinement is allowed after staged screen
-    # and final validation have failed. Full global accurate search is forbidden
-    # in the online hybrid path.
+    # M37.6.1 disables online local_accurate. Saved RGB-D bundles can still be
+    # replayed offline, but a robot trigger must not spend another ~13 seconds
+    # trying to rescue an uncertain axis.
     fast_first_enabled: true
-    maximum_accurate_refinements_per_trigger: 1
+    maximum_accurate_refinements_per_trigger: 0
 
   # M37.5.1: rank all same-layer rings with cheap 2-D/depth evidence, then run
   # cylinder screening only on the best few. Full ambiguity/bootstrap checks are
@@ -693,6 +700,36 @@ side_ring_template:
   # masks and D2C depth jumps are removed before deprojection.  The axis is
   # generated from surface-normal hypotheses instead of relying only on a
   # fixed-radius radial residual.
+  # M37.6 unified hollow short-cylinder model. Scene points are assigned to
+  # outer wall, inner wall, near annular face or far annular face.
+  multi_surface_enabled: true
+  multi_surface_side_normal_max_deg: 38.0
+  multi_surface_face_normal_max_deg: 32.0
+  multi_surface_domain_penalty_weight: 0.45
+  multi_surface_normal_penalty_weight: 0.035
+  multi_surface_inlier_threshold_mm: 7.0
+  multi_surface_minimum_outer_points: 35
+  multi_surface_minimum_inner_points: 8
+  multi_surface_minimum_face_points: 12
+  multi_surface_minimum_surface_types: 1
+  multi_surface_mouth_annulus_dilate_px: 8
+  multi_surface_mouth_annulus_inner_px: 1
+  multi_surface_mouth_axis_weight: 0.08
+  multi_surface_mouth_center_weight: 0.03
+  multi_surface_center_iterations: 8
+  # M37.6.1 diagnostic-only depth gradient. The shallow/deep centroid vector
+  # is retained in results for analysis, but it does not steer axis ranking and
+  # cannot reject a geometrically good candidate online.
+  multi_surface_depth_gradient_weight: 0.0
+  multi_surface_depth_gradient_hard_reject_enabled: false
+  multi_surface_depth_gradient_min_delta_mm: 12.0
+  multi_surface_depth_gradient_min_centroid_separation_mm: 15.0
+  multi_surface_minimum_inlier_ratio: 0.50
+  multi_surface_maximum_residual_median_mm: 6.5
+  multi_surface_maximum_residual_p90_mm: 14.0
+  multi_surface_maximum_depth_gradient_axis_error_deg: 18.0
+  multi_surface_maximum_mouth_axis_error_deg: 25.0
+
   normal_constrained_enabled: true
   neighbor_exclusion_dilate_px: 3
   depth_edge_threshold_mm: 14.0

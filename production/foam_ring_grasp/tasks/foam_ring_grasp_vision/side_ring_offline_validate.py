@@ -227,7 +227,7 @@ def draw_side_ring_fit_overlay(
                 cv2.polylines(overlay, [contour], True, circle_color, 1, cv2.LINE_AA)
     cv2.putText(
         overlay,
-        "M37.2: confidence-first, first valid exits; gray=deferred",
+        "M37.6: hollow-cylinder outer/inner/face joint fit; gray=deferred",
         (10, 18),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.45,

@@ -22,7 +22,7 @@ from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.online_processor im
 
 
 def _args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Replay saved bundles with M37.5.1")
+    parser = argparse.ArgumentParser(description="Replay saved bundles with M37.6")
     parser.add_argument("root", type=Path)
     parser.add_argument(
         "--config",
@@ -98,7 +98,7 @@ def main() -> int:
         rows.append(row)
         write_json(args.output / f"{capture_id}_scene.json", _strip_debug(scene))
         print(json.dumps(row, ensure_ascii=False))
-    write_json(args.output / "summary.json", {"stage": "M37.5.1", "count": len(rows), "rows": rows})
+    write_json(args.output / "summary.json", {"stage": "M37.6", "count": len(rows), "rows": rows})
     if rows:
         with (args.output / "summary.csv").open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))

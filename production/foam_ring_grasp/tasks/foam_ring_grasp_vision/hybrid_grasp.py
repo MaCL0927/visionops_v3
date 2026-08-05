@@ -1,4 +1,4 @@
-"""M37.5 depth-layer-first hybrid foam-ring grasp selection with pose safety.
+"""M37.6 depth-layer-first hollow-cylinder multi-surface grasp selection.
 
 A single Runtime segmentation result and exact RGB-D frame feed both branches.
 All foam rings are first assigned a robust front-surface depth and grouped into
@@ -7,10 +7,10 @@ established M36 mouth-visible branch is attempted first; only then are
 unmatched side-lying rings evaluated by M37.
 
 M37 uses a bounded fast-first policy: candidates are tried in surface-depth
-order with the fast profile.  A fast-accepted candidate returns immediately.
-When all fast candidates in the active layer are uncertain, at most one best
-fast result per trigger receives a warm-start local accurate refinement.  The
-expensive global accurate search is never repeated by the online hybrid path.
+order with staged screen/final validation.  M37.6.1 disables online
+``local_accurate`` refinement, so an uncertain scene returns without spending
+another long refinement cycle.  Saved RGB-D bundles may still be replayed
+offline for diagnosis.
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ class HybridGraspConfig:
     surface_depth_maximum_mm: float = 3000.0
 
     m37_fast_first_enabled: bool = True
-    maximum_accurate_refinements_per_trigger: int = 1
+    maximum_accurate_refinements_per_trigger: int = 0
 
     # M37.5.1 lightweight preselection and delayed final pose validation.
     lightweight_preselection_enabled: bool = True
@@ -100,6 +100,11 @@ class HybridGraspConfig:
     lightweight_minimum_valid_points: int = 30
     lightweight_minimum_valid_ratio: float = 0.20
     delayed_final_validation_enabled: bool = True
+
+    # M37.6: after the M36 branch fails, matched-mouth rings remain eligible for
+    # hollow-cylinder multi-surface fitting. The mouth mask is an optional face
+    # constraint rather than a reason to exclude the ring from M37.6.
+    multi_surface_include_m36_rejected: bool = True
 
     @classmethod
     def from_mapping(cls, raw_config: Mapping[str, Any]) -> "HybridGraspConfig":
@@ -172,7 +177,7 @@ class HybridGraspConfig:
             maximum_accurate_refinements_per_trigger=max(
                 0,
                 _safe_int(
-                    bounded.get("maximum_accurate_refinements_per_trigger"), 1
+                    bounded.get("maximum_accurate_refinements_per_trigger"), 0
                 ),
             ),
             lightweight_preselection_enabled=bool(
@@ -204,6 +209,9 @@ class HybridGraspConfig:
             ),
             delayed_final_validation_enabled=bool(
                 lightweight.get("delayed_final_validation_enabled", True)
+            ),
+            multi_surface_include_m36_rejected=bool(
+                section.get("multi_surface_include_m36_rejected", True)
             ),
         )
 
@@ -610,6 +618,13 @@ def _compact_fast_seed(fit: Mapping[str, Any]) -> Dict[str, Any]:
             "eligible",
             "rejection_reasons",
             "fit_score",
+            "fit_model",
+            "surface_counts",
+            "surface_inlier_ratio",
+            "surface_residual_median_mm",
+            "surface_residual_p90_mm",
+            "depth_gradient_axis_error_deg",
+            "mouth_axis_error_deg",
             "fast_acceptance_passed",
             "fast_acceptance_reasons",
             "radial_inlier_ratio",
@@ -641,7 +656,7 @@ def _m37_candidate(fit: Mapping[str, Any]) -> Dict[str, Any]:
         "status": "candidate_only_not_robot_ready",
         "robot_ready": False,
         "reason": (
-            "M37.5 side-ring camera-frame grasp point only; gripper pose, hand-eye "
+            "M37.6 hollow-cylinder multi-surface camera-frame grasp point only; gripper pose, hand-eye "
             "transform, reachability and final robot protocol are not enabled"
         ),
         "grasp_branch": "m37_side_ring_near_visible_crown",
@@ -654,6 +669,13 @@ def _m37_candidate(fit: Mapping[str, Any]) -> Dict[str, Any]:
             "depth_layer_index": fit.get("depth_layer_index"),
             "depth_rank": fit.get("depth_rank"),
             "fit_score": fit.get("fit_score"),
+            "fit_model": fit.get("fit_model"),
+            "surface_counts": deepcopy(fit.get("surface_counts") or {}),
+            "surface_inlier_ratio": fit.get("surface_inlier_ratio"),
+            "surface_residual_median_mm": fit.get("surface_residual_median_mm"),
+            "surface_residual_p90_mm": fit.get("surface_residual_p90_mm"),
+            "depth_gradient_axis_error_deg": fit.get("depth_gradient_axis_error_deg"),
+            "mouth_axis_error_deg": fit.get("mouth_axis_error_deg"),
             "search_profile_used": fit.get("search_profile_used"),
             "local_accurate_refinement_used": fit.get(
                 "local_accurate_refinement_used", False
@@ -693,6 +715,28 @@ def _m36_candidate(
         target["depth_rank"] = depth_record.get("depth_rank")
     document["target"] = target
     return document
+
+
+def _call_side_fit(
+    side_fit_fn: Callable[..., Dict[str, Any]],
+    instance: SegmentationInstance,
+    depth_mm: np.ndarray,
+    intrinsics: Mapping[str, float],
+    template_config: SideRingTemplateConfig,
+    *,
+    mouth_instance: Optional[SegmentationInstance],
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Call M37.6-aware fitters while preserving injected legacy test doubles."""
+    try:
+        return side_fit_fn(
+            instance, depth_mm, intrinsics, template_config,
+            mouth_instance=mouth_instance, **kwargs
+        )
+    except TypeError as error:
+        if "mouth_instance" not in str(error):
+            raise
+        return side_fit_fn(instance, depth_mm, intrinsics, template_config, **kwargs)
 
 
 def run_hybrid_grasp(
@@ -845,7 +889,8 @@ def run_hybrid_grasp(
             for value in layer_ids
             if value in ring_by_id
             and (
-                not hybrid_config.side_ring_only_unmatched
+                hybrid_config.multi_surface_include_m36_rejected
+                or not hybrid_config.side_ring_only_unmatched
                 or value not in matched_ids
             )
         ]
@@ -925,12 +970,10 @@ def run_hybrid_grasp(
                 break
             global_side_attempt_rank += 1
             screen_started = time.perf_counter()
-            screen_fit = side_fit_fn(
-                instance,
-                depth_mm,
-                intrinsics,
-                template_config,
-                mouth_matched=False,
+            screen_fit = _call_side_fit(
+                side_fit_fn, instance, depth_mm, intrinsics, template_config,
+                mouth_instance=mouth_by_ring.get(int(instance.instance_id)),
+                mouth_matched=int(instance.instance_id) in matched_ids,
                 search_profile="screen",
                 exclusion_mask=_other_ring_exclusion_mask(instance, rings),
             )
@@ -975,12 +1018,10 @@ def run_hybrid_grasp(
                 break
 
             final_started = time.perf_counter()
-            final_fit = side_fit_fn(
-                instance,
-                depth_mm,
-                intrinsics,
-                template_config,
-                mouth_matched=False,
+            final_fit = _call_side_fit(
+                side_fit_fn, instance, depth_mm, intrinsics, template_config,
+                mouth_instance=mouth_by_ring.get(int(instance.instance_id)),
+                mouth_matched=int(instance.instance_id) in matched_ids,
                 search_profile="final_verify",
                 initial_axis=np.asarray(
                     screen_fit["axis_toward_camera"], dtype=np.float64
@@ -1039,12 +1080,10 @@ def run_hybrid_grasp(
                 best_id = int(best_screen["ring_instance_id"])
                 best_instance = ring_by_id[best_id]
                 local_started = time.perf_counter()
-                refined = side_fit_fn(
-                    best_instance,
-                    depth_mm,
-                    intrinsics,
-                    template_config,
-                    mouth_matched=False,
+                refined = _call_side_fit(
+                    side_fit_fn, best_instance, depth_mm, intrinsics, template_config,
+                    mouth_instance=mouth_by_ring.get(best_id),
+                    mouth_matched=best_id in matched_ids,
                     search_profile="local_accurate",
                     initial_axis=np.asarray(
                         best_screen["axis_toward_camera"], dtype=np.float64
@@ -1196,7 +1235,7 @@ def run_hybrid_grasp(
     result["depth_layering"] = {
         "enabled": bool(hybrid_config.depth_layering_enabled),
         "ordering_rule": (
-            "depth_layer_ascending_then_same_layer_m36_then_m37"
+            "depth_layer_ascending_then_m36_then_M37.6_multisurface"
         ),
         "surface_depth_statistic": f"p{hybrid_config.surface_depth_percentile:g}",
         "layer_tolerance_mm": float(hybrid_config.depth_layer_tolerance_mm),
@@ -1287,6 +1326,7 @@ def run_hybrid_grasp(
                 "depth_plane_ellipse_pose_conflict",
                 "ellipse_pose_has_insufficient_depth_support",
                 "ellipse_stabilized_pose_residual_too_high",
+                "pose_conflict_fallback_to_m37",
             }
             for reason in reasons
         ):
@@ -1309,10 +1349,16 @@ def run_hybrid_grasp(
             for reason in (fit.get("rejection_reasons") or [])
         )
     )
+    m36_pose_conflict_handoffs = sum(
+        1
+        for item in result.get("instances") or []
+        if "pose_conflict_fallback_to_m37" in (item.get("rejection_reasons") or [])
+    )
     result["m37_5_1_pose_safety"] = {
         "normal_constrained_axis_enabled": bool(template_config.normal_constrained_enabled),
         "neighbor_surface_exclusion_enabled": True,
         "m36_pose_conflict_rejection_count": int(m36_pose_conflict_rejections),
+        "m36_pose_conflict_handoff_count": int(m36_pose_conflict_handoffs),
         "m37_uncertainty_rejection_count": int(m37_uncertainty_rejections),
         "selected_branch": selected_branch,
         "selected_ring_instance_id": selected_ring_id,

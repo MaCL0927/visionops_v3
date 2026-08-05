@@ -738,7 +738,7 @@ class OnlineGeometryProcessor:
             )
             cv2.putText(
                 overlay,
-                "M37.4 branch: " + branch_label,
+                "M37.6 multi-surface branch: " + branch_label,
                 (10, max(36, overlay.shape[0] - 12)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.45,

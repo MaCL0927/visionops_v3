@@ -228,6 +228,33 @@ class SideRingTemplateConfig:
     maximum_bootstrap_axis_spread_deg: float
     maximum_normal_seed_disagreement_deg: float
     reject_when_normal_evidence_insufficient: bool
+
+    # M37.6 hollow short-cylinder multi-surface fitting.  The scene points may
+    # belong to the outer side wall, inner side wall or either annular end face.
+    multi_surface_enabled: bool
+    multi_surface_side_normal_max_deg: float
+    multi_surface_face_normal_max_deg: float
+    multi_surface_domain_penalty_weight: float
+    multi_surface_normal_penalty_weight: float
+    multi_surface_inlier_threshold_mm: float
+    multi_surface_minimum_outer_points: int
+    multi_surface_minimum_inner_points: int
+    multi_surface_minimum_face_points: int
+    multi_surface_mouth_annulus_dilate_px: int
+    multi_surface_mouth_annulus_inner_px: int
+    multi_surface_mouth_axis_weight: float
+    multi_surface_mouth_center_weight: float
+    multi_surface_center_iterations: int
+    multi_surface_minimum_surface_types: int
+    multi_surface_depth_gradient_weight: float
+    multi_surface_depth_gradient_hard_reject_enabled: bool
+    multi_surface_depth_gradient_min_delta_mm: float
+    multi_surface_depth_gradient_min_centroid_separation_mm: float
+    multi_surface_minimum_inlier_ratio: float
+    multi_surface_maximum_residual_median_mm: float
+    multi_surface_maximum_residual_p90_mm: float
+    multi_surface_maximum_depth_gradient_axis_error_deg: float
+    multi_surface_maximum_mouth_axis_error_deg: float
     random_seed: int
 
     @classmethod
@@ -573,6 +600,76 @@ class SideRingTemplateConfig:
             reject_when_normal_evidence_insufficient=bool(
                 section.get("reject_when_normal_evidence_insufficient", True)
             ),
+            multi_surface_enabled=bool(section.get("multi_surface_enabled", True)),
+            multi_surface_side_normal_max_deg=max(
+                5.0, _float(section, "multi_surface_side_normal_max_deg", 38.0)
+            ),
+            multi_surface_face_normal_max_deg=max(
+                5.0, _float(section, "multi_surface_face_normal_max_deg", 32.0)
+            ),
+            multi_surface_domain_penalty_weight=max(
+                0.0, _float(section, "multi_surface_domain_penalty_weight", 0.45)
+            ),
+            multi_surface_normal_penalty_weight=max(
+                0.0, _float(section, "multi_surface_normal_penalty_weight", 0.035)
+            ),
+            multi_surface_inlier_threshold_mm=max(
+                1.0, _float(section, "multi_surface_inlier_threshold_mm", 7.0)
+            ),
+            multi_surface_minimum_outer_points=max(
+                10, _int(section, "multi_surface_minimum_outer_points", 35)
+            ),
+            multi_surface_minimum_inner_points=max(
+                0, _int(section, "multi_surface_minimum_inner_points", 8)
+            ),
+            multi_surface_minimum_face_points=max(
+                0, _int(section, "multi_surface_minimum_face_points", 12)
+            ),
+            multi_surface_mouth_annulus_dilate_px=max(
+                1, _int(section, "multi_surface_mouth_annulus_dilate_px", 8)
+            ),
+            multi_surface_mouth_annulus_inner_px=max(
+                0, _int(section, "multi_surface_mouth_annulus_inner_px", 1)
+            ),
+            multi_surface_mouth_axis_weight=max(
+                0.0, _float(section, "multi_surface_mouth_axis_weight", 0.08)
+            ),
+            multi_surface_mouth_center_weight=max(
+                0.0, _float(section, "multi_surface_mouth_center_weight", 0.03)
+            ),
+            multi_surface_center_iterations=max(
+                2, _int(section, "multi_surface_center_iterations", 8)
+            ),
+            multi_surface_minimum_surface_types=max(
+                1, min(4, _int(section, "multi_surface_minimum_surface_types", 1))
+            ),
+            multi_surface_depth_gradient_weight=max(
+                0.0, _float(section, "multi_surface_depth_gradient_weight", 0.0)
+            ),
+            multi_surface_depth_gradient_hard_reject_enabled=bool(
+                section.get("multi_surface_depth_gradient_hard_reject_enabled", False)
+            ),
+            multi_surface_depth_gradient_min_delta_mm=max(
+                1.0, _float(section, "multi_surface_depth_gradient_min_delta_mm", 12.0)
+            ),
+            multi_surface_depth_gradient_min_centroid_separation_mm=max(
+                1.0, _float(section, "multi_surface_depth_gradient_min_centroid_separation_mm", 15.0)
+            ),
+            multi_surface_minimum_inlier_ratio=min(
+                1.0, max(0.05, _float(section, "multi_surface_minimum_inlier_ratio", 0.50))
+            ),
+            multi_surface_maximum_residual_median_mm=max(
+                0.5, _float(section, "multi_surface_maximum_residual_median_mm", 6.5)
+            ),
+            multi_surface_maximum_residual_p90_mm=max(
+                1.0, _float(section, "multi_surface_maximum_residual_p90_mm", 14.0)
+            ),
+            multi_surface_maximum_depth_gradient_axis_error_deg=max(
+                2.0, _float(section, "multi_surface_maximum_depth_gradient_axis_error_deg", 18.0)
+            ),
+            multi_surface_maximum_mouth_axis_error_deg=max(
+                2.0, _float(section, "multi_surface_maximum_mouth_axis_error_deg", 25.0)
+            ),
             random_seed=_int(section, "random_seed", 3701),
         )
 
@@ -601,6 +698,21 @@ class _AxisEvaluation:
     normal_radial_median_deg: float = float("inf")
     normal_radial_p90_deg: float = float("inf")
     visible_normal_span_deg: float = 0.0
+    surface_labels: Optional[np.ndarray] = None
+    surface_residual_mm: Optional[np.ndarray] = None
+    surface_inlier_mask: Optional[np.ndarray] = None
+    outer_surface_mask: Optional[np.ndarray] = None
+    inner_surface_mask: Optional[np.ndarray] = None
+    near_face_mask: Optional[np.ndarray] = None
+    far_face_mask: Optional[np.ndarray] = None
+    surface_counts: Optional[Dict[str, int]] = None
+    surface_residual_median_mm: float = float("inf")
+    surface_residual_p90_mm: float = float("inf")
+    mouth_axis_error_deg: Optional[float] = None
+    mouth_face_offset_mm: Optional[float] = None
+    surface_inlier_ratio: float = 0.0
+    represented_surface_type_count: int = 0
+    depth_gradient_axis_error_deg: Optional[float] = None
 
 
 def _fit_circle_center_fixed_radius(
@@ -721,6 +833,21 @@ def _evaluate_axis(
     )
 
 
+def _depth_gradient_hard_rejection_required(
+    *,
+    mouth_present: bool,
+    axis_error_deg: Optional[float],
+    config: SideRingTemplateConfig,
+) -> bool:
+    """Return whether the legacy depth-gradient cue may veto an M37 fit."""
+    return bool(
+        config.multi_surface_depth_gradient_hard_reject_enabled
+        and not mouth_present
+        and axis_error_deg is not None
+        and float(axis_error_deg)
+        > float(config.multi_surface_maximum_depth_gradient_axis_error_deg)
+    )
+
 
 def _axis_angle_deg(first: np.ndarray, second: np.ndarray) -> float:
     first = _unit(first)
@@ -832,6 +959,420 @@ def _evaluate_axis_normal_constrained(
         normal_radial_p90_deg=float(radial_p90),
         visible_normal_span_deg=float(visible_span),
     )
+
+
+
+
+@dataclass(frozen=True)
+class _MouthSupport:
+    center: np.ndarray
+    normal: np.ndarray
+    point_count: int
+    residual_median_mm: float
+    residual_p90_mm: float
+
+
+def _extract_mouth_support(
+    ring: SegmentationInstance,
+    mouth: Optional[SegmentationInstance],
+    depth_mm: np.ndarray,
+    intrinsics: Mapping[str, float],
+    config: SideRingTemplateConfig,
+) -> Optional[_MouthSupport]:
+    if mouth is None or mouth.mask.shape != ring.mask.shape:
+        return None
+    outer = cv2.dilate(
+        mouth.mask.astype(np.uint8),
+        np.ones((2 * config.multi_surface_mouth_annulus_dilate_px + 1,) * 2, dtype=np.uint8),
+        iterations=1,
+    ).astype(bool)
+    if config.multi_surface_mouth_annulus_inner_px > 0:
+        inner = cv2.dilate(
+            mouth.mask.astype(np.uint8),
+            np.ones((2 * config.multi_surface_mouth_annulus_inner_px + 1,) * 2, dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+    else:
+        inner = mouth.mask.astype(bool)
+    annulus = ring.mask.astype(bool) & outer & ~inner
+    valid = annulus & (depth_mm >= config.minimum_depth_mm) & (depth_mm <= config.maximum_depth_mm)
+    ys, xs = np.nonzero(valid)
+    if len(xs) < 20:
+        return None
+    z = depth_mm[ys, xs].astype(np.float64)
+    fx, fy = float(intrinsics['fx']), float(intrinsics['fy'])
+    cx, cy = float(intrinsics['cx']), float(intrinsics['cy'])
+    pts = np.column_stack(((xs-cx)*z/fx, (ys-cy)*z/fy, z))
+    # Robustly remove depth-edge contamination before SVD plane fitting.
+    med = float(np.median(pts[:,2]))
+    mad = max(1.0, float(np.median(np.abs(pts[:,2]-med))) * 1.4826)
+    pts = pts[np.abs(pts[:,2]-med) <= max(8.0, 3.0*mad)]
+    if len(pts) < 20:
+        return None
+    center = np.median(pts, axis=0)
+    centered = pts-center
+    try:
+        _,_,vh=np.linalg.svd(centered, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return None
+    normal=_unit(vh[-1])
+    if float(np.dot(normal, -center)) < 0.0:
+        normal=-normal
+    residual=np.abs(centered@normal)
+    return _MouthSupport(
+        center=np.asarray(center,dtype=np.float64),
+        normal=np.asarray(normal,dtype=np.float64),
+        point_count=int(len(pts)),
+        residual_median_mm=float(np.median(residual)),
+        residual_p90_mm=float(np.percentile(residual,90)),
+    )
+
+
+def _fit_hollow_center_2d(
+    points_2d: np.ndarray,
+    initial_center: np.ndarray,
+    config: SideRingTemplateConfig,
+    *,
+    iterations: int,
+) -> np.ndarray:
+    center=np.asarray(initial_center,dtype=np.float64).copy()
+    radii=np.asarray([config.outer_radius_mm, config.inner_radius_mm],dtype=np.float64)
+    for _ in range(max(2,int(iterations))):
+        delta=points_2d-center
+        dist=np.maximum(np.linalg.norm(delta,axis=1),1e-6)
+        targets=radii[np.argmin(np.abs(dist[:,None]-radii[None,:]),axis=1)]
+        residual=dist-targets
+        abs_r=np.abs(residual)
+        weights=np.ones_like(residual)
+        weights[abs_r>6.0]=6.0/np.maximum(abs_r[abs_r>6.0],1e-6)
+        weights[abs_r>18.0]*=0.15
+        jac=-delta/dist[:,None]
+        h=jac.T@(weights[:,None]*jac)+np.eye(2)*1e-6
+        g=jac.T@(weights*residual)
+        try:
+            step=np.linalg.solve(h,-g)
+        except np.linalg.LinAlgError:
+            break
+        n=float(np.linalg.norm(step))
+        if n>8.0: step*=8.0/n
+        center+=step
+        if float(np.linalg.norm(step))<1e-4: break
+    return center
+
+
+def _evaluate_axis_hollow_multisurface(
+    points: np.ndarray,
+    axis: np.ndarray,
+    config: SideRingTemplateConfig,
+    *,
+    normal_points: np.ndarray,
+    normals: np.ndarray,
+    mouth_support: Optional[_MouthSupport],
+    fixed_radius_iterations: int,
+    depth_gradient_axis: Optional[np.ndarray] = None,
+    depth_gradient_confidence: float = 0.0,
+) -> _AxisEvaluation:
+    axis=_unit(axis)
+    bu,bv=_basis_perpendicular(axis)
+    projected=np.column_stack((points@bu,points@bv))
+    outer_seed=_fit_circle_center_fixed_radius(projected,config.outer_radius_mm,max(2,fixed_radius_iterations//2))
+    center2d=_fit_hollow_center_2d(projected,outer_seed,config,iterations=config.multi_surface_center_iterations)
+    radial=np.linalg.norm(projected-center2d,axis=1)
+    axial_abs=points@axis
+    # Estimate axial center from side-compatible points, optionally anchored by the mouth annulus plane.
+    side_res=np.minimum(np.abs(radial-config.outer_radius_mm),np.abs(radial-config.inner_radius_mm))
+    side_mask=side_res<=max(8.0,config.multi_surface_inlier_threshold_mm*1.5)
+    source=axial_abs[side_mask] if int(np.count_nonzero(side_mask))>=20 else axial_abs
+    low=float(np.percentile(source,5)); high=float(np.percentile(source,95))
+    center_axial=0.5*(low+high)
+    mouth_axis_error=None; mouth_face_offset=None
+    if mouth_support is not None:
+        mouth_axis_error=_axis_angle_deg(axis,mouth_support.normal)
+        mouth_t=float(np.dot(mouth_support.center,axis))
+        # Choose the face sign that keeps the observed points closest to the nominal finite cylinder.
+        candidates=[mouth_t-0.5*config.axial_length_mm,mouth_t+0.5*config.axial_length_mm]
+        def center_cost(c):
+            t=axial_abs-c
+            return float(np.median(np.maximum(np.abs(t)-0.5*config.axial_length_mm,0.0)))
+        center_axial=min(candidates,key=center_cost)
+        mouth_face_offset=min(abs(mouth_t-(center_axial+0.5*config.axial_length_mm)),abs(mouth_t-(center_axial-0.5*config.axial_length_mm)))
+    axis_point=bu*center2d[0]+bv*center2d[1]+axis*center_axial
+    rel=points-axis_point
+    t=rel@axis
+    radial_vec=rel-t[:,None]*axis[None,:]
+    rho=np.linalg.norm(radial_vec,axis=1)
+    h=0.5*config.axial_length_mm
+    axial_domain=np.maximum(np.abs(t)-h,0.0)
+    radial_domain=np.maximum.reduce([config.inner_radius_mm-rho,rho-config.outer_radius_mm,np.zeros_like(rho)])
+    outer=np.abs(rho-config.outer_radius_mm)+config.multi_surface_domain_penalty_weight*axial_domain
+    inner=np.abs(rho-config.inner_radius_mm)+config.multi_surface_domain_penalty_weight*axial_domain
+    near=np.abs(t-h)+config.multi_surface_domain_penalty_weight*radial_domain
+    far=np.abs(t+h)+config.multi_surface_domain_penalty_weight*radial_domain
+    residuals=np.column_stack((outer,inner,near,far))
+    # Normal compatibility is evaluated against the surface assigned to each
+    # organized normal point.  M37.6 must not treat annular face normals as if
+    # they were outer-wall normals; that was the main source of mixed-pose bias.
+    if len(normals):
+        npnts=np.asarray(normal_points,dtype=np.float64)
+        nrm=np.asarray(normals,dtype=np.float64)
+        nrm=nrm/np.maximum(np.linalg.norm(nrm,axis=1)[:,None],1e-9)
+        nrel=npnts-axis_point
+        nt=nrel@axis
+        nr=nrel-nt[:,None]*axis[None,:]
+        nrho=np.linalg.norm(nr,axis=1)
+        nru=nr/np.maximum(nrho[:,None],1e-9)
+        n_axial_domain=np.maximum(np.abs(nt)-h,0.0)
+        n_radial_domain=np.maximum.reduce([
+            config.inner_radius_mm-nrho,
+            nrho-config.outer_radius_mm,
+            np.zeros_like(nrho),
+        ])
+        nres=np.column_stack((
+            np.abs(nrho-config.outer_radius_mm)+config.multi_surface_domain_penalty_weight*n_axial_domain,
+            np.abs(nrho-config.inner_radius_mm)+config.multi_surface_domain_penalty_weight*n_axial_domain,
+            np.abs(nt-h)+config.multi_surface_domain_penalty_weight*n_radial_domain,
+            np.abs(nt+h)+config.multi_surface_domain_penalty_weight*n_radial_domain,
+        ))
+        nlabels=np.argmin(nres,axis=1)
+        side_sel=(nlabels==0)|(nlabels==1)
+        face_sel=(nlabels==2)|(nlabels==3)
+        side_axis_error=np.degrees(np.arcsin(np.clip(np.abs(nrm@axis),0,1)))
+        side_radial_error=np.degrees(np.arccos(np.clip(np.abs(np.sum(nrm*nru,axis=1)),0,1)))
+        face_axis_error=np.degrees(np.arccos(np.clip(np.abs(nrm@axis),0,1)))
+        combined_axis_error=np.where(side_sel,side_axis_error,face_axis_error)
+        normal_inlier=(
+            (side_sel & (side_axis_error<=config.multi_surface_side_normal_max_deg)
+             & (side_radial_error<=config.normal_radial_inlier_deg))
+            | (face_sel & (face_axis_error<=config.multi_surface_face_normal_max_deg))
+        )
+        normal_inlier_ratio=float(np.mean(normal_inlier))
+        normal_axis_median=float(np.median(combined_axis_error))
+        normal_axis_p90=float(np.percentile(combined_axis_error,90))
+        if int(np.count_nonzero(side_sel)):
+            normal_radial_median=float(np.median(side_radial_error[side_sel]))
+            normal_radial_p90=float(np.percentile(side_radial_error[side_sel],90))
+        else:
+            normal_radial_median=0.0; normal_radial_p90=0.0
+        side_normal_inlier=side_sel & normal_inlier
+        if int(np.count_nonzero(side_normal_inlier))>=2:
+            nb_u,nb_v=_basis_perpendicular(axis)
+            dirs=nru[side_normal_inlier]
+            angles=np.arctan2(dirs@nb_v,dirs@nb_u)
+            visible_span=_occupied_circular_span_deg(angles)
+        else:
+            visible_span=0.0
+        normal_model_error=float(np.median(np.where(side_sel,0.55*side_axis_error+0.45*side_radial_error,face_axis_error)))
+    else:
+        normal_axis_median=normal_axis_p90=normal_radial_median=normal_radial_p90=float('inf')
+        normal_inlier_ratio=0.0; visible_span=0.0; normal_model_error=90.0
+    labels=np.argmin(residuals,axis=1)
+    chosen=residuals[np.arange(len(points)),labels]
+    inlier=chosen<=config.multi_surface_inlier_threshold_mm
+    counts={name:int(np.count_nonzero((labels==i)&inlier)) for i,name in enumerate(('outer','inner','near_face','far_face'))}
+    outer_mask=(labels==0)&inlier
+    inner_mask=(labels==1)&inlier
+    near_mask=(labels==2)&inlier
+    far_mask=(labels==3)&inlier
+    side_combined=outer_mask|inner_mask
+    radial_res=np.minimum(np.abs(rho-config.outer_radius_mm),np.abs(rho-config.inner_radius_mm))
+    radial_mask=outer_mask if int(np.count_nonzero(outer_mask))>=config.multi_surface_minimum_outer_points else side_combined
+    radial_ratio=float(np.mean(radial_mask))
+    med=float(np.median(chosen)); p70=float(np.percentile(chosen,70)); p90=float(np.percentile(chosen,90))
+    span_source=t[side_combined] if int(np.count_nonzero(side_combined))>=20 else t[inlier] if int(np.count_nonzero(inlier))>=20 else t
+    span=float(np.percentile(span_source,95)-np.percentile(span_source,5))
+    represented=sum(int(v>=max(5, config.multi_surface_minimum_inner_points if k=='inner' else config.multi_surface_minimum_face_points if 'face' in k else config.multi_surface_minimum_outer_points)) for k,v in counts.items())
+    surface_inlier_ratio=float(np.mean(inlier))
+    coverage_penalty=max(0,config.multi_surface_minimum_surface_types-represented)*2.0
+    score=med+0.30*p70+0.08*p90+7.0*(1.0-float(np.mean(inlier)))+coverage_penalty
+    if len(normals):
+        score += config.multi_surface_normal_penalty_weight*normal_model_error
+    gradient_error = None
+    if depth_gradient_axis is not None and depth_gradient_confidence > 0.0:
+        gradient_error = _axis_angle_deg(axis, depth_gradient_axis)
+        if mouth_support is None:
+            score += (
+                config.multi_surface_depth_gradient_weight
+                * float(depth_gradient_confidence)
+                * float(gradient_error)
+            )
+    if mouth_support is not None:
+        score += config.multi_surface_mouth_axis_weight*float(mouth_axis_error or 0.0)
+        score += config.multi_surface_mouth_center_weight*float(mouth_face_offset or 0.0)
+    return _AxisEvaluation(
+        score=float(score),axis=axis,basis_u=bu,basis_v=bv,circle_center_2d=center2d,axis_point=axis_point,
+        radial_distance_mm=rho,radial_residual_mm=radial_res,radial_inlier_mask=radial_mask,
+        radial_inlier_ratio=radial_ratio,residual_median_mm=float(np.median(radial_res)),
+        residual_p70_mm=float(np.percentile(radial_res,70)),residual_p90_mm=float(np.percentile(radial_res,90)),
+        axial_coordinate_mm=points@axis,observed_axis_span_mm=span,
+        normal_point_count=int(len(normals)),normal_inlier_ratio=normal_inlier_ratio,
+        normal_axis_median_deg=normal_axis_median,normal_axis_p90_deg=normal_axis_p90,
+        normal_radial_median_deg=normal_radial_median,normal_radial_p90_deg=normal_radial_p90,
+        visible_normal_span_deg=visible_span,surface_labels=labels,surface_residual_mm=chosen,
+        surface_inlier_mask=inlier,outer_surface_mask=outer_mask,inner_surface_mask=inner_mask,
+        near_face_mask=near_mask,far_face_mask=far_mask,surface_counts=counts,
+        surface_residual_median_mm=med,surface_residual_p90_mm=p90,
+        mouth_axis_error_deg=mouth_axis_error,mouth_face_offset_mm=mouth_face_offset,
+        surface_inlier_ratio=surface_inlier_ratio,
+        represented_surface_type_count=int(represented),
+        depth_gradient_axis_error_deg=(float(gradient_error) if gradient_error is not None else None),
+    )
+
+
+
+def _bootstrap_depth_gradient_axis_stability(
+    points: np.ndarray,
+    reference_axis: np.ndarray,
+    config: SideRingTemplateConfig,
+    *,
+    trials: int,
+) -> Dict[str, Any]:
+    if trials <= 0 or len(points) < 80:
+        return {'trial_count': 0, 'angles_deg': [], 'maximum_axis_spread_deg': 0.0, 'median_axis_spread_deg': 0.0}
+    rng=np.random.default_rng(config.random_seed+1777)
+    angles=[]
+    sample_count=max(60,int(round(len(points)*0.65)))
+    sample_count=min(len(points),sample_count)
+    for _ in range(trials):
+        sample=points[rng.choice(len(points),size=sample_count,replace=False)]
+        z=sample[:,2]
+        q25,q75=np.percentile(z,[25,75])
+        shallow=sample[z<=q25]; deep=sample[z>=q75]
+        if len(shallow)<10 or len(deep)<10:
+            continue
+        axis=np.mean(deep,axis=0)-np.mean(shallow,axis=0)
+        if float(np.linalg.norm(axis))<=5.0:
+            continue
+        angles.append(_axis_angle_deg(axis,reference_axis))
+    return {
+        'trial_count': int(len(angles)),
+        'angles_deg': [float(v) for v in angles],
+        'maximum_axis_spread_deg': float(max(angles) if angles else 0.0),
+        'median_axis_spread_deg': float(np.median(angles) if angles else 0.0),
+        'source': 'depth_gradient_resampling',
+    }
+
+
+def _fit_axis_hollow_multisurface(
+    points: np.ndarray,
+    normal_points: np.ndarray,
+    normals: np.ndarray,
+    config: SideRingTemplateConfig,
+    *,
+    profile: str,
+    initial_axis: Optional[np.ndarray],
+    mouth_support: Optional[_MouthSupport],
+) -> Tuple[_AxisEvaluation, Dict[str, Any]]:
+    requested_profile=str(profile).strip().lower()
+    profile = 'fast' if requested_profile == 'auto' else requested_profile
+    if profile=='screen':
+        max_points=config.screen_maximum_fit_points; angles=config.screen_local_refine_angles_deg
+        rs=config.screen_local_refine_radial_steps; az=config.screen_local_refine_azimuth_steps; it=config.screen_fixed_radius_iterations
+        seed_limit=config.screen_axis_hypothesis_count
+    elif profile=='final_verify':
+        max_points=config.final_validation_maximum_fit_points; angles=config.final_validation_refine_angles_deg
+        rs=config.final_validation_refine_radial_steps; az=config.final_validation_refine_azimuth_steps; it=config.final_validation_fixed_radius_iterations
+        seed_limit=max(2,config.final_validation_top_k_hypotheses)
+    else:
+        max_points=config.local_accurate_maximum_fit_points if profile=='local_accurate' else config.fast_maximum_fit_points
+        angles=config.local_accurate_refine_angles_deg if profile=='local_accurate' else config.fast_local_refine_angles_deg
+        rs=config.local_accurate_refine_radial_steps if profile=='local_accurate' else config.fast_local_refine_radial_steps
+        az=config.local_accurate_refine_azimuth_steps if profile=='local_accurate' else config.fast_local_refine_azimuth_steps
+        it=config.local_accurate_fixed_radius_iterations if profile=='local_accurate' else config.fast_fixed_radius_iterations
+        seed_limit=max(3,config.normal_axis_hypothesis_count)
+    started=time.perf_counter()
+    search=_sample_search_points(points,max_points,random_seed=config.random_seed+1301)
+    depth_gradient_axis = None
+    depth_gradient_confidence = 0.0
+    if len(search) >= 40:
+        z_all = search[:, 2]
+        q25_all, q75_all = np.percentile(z_all, [25, 75])
+        shallow_all = search[z_all <= q25_all]
+        deep_all = search[z_all >= q75_all]
+        if len(shallow_all) >= 10 and len(deep_all) >= 10:
+            gradient_vector = np.mean(deep_all, axis=0) - np.mean(shallow_all, axis=0)
+            delta_depth = abs(float(np.mean(deep_all[:, 2]) - np.mean(shallow_all[:, 2])))
+            centroid_separation = float(np.linalg.norm(gradient_vector))
+            lateral_separation = float(np.linalg.norm(gradient_vector[:2]))
+            if (
+                delta_depth >= config.multi_surface_depth_gradient_min_delta_mm
+                and lateral_separation >= config.multi_surface_depth_gradient_min_centroid_separation_mm
+            ):
+                depth_gradient_axis = _hemisphere_axis(gradient_vector)
+                depth_gradient_confidence = min(
+                    1.0,
+                    0.5 * delta_depth / max(config.multi_surface_depth_gradient_min_delta_mm, 1e-6)
+                    + 0.5 * lateral_separation / max(config.multi_surface_depth_gradient_min_centroid_separation_mm, 1e-6),
+                )
+    seeds=[]
+    if initial_axis is not None: seeds.append(_hemisphere_axis(np.asarray(initial_axis,dtype=np.float64)))
+    if mouth_support is not None: seeds.append(_hemisphere_axis(mouth_support.normal))
+    # Mixed poses often expose a strong monotonic depth gradient along the
+    # cylinder axis even when local normals are dominated by an annular face.
+    if depth_gradient_axis is not None:
+        seeds.append(depth_gradient_axis)
+        try:
+            centered=search-np.mean(search,axis=0)
+            _,_,vh=np.linalg.svd(centered,full_matrices=False)
+            seeds.extend(_hemisphere_axis(v) for v in vh[:3])
+        except np.linalg.LinAlgError:
+            pass
+    nseeds,cov=_normal_axis_seeds(search,normals,config,initial_axis=None,maximum_count=seed_limit,pair_hypothesis_samples=min(80,config.normal_pair_hypothesis_samples),fallback_global_samples=min(12,config.normal_fallback_global_samples))
+    seeds.extend(nseeds)
+    seeds=_deduplicate_axes(seeds,minimum_angle_deg=config.normal_hypothesis_dedup_deg,maximum_count=seed_limit)
+    if not seeds: raise ValueError('M37.6 multi-surface fitting has no axis seeds')
+    eval_count=0
+    evaluated=[]
+    for axis in seeds:
+        evaluated.append(_evaluate_axis_hollow_multisurface(search,axis,config,normal_points=normal_points,normals=normals,mouth_support=mouth_support,fixed_radius_iterations=it,depth_gradient_axis=depth_gradient_axis,depth_gradient_confidence=depth_gradient_confidence)); eval_count+=1
+    active=sorted(evaluated,key=lambda x:x.score)[:max(1,min(3,len(evaluated)))]
+    levels=[]
+    for angle in angles:
+        ls=time.perf_counter(); new=[]
+        for base in active:
+            for axis in _local_axis_candidates(base.axis,float(angle),rs,az):
+                new.append(_evaluate_axis_hollow_multisurface(search,axis,config,normal_points=normal_points,normals=normals,mouth_support=mouth_support,fixed_radius_iterations=it,depth_gradient_axis=depth_gradient_axis,depth_gradient_confidence=depth_gradient_confidence)); eval_count+=1
+        active=_top_axis_evaluations(new,config,maximum_count=max(1,min(3,len(new))))
+        levels.append({'angle_deg':float(angle),'candidate_count':len(new),'ms':(time.perf_counter()-ls)*1000.0})
+    best=min(active,key=lambda x:x.score)
+    full=_evaluate_axis_hollow_multisurface(points,best.axis,config,normal_points=normal_points,normals=normals,mouth_support=mouth_support,fixed_radius_iterations=it,depth_gradient_axis=depth_gradient_axis,depth_gradient_confidence=depth_gradient_confidence)
+    top=sorted(active,key=lambda x:x.score)[:3]
+    bootstrap_trials = 0 if profile=='screen' else config.final_validation_bootstrap_trials
+    if depth_gradient_axis is not None and mouth_support is None:
+        bootstrap = _bootstrap_depth_gradient_axis_stability(points, full.axis, config, trials=bootstrap_trials)
+    else:
+        bootstrap = _bootstrap_normal_axis_stability(normals,full.axis,config,trials_override=bootstrap_trials)
+    uncertainty={'hypotheses':[{'axis':e.axis.tolist(),'score':float(e.score),'surface_counts':dict(e.surface_counts or {})} for e in top],
+                 'ambiguous_top_hypotheses':False,'bootstrap':bootstrap}
+    if len(top)>=2:
+        sep=_axis_angle_deg(top[0].axis,top[1].axis); margin=float(top[1].score-top[0].score)
+        uncertainty['top2_axis_separation_deg']=sep; uncertainty['top2_score_margin']=margin
+        uncertainty['ambiguous_top_hypotheses']=bool(sep>=config.ambiguity_min_axis_separation_deg and margin<config.ambiguity_min_score_margin)
+    total_ms=(time.perf_counter()-started)*1000.0
+    profile_detail={
+        'warm_start': bool(initial_axis is not None),
+        'global_axis_samples': 0 if profile in {'local_accurate','final_verify'} else int(len(seeds)),
+        'global_search_ms': float(max(0.001, total_ms - sum(float(item['ms']) for item in levels))) if profile not in {'local_accurate','final_verify'} else 0.0,
+        'candidate_evaluations': int(eval_count),
+    }
+    return full,{
+        'requested_profile': requested_profile,
+        'final_profile': profile,
+        'fit_model':'hollow_short_cylinder_multisurface',
+        'normal_constrained': True,
+        'candidate_evaluations':eval_count,
+        'local_refine_levels_ms':levels,
+        'uncertainty':uncertainty,
+        'mouth_support':None if mouth_support is None else {'point_count':mouth_support.point_count,'normal':mouth_support.normal.tolist(),'center_camera_mm':mouth_support.center.tolist(),'plane_residual_median_mm':mouth_support.residual_median_mm,'plane_residual_p90_mm':mouth_support.residual_p90_mm},
+        'depth_gradient_support': {
+            'enabled': depth_gradient_axis is not None,
+            'axis': depth_gradient_axis.tolist() if depth_gradient_axis is not None else None,
+            'confidence': float(depth_gradient_confidence),
+        },
+        'total_ms':total_ms,'fallback_used':False,'fallback_reasons':[],
+        profile: profile_detail,
+        'fast': profile_detail if profile == 'fast' else {},
+        'local_accurate': profile_detail if profile == 'local_accurate' else {},
+    }
 
 
 def _deduplicate_axes(
@@ -2179,6 +2720,7 @@ def fit_side_ring_instance(
     search_profile: str = "auto",
     initial_axis: Optional[np.ndarray] = None,
     exclusion_mask: Optional[np.ndarray] = None,
+    mouth_instance: Optional[SegmentationInstance] = None,
 ) -> Dict[str, Any]:
     """Fit one parameterized short-cylinder template to a foam-ring mask."""
 
@@ -2251,14 +2793,28 @@ def fit_side_ring_instance(
             },
         }
 
-    evaluation, axis_search_timing = _fit_axis_m375(
-        points,
-        normal_points,
-        normals,
-        config,
-        search_profile=search_profile,
-        initial_axis=initial_axis,
+    mouth_support = _extract_mouth_support(
+        instance, mouth_instance, depth_mm, intrinsics, config
     )
+    if config.multi_surface_enabled:
+        evaluation, axis_search_timing = _fit_axis_hollow_multisurface(
+            points,
+            normal_points,
+            normals,
+            config,
+            profile=search_profile,
+            initial_axis=initial_axis,
+            mouth_support=mouth_support,
+        )
+    else:
+        evaluation, axis_search_timing = _fit_axis_m375(
+            points,
+            normal_points,
+            normals,
+            config,
+            search_profile=search_profile,
+            initial_axis=initial_axis,
+        )
     fit_ms = float(axis_search_timing.get("total_ms", 0.0))
     pose_started = time.perf_counter()
 
@@ -2347,36 +2903,72 @@ def fit_side_ring_instance(
         )
     )
     rejection_reasons = []
-    if mouth_matched:
+    diagnostic_flags: List[str] = []
+    if mouth_matched and (not config.multi_surface_enabled or mouth_instance is None):
         rejection_reasons.append("mouth_matched_prefer_m36_branch")
-    if evaluation.radial_inlier_ratio < config.minimum_radial_inlier_ratio:
-        rejection_reasons.append("radial_inlier_ratio_too_low")
-    if evaluation.residual_median_mm > config.maximum_radial_residual_median_mm:
-        rejection_reasons.append("radial_residual_median_too_high")
-    if evaluation.residual_p90_mm > config.maximum_radial_residual_p90_mm:
-        rejection_reasons.append("radial_residual_p90_too_high")
+    if config.multi_surface_enabled:
+        if evaluation.surface_inlier_ratio < config.multi_surface_minimum_inlier_ratio:
+            rejection_reasons.append("multi_surface_inlier_ratio_too_low")
+        if evaluation.surface_residual_median_mm > config.multi_surface_maximum_residual_median_mm:
+            rejection_reasons.append("multi_surface_residual_median_too_high")
+        if evaluation.surface_residual_p90_mm > config.multi_surface_maximum_residual_p90_mm:
+            rejection_reasons.append("multi_surface_residual_p90_too_high")
+        if evaluation.represented_surface_type_count < config.multi_surface_minimum_surface_types:
+            rejection_reasons.append("multi_surface_evidence_types_insufficient")
+        depth_gradient_disagrees = bool(
+            mouth_instance is None
+            and evaluation.depth_gradient_axis_error_deg is not None
+            and evaluation.depth_gradient_axis_error_deg
+            > config.multi_surface_maximum_depth_gradient_axis_error_deg
+        )
+        if _depth_gradient_hard_rejection_required(
+            mouth_present=mouth_instance is not None,
+            axis_error_deg=evaluation.depth_gradient_axis_error_deg,
+            config=config,
+        ):
+            rejection_reasons.append("axis_disagrees_with_depth_gradient")
+        elif depth_gradient_disagrees:
+            diagnostic_flags.append("axis_disagrees_with_depth_gradient_diagnostic")
+        if (
+            evaluation.mouth_axis_error_deg is not None
+            and evaluation.mouth_axis_error_deg > config.multi_surface_maximum_mouth_axis_error_deg
+        ):
+            rejection_reasons.append("axis_disagrees_with_mouth_face")
+    else:
+        if evaluation.radial_inlier_ratio < config.minimum_radial_inlier_ratio:
+            rejection_reasons.append("radial_inlier_ratio_too_low")
+        if evaluation.residual_median_mm > config.maximum_radial_residual_median_mm:
+            rejection_reasons.append("radial_residual_median_too_high")
+        if evaluation.residual_p90_mm > config.maximum_radial_residual_p90_mm:
+            rejection_reasons.append("radial_residual_p90_too_high")
     if evaluation.observed_axis_span_mm < config.minimum_observed_axis_span_mm:
         rejection_reasons.append("observed_axis_span_too_short")
     if evaluation.observed_axis_span_mm > config.maximum_observed_axis_span_mm:
         rejection_reasons.append("observed_axis_span_too_long")
-    if axis_view_angle_deg < config.minimum_side_lay_angle_deg:
+    if (
+        not config.multi_surface_enabled
+        and axis_view_angle_deg < config.minimum_side_lay_angle_deg
+    ):
         rejection_reasons.append("axis_not_side_laying")
 
     uncertainty = axis_search_timing.get("uncertainty") or {}
     bootstrap = uncertainty.get("bootstrap") or {}
     deferred_safety_checks: List[str] = []
     if config.normal_constrained_enabled:
-        # Preliminary screening uses robust central evidence only. Tail P90,
-        # Top-K ambiguity, seed disagreement and bootstrap are intentionally
-        # delayed until the selected candidate reaches ``final_verify``.
-        if evaluation.normal_inlier_ratio < config.minimum_normal_inlier_ratio:
-            rejection_reasons.append("surface_normal_inlier_ratio_too_low")
-        if evaluation.normal_axis_median_deg > config.maximum_normal_axis_median_deg:
-            rejection_reasons.append("surface_normals_not_perpendicular_to_axis")
-        if evaluation.normal_radial_median_deg > config.maximum_normal_radial_median_deg:
-            rejection_reasons.append("surface_normals_not_radial")
-        if evaluation.visible_normal_span_deg < config.minimum_visible_normal_span_deg:
-            rejection_reasons.append("visible_cylindrical_normal_span_too_small")
+        # M37.6 evaluates side-wall and annular-face normals against different
+        # template surfaces. In mixed poses, depth-gradient/mouth and multi-
+        # surface residuals may provide stronger evidence than the aggregate
+        # legacy side-normal metrics, so those legacy median gates become
+        # diagnostics rather than hard vetoes.
+        if not config.multi_surface_enabled:
+            if evaluation.normal_inlier_ratio < config.minimum_normal_inlier_ratio:
+                rejection_reasons.append("surface_normal_inlier_ratio_too_low")
+            if evaluation.normal_axis_median_deg > config.maximum_normal_axis_median_deg:
+                rejection_reasons.append("surface_normals_not_perpendicular_to_axis")
+            if evaluation.normal_radial_median_deg > config.maximum_normal_radial_median_deg:
+                rejection_reasons.append("surface_normals_not_radial")
+            if evaluation.visible_normal_span_deg < config.minimum_visible_normal_span_deg:
+                rejection_reasons.append("visible_cylindrical_normal_span_too_small")
 
         if preliminary_validation:
             deferred_safety_checks.extend(
@@ -2389,10 +2981,11 @@ def fit_side_ring_instance(
                 ]
             )
         else:
-            if evaluation.normal_axis_p90_deg > config.maximum_normal_axis_p90_deg:
-                rejection_reasons.append("surface_normal_axis_p90_too_high")
-            if evaluation.normal_radial_p90_deg > config.maximum_normal_radial_p90_deg:
-                rejection_reasons.append("surface_normal_radial_p90_too_high")
+            if not config.multi_surface_enabled:
+                if evaluation.normal_axis_p90_deg > config.maximum_normal_axis_p90_deg:
+                    rejection_reasons.append("surface_normal_axis_p90_too_high")
+                if evaluation.normal_radial_p90_deg > config.maximum_normal_radial_p90_deg:
+                    rejection_reasons.append("surface_normal_radial_p90_too_high")
             if bool(uncertainty.get("ambiguous_top_hypotheses", False)):
                 rejection_reasons.append("axis_hypotheses_ambiguous")
             if float(uncertainty.get("normal_seed_axis_disagreement_deg", 0.0)) > config.maximum_normal_seed_disagreement_deg:
@@ -2449,6 +3042,17 @@ def fit_side_ring_instance(
         ),
         "eligible": len(rejection_reasons) == 0,
         "rejection_reasons": rejection_reasons,
+        "diagnostic_flags": diagnostic_flags,
+        "depth_gradient_policy": {
+            "score_weight": float(config.multi_surface_depth_gradient_weight),
+            "hard_reject_enabled": bool(
+                config.multi_surface_depth_gradient_hard_reject_enabled
+            ),
+            "diagnostic_only": bool(
+                config.multi_surface_depth_gradient_weight <= 0.0
+                and not config.multi_surface_depth_gradient_hard_reject_enabled
+            ),
+        },
         "fit_score": float(evaluation.score),
         "point_count_raw": raw_point_count,
         "point_count_trimmed": trimmed_point_count,
@@ -2457,6 +3061,18 @@ def fit_side_ring_instance(
         "normal_valid_ratio": float(normal_valid_ratio),
         "surface_separation": dict(extraction_timing),
         "normal_constrained": bool(config.normal_constrained_enabled),
+        "fit_model": str(axis_search_timing.get("fit_model") or "outer_cylinder_surface"),
+        "multi_surface_enabled": bool(config.multi_surface_enabled),
+        "surface_counts": dict(evaluation.surface_counts or {}),
+        "surface_residual_median_mm": float(evaluation.surface_residual_median_mm),
+        "surface_residual_p90_mm": float(evaluation.surface_residual_p90_mm),
+        "surface_inlier_ratio": float(evaluation.surface_inlier_ratio),
+        "represented_surface_type_count": int(evaluation.represented_surface_type_count),
+        "depth_gradient_axis_error_deg": evaluation.depth_gradient_axis_error_deg,
+        "depth_gradient_support": axis_search_timing.get("depth_gradient_support"),
+        "mouth_surface_support": axis_search_timing.get("mouth_support"),
+        "mouth_axis_error_deg": evaluation.mouth_axis_error_deg,
+        "mouth_face_offset_mm": evaluation.mouth_face_offset_mm,
         "normal_inlier_ratio": float(evaluation.normal_inlier_ratio),
         "normal_axis_median_deg": float(evaluation.normal_axis_median_deg),
         "normal_axis_p90_deg": float(evaluation.normal_axis_p90_deg),

@@ -380,7 +380,7 @@ class FoamRingOnlineService:
                     prepared,
                     save_debug=job.save_debug,
                     generate_overlay=bool(self.settings["latest_overlay_enabled"]),
-                    stage="M37.5.1_staged_pose_validation_persistent_trigger_service",
+                    stage="M37.6_hollow_cylinder_multisurface_persistent_trigger_service",
                     geometry_queue_wait_ms=geometry_wait_ms,
                 )
                 service_processing_ms = max(
@@ -496,7 +496,7 @@ class FoamRingOnlineService:
         return {
             "schema_version": "1.0",
             "message_type": "foam_ring_trigger_result",
-            "stage": str(payload.get("stage") or "M37.5.1_staged_pose_validation_persistent_trigger_service"),
+            "stage": str(payload.get("stage") or "M37.6_hollow_cylinder_multisurface_persistent_trigger_service"),
             "status": "ok",
             "request_id": job.request_id,
             "idempotent_replay": False,
@@ -881,7 +881,7 @@ def run(
     )
     thread.start()
     print(
-        "Foam Ring M37.5.1 Staged Pose-Validation Hybrid Service started: http={}:{} runtime={} "
+        "Foam Ring M37.6 Hollow-Cylinder Multi-Surface Hybrid Service started: http={}:{} runtime={} "
         "m36_mode={} hybrid={} queue={}".format(
             settings["listen_host"],
             settings["listen_port"],
