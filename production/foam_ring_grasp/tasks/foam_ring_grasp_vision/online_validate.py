@@ -58,7 +58,7 @@ def run_once(
         return processor.process(
             save_debug=None,
             generate_overlay=False,
-            stage="M37.6_hollow_cylinder_multisurface_online_geometry_once",
+            stage="M38.2_partial_opening_local_cylinder_online_geometry_once",
         ).payload
     finally:
         processor.stop()

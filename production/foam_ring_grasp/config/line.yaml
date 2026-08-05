@@ -1,5 +1,5 @@
-schema_version: "6.1"
-task: foam_ring_rim_pinch_m38_1_front_annulus_branch_a
+schema_version: "6.2"
+task: foam_ring_rim_pinch_m38_2_partial_opening_branch_b
 
 classes:
   foam_ring: foam_ring
@@ -559,6 +559,100 @@ m38_branch_a:
   minimum_plane_inlier_ratio: 0.45
   maximum_plane_residual_p95_mm: 7.0
 
+# M38.2 branch B: an incomplete ring_mouth must still expose a real axial end.
+# The local outer side patch behind that end is fitted to the known outer
+# radius.  Nominal complete inner/outer opening projections are created only
+# after the side-cylinder and partial-end checks pass, then the existing
+# inner/outer rim-pinch and full collision pipeline remains authoritative. A ring with
+# only an outer side surface and no opening/end evidence is never accepted.
+m38_branch_b:
+  enabled: true
+  fallback_to_m36: true
+  maximum_candidates_per_trigger: 4
+
+  # Partial-mouth evidence. Branch A remains first priority for a complete
+  # clear opening; branch B accepts weaker associations but still requires the
+  # segmented mouth to overlap the fitted near opening.
+  allowed_association_modes: [strict_envelope, bbox_fallback]
+  minimum_mouth_containment: 0.28
+  minimum_mouth_to_ring_area_ratio: 0.012
+  maximum_mouth_to_ring_area_ratio: 0.50
+  minimum_ring_mouth_center_offset_px: 3.0
+  minimum_partial_mouth_overlap_ratio: 0.42
+  maximum_opening_center_error_px: 18.0
+  maximum_opening_center_error_radius_ratio: 0.55
+
+  # Extract only the observed outer-cylinder side patch behind the partial
+  # mouth. Ring boundaries, the mouth itself, neighboring instances and sharp
+  # depth jumps are excluded before point/normal estimation.
+  ring_mask_erode_px: 2
+  mouth_exclusion_dilate_px: 3
+  neighbor_exclusion_dilate_px: 2
+  minimum_side_band_inset_px: 4.0
+  minimum_side_band_inset_ratio: 0.05
+  maximum_side_band_inset_ratio: 0.72
+  depth_edge_threshold_mm: 14.0
+  depth_edge_dilate_px: 1
+  surface_component_minimum_ratio: 0.08
+  normal_neighbor_step_px: 2
+  minimum_side_points: 80
+  minimum_normal_points: 40
+  maximum_fit_points: 600
+  maximum_normal_fit_points: 500
+
+  # Bounded fixed-radius local cylinder fit. The local-normal covariance, point
+  # PCA and 2-D endpoint direction provide seeds; no global pose/ICP sweep is
+  # performed.
+  local_refine_angles_deg: [7.0, 2.5]
+  local_refine_radial_steps: 1
+  local_refine_azimuth_steps: 8
+  local_refine_top_k: 3
+  fixed_radius_iterations: 6
+  radial_inlier_threshold_mm: 6.0
+  minimum_radial_inlier_ratio: 0.55
+  maximum_radial_residual_median_mm: 4.5
+  maximum_radial_residual_p90_mm: 13.0
+  maximum_normal_axis_median_deg: 16.0
+  maximum_normal_axis_p90_deg: 38.0
+  maximum_normal_radial_median_deg: 28.0
+  minimum_visible_normal_span_deg: 20.0
+  maximum_projected_axis_error_deg: 28.0
+  minimum_observed_side_span_mm: 18.0
+
+  # Restrict branch B to half-side/side poses where some near opening remains
+  # observable. Nearly frontal targets belong to branch A; a perfectly side-on
+  # axis is rejected because the inner finger entry direction is not reliable.
+  minimum_axis_view_angle_deg: 24.0
+  maximum_axis_view_angle_deg: 88.0
+
+  # Partial axial-end anchor. This is the safety gate that prevents a pure
+  # outer-side patch from being treated as an enterable inner opening.
+  endpoint_ring_erode_px: 1
+  endpoint_support_expand_ratio: 0.70
+  minimum_endpoint_support_expand_px: 6
+  maximum_endpoint_support_expand_px: 28
+  endpoint_mouth_inner_exclusion_px: 1
+  minimum_endpoint_support_points: 20
+  opening_plane_axial_percentile: 78.0
+  endpoint_plane_inlier_threshold_mm: 8.0
+  minimum_endpoint_plane_inlier_points: 20
+  minimum_endpoint_plane_inlier_ratio: 0.08
+  maximum_endpoint_axial_residual_p90_mm: 8.0
+  minimum_opening_near_margin_mm: -3.0
+
+  # Nominal inner/outer opening projections, used only after all measured
+  # side-cylinder and partial-end evidence passes. They recover the local wall
+  # section for the existing inner/outer rim-pinch evaluator; they do not create
+  # evidence for an otherwise hidden opening.
+  synthetic_mouth_sample_count: 96
+  minimum_synthetic_mouth_area_px: 80
+  minimum_synthetic_outer_area_px: 180
+
+  # Branch-B geometry may exceed the old M36 tilt limit, but all box, neighbor,
+  # finger-body, insertion and motion collision checks remain enabled.
+  maximum_candidate_tilt_deg: 82.0
+  robot_safe_max_tilt_deg: 82.0
+
 hybrid_grasp:
   # M37.4 unified trigger policy. All rings are ranked by robust front-surface
   # depth and grouped into layers before either branch performs expensive work.
@@ -575,9 +669,9 @@ hybrid_grasp:
   depth_layering:
     enabled: true
     # Rings whose robust front-surface depths differ by no more than this value
-    # are treated as the same physical layer. Branch type is considered only
-    # inside one layer; a deeper M36 target cannot jump ahead of a shallower M37
-    # target.
+    # are treated as the same physical layer for retained M36/M37.6 fallback.
+    # M38.1 and M38.2 first scan all mouth-matched rings globally so an
+    # evidence-backed opening is not delayed by a shallower expensive M37.6 fit.
     layer_tolerance_mm: 30.0
     surface_percentile: 25.0
     mask_erode_px: 3

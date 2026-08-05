@@ -180,7 +180,7 @@ def _synthetic_scene(*, flat_mouth: bool = False):
 def test_m381_production_configuration_enables_branch_a_and_retains_fallbacks() -> None:
     raw = load_yaml(LINE_CONFIG)
     hybrid = HybridGraspConfig.from_mapping(raw)
-    assert raw["schema_version"] == "6.1"
+    assert raw["schema_version"] == "6.2"
     assert hybrid.m38_branch_a_enabled is True
     assert hybrid.m38_branch_a_fallback_to_m36 is True
     assert raw["hybrid_grasp"]["side_ring_fallback_enabled"] is True

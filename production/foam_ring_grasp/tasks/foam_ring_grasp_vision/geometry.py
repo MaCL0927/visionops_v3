@@ -2833,6 +2833,22 @@ def _m38a_runtime_enabled(config: GeometryConfig) -> bool:
     return str(runtime.get("pose_strategy") or "").strip().lower() == "m38_1_front_annulus"
 
 
+def _m38b_runtime_enabled(config: GeometryConfig) -> bool:
+    runtime = config.section("_runtime")
+    return str(runtime.get("pose_strategy") or "").strip().lower() == "m38_2_partial_opening_cylinder"
+
+
+def _m38b_pose_payload(config: GeometryConfig, ring_instance_id: int) -> Optional[Dict[str, Any]]:
+    runtime = config.section("_runtime")
+    rows = runtime.get("m38b_pose_by_ring")
+    if not isinstance(rows, Mapping):
+        return None
+    value = rows.get(str(int(ring_instance_id)))
+    if value is None:
+        value = rows.get(int(ring_instance_id))
+    return dict(value) if isinstance(value, Mapping) else None
+
+
 def _m38a_depth_discontinuity_mask(
     depth: np.ndarray,
     *,
@@ -3138,7 +3154,11 @@ def analyze_ring_pair(
     reasons: List[str] = []
     warnings: List[str] = []
     pose_strategy = (
-        "m38_1_front_annulus" if _m38a_runtime_enabled(config) else "legacy_m36"
+        "m38_1_front_annulus"
+        if _m38a_runtime_enabled(config)
+        else "m38_2_partial_opening_cylinder"
+        if _m38b_runtime_enabled(config)
+        else "legacy_m36"
     )
     ring_area = ring.area_px
     mouth_area = mouth.area_px
@@ -3154,6 +3174,8 @@ def analyze_ring_pair(
         reasons.append(
             "m38a_mouth_ellipse_unavailable"
             if pose_strategy == "m38_1_front_annulus"
+            else "m38b_synthetic_mouth_ellipse_unavailable"
+            if pose_strategy == "m38_2_partial_opening_cylinder"
             else "mouth_ellipse_unavailable"
         )
         timing_ms["total_ms"] = _elapsed_ms(pair_started)
@@ -3171,6 +3193,8 @@ def analyze_ring_pair(
             "grasp": {"clock_candidates": [], "best_clock_candidate": None},
             "timing_ms": timing_ms,
         }
+
+    precomputed_center_camera: Optional[np.ndarray] = None
 
     if pose_strategy == "m38_1_front_annulus":
         depth_points_started = time.perf_counter()
@@ -3231,6 +3255,84 @@ def analyze_ring_pair(
         pose_conflict_signals: List[str] = []
         pose_conflict_handoff_to_m37 = False
         timing_ms["front_depth_points_ms"] = timing_ms["m38a_annulus_pose_ms"]
+        timing_ms["plane_ransac_ms"] = 0.0
+        pose_started = time.perf_counter()
+    elif pose_strategy == "m38_2_partial_opening_cylinder":
+        payload = _m38b_pose_payload(config, int(ring.instance_id))
+        if payload is None:
+            reasons.append("m38b_precomputed_pose_unavailable")
+            timing_ms["total_ms"] = _elapsed_ms(pair_started)
+            return {
+                "ring_instance_id": ring.instance_id,
+                "mouth_instance_id": mouth.instance_id,
+                "ring_confidence": float(ring.confidence),
+                "mouth_confidence": float(mouth.confidence),
+                "association": association,
+                "pose_strategy": pose_strategy,
+                "m38_branch_b": {},
+                "eligible": False,
+                "robot_ready": False,
+                "warnings": warnings,
+                "rejection_reasons": reasons,
+                "grasp": {"clock_candidates": [], "best_clock_candidate": None},
+                "timing_ms": timing_ms,
+            }
+        try:
+            normal = _normalize(np.asarray(payload["normal_toward_camera"], dtype=np.float64))
+            precomputed_center_camera = np.asarray(
+                payload["opening_center_camera_mm"], dtype=np.float64
+            ).reshape(3)
+        except (KeyError, TypeError, ValueError):
+            reasons.append("m38b_precomputed_pose_invalid")
+            timing_ms["total_ms"] = _elapsed_ms(pair_started)
+            return {
+                "ring_instance_id": ring.instance_id,
+                "mouth_instance_id": mouth.instance_id,
+                "ring_confidence": float(ring.confidence),
+                "mouth_confidence": float(mouth.confidence),
+                "association": association,
+                "pose_strategy": pose_strategy,
+                "m38_branch_b": dict(payload.get("diagnostics") or {}),
+                "eligible": False,
+                "robot_ready": False,
+                "warnings": warnings,
+                "rejection_reasons": reasons,
+                "grasp": {"clock_candidates": [], "best_clock_candidate": None},
+                "timing_ms": timing_ms,
+            }
+        point_count = max(1, _safe_int(payload.get("side_point_count"), 1))
+        inlier_ratio = float(np.clip(_safe_float(payload.get("side_plane_inlier_ratio"), 1.0), 0.0, 1.0))
+        residual_median = _safe_float(payload.get("side_residual_median_mm"), 0.0)
+        residual_p95 = _safe_float(payload.get("side_residual_p95_mm"), residual_median)
+        depth_plane = PlaneModel(
+            normal=normal,
+            offset=float(-np.dot(normal, precomputed_center_camera)),
+            centroid=precomputed_center_camera.copy(),
+            inlier_mask=np.ones(point_count, dtype=bool),
+            inlier_ratio=inlier_ratio,
+            residual_median_mm=residual_median,
+            residual_p95_mm=residual_p95,
+        )
+        pose_plane = depth_plane
+        pose_diagnostics = dict(payload.get("diagnostics") or {})
+        pose_diagnostics.update({
+            "normal_source": "m38_2_partial_mouth_local_outer_cylinder",
+            "pose_source": "partial_mouth_plus_local_outer_cylinder",
+            "opening_partial": True,
+            "normal_disagreement_deg": 0.0,
+            "pose_conflict_signals": [],
+            "handoff_to_m37": False,
+        })
+        front_band = np.zeros_like(ring.mask, dtype=bool)
+        points = np.empty((0, 3), dtype=np.float64)
+        pixels = np.empty((0, 2), dtype=np.int32)
+        band_pixel_count = point_count
+        valid_ratio = 1.0
+        configured_policy = "m38_2_partial_opening_local_cylinder"
+        pose_conflict_signals = []
+        pose_conflict_handoff_to_m37 = False
+        timing_ms["m38b_precomputed_pose_ms"] = 0.0
+        timing_ms["front_depth_points_ms"] = 0.0
         timing_ms["plane_ransac_ms"] = 0.0
         pose_started = time.perf_counter()
     else:
@@ -3335,7 +3437,11 @@ def analyze_ring_pair(
                 warnings.append("m36_pose_conflict_warning_only")
 
     center_uv = tuple(ellipse["center_uv"])
-    center_camera = ray_plane_intersection(center_uv, intrinsics, pose_plane)
+    center_camera = (
+        precomputed_center_camera.copy()
+        if precomputed_center_camera is not None
+        else ray_plane_intersection(center_uv, intrinsics, pose_plane)
+    )
     if center_camera is None:
         center_camera = pose_plane.centroid.copy()
         warnings.append("mouth_center_fallback_to_pose_centroid")
@@ -3448,6 +3554,11 @@ def analyze_ring_pair(
         "m38_branch_a": (
             dict(pose_diagnostics) if pose_strategy == "m38_1_front_annulus" else None
         ),
+        "m38_branch_b": (
+            dict(pose_diagnostics)
+            if pose_strategy == "m38_2_partial_opening_cylinder"
+            else None
+        ),
         "ring_area_px": int(ring_area),
         "mouth_area_px": int(mouth_area),
         "front_band_pixel_count": band_pixel_count,
@@ -3514,6 +3625,11 @@ def analyze_ring_pair(
             "m38_depth_edge_mask": (
                 annulus.get("depth_edge_mask")
                 if pose_strategy == "m38_1_front_annulus"
+                else None
+            ),
+            "m38b_precomputed_pose": (
+                _m38b_pose_payload(config, int(ring.instance_id))
+                if pose_strategy == "m38_2_partial_opening_cylinder"
                 else None
             ),
             "plane_points": points,
@@ -3610,7 +3726,11 @@ def analyze_scene(
     scene_timing: Dict[str, float] = {}
     optimization = _optimization_settings(config)
     scene_pose_strategy = (
-        "m38_1_front_annulus" if _m38a_runtime_enabled(config) else "legacy_m36"
+        "m38_1_front_annulus"
+        if _m38a_runtime_enabled(config)
+        else "m38_2_partial_opening_cylinder"
+        if _m38b_runtime_enabled(config)
+        else "legacy_m36"
     )
     mode = str(optimization.get("mode") or "exhaustive")
     staged = bool(optimization.get("enabled")) and mode == "staged"
@@ -4304,6 +4424,8 @@ def analyze_scene(
         "selection_scope": (
             "M38.1_front_annulus_first_valid_target_early_exit_adaptive_8_plus_4_clock_search"
             if scene_pose_strategy == "m38_1_front_annulus" and first_valid else
+            "M38.2_partial_opening_local_cylinder_first_valid_target_early_exit_adaptive_8_plus_4_clock_search"
+            if scene_pose_strategy == "m38_2_partial_opening_cylinder" and first_valid else
             "M36.4.2_first_valid_target_early_exit_adaptive_8_plus_4_clock_search"
             if first_valid else
             (

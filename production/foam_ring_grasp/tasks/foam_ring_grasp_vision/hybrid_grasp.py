@@ -1,10 +1,11 @@
-"""M38.1 depth-layer-first hybrid foam-ring grasp selection.
+"""M38.2 evidence-first hybrid foam-ring grasp selection.
 
-A single Runtime segmentation result and exact RGB-D frame feed all retained
-branches. Rings are grouped by robust front-surface depth. Within each layer,
-M38.1 branch A first handles clearly visible openings by fitting the directly
-observed 3-D front annulus. Legacy M36 remains an optional mouth-visible
-fallback, followed by the unchanged M37.6 hollow-cylinder side-ring branch.
+One Runtime segmentation result and its exact RGB-D frame feed every retained
+branch.  M38.1 branch A globally searches clear openings with a directly
+observed 3-D front annulus.  M38.2 branch B then searches incomplete openings
+that still expose a local outer-cylinder side patch and partial end support.
+Only when both evidence-backed M38 branches fail may legacy M36 and the retained
+M37.6 hollow-cylinder fallback run in front-surface depth order.
 
 M37.6.1 stop-loss behavior remains active: depth-gradient is diagnostic only
 and online ``local_accurate`` refinement is disabled.
@@ -27,6 +28,7 @@ from .geometry import (
     analyze_scene,
 )
 from .segmentation import SegmentationInstance
+from .partial_opening_cylinder import fit_partial_opening_cylinder
 from .side_ring_template import SideRingTemplateConfig, fit_side_ring_instance
 
 
@@ -108,6 +110,13 @@ class HybridGraspConfig:
     m38_branch_a_enabled: bool = False
     m38_branch_a_fallback_to_m36: bool = True
 
+    # M38.2 branch B: an incomplete mouth must still anchor one observed end,
+    # while a bounded local outer-cylinder fit recovers the axis.  Branch B is
+    # evaluated globally after branch A and before any legacy M36/M37.6 work.
+    m38_branch_b_enabled: bool = False
+    m38_branch_b_fallback_to_m36: bool = True
+    m38_branch_b_maximum_candidates: int = 4
+
     @classmethod
     def from_mapping(cls, raw_config: Mapping[str, Any]) -> "HybridGraspConfig":
         section = raw_config.get("hybrid_grasp") or {}
@@ -128,6 +137,9 @@ class HybridGraspConfig:
         m38_branch_a = raw_config.get("m38_branch_a") or {}
         if not isinstance(m38_branch_a, Mapping):
             m38_branch_a = {}
+        m38_branch_b = raw_config.get("m38_branch_b") or {}
+        if not isinstance(m38_branch_b, Mapping):
+            m38_branch_b = {}
         return cls(
             enabled=bool(section.get("enabled", False)),
             prefer_mouth_visible=bool(section.get("prefer_mouth_visible", True)),
@@ -221,6 +233,13 @@ class HybridGraspConfig:
             m38_branch_a_enabled=bool(m38_branch_a.get("enabled", False)),
             m38_branch_a_fallback_to_m36=bool(
                 m38_branch_a.get("fallback_to_m36", True)
+            ),
+            m38_branch_b_enabled=bool(m38_branch_b.get("enabled", False)),
+            m38_branch_b_fallback_to_m36=bool(
+                m38_branch_b.get("fallback_to_m36", True)
+            ),
+            m38_branch_b_maximum_candidates=max(
+                1, _safe_int(m38_branch_b.get("maximum_candidates_per_trigger"), 4)
             ),
         )
 
@@ -578,6 +597,77 @@ def _scoped_m38a_geometry_config(
     return GeometryConfig(raw)
 
 
+def _scoped_m38b_geometry_config(
+    geometry_config: GeometryConfig,
+    allowed_ring_ids: Sequence[int],
+    pose_by_ring: Mapping[int, Mapping[str, Any]],
+) -> GeometryConfig:
+    raw = deepcopy(geometry_config.raw)
+    raw["candidate_scope"] = {
+        "allowed_ring_instance_ids": [int(value) for value in allowed_ring_ids],
+        "reason": "M38.2_partial_opening_local_cylinder_scope",
+    }
+    runtime = raw.get("_runtime")
+    runtime = dict(runtime) if isinstance(runtime, Mapping) else {}
+    runtime["pose_strategy"] = "m38_2_partial_opening_cylinder"
+    runtime["m38b_pose_by_ring"] = {
+        str(int(key)): deepcopy(dict(value)) for key, value in pose_by_ring.items()
+    }
+    raw["_runtime"] = runtime
+    gripper = raw.get("gripper")
+    gripper = dict(gripper) if isinstance(gripper, Mapping) else {}
+    branch = raw.get("m38_branch_b")
+    branch = dict(branch) if isinstance(branch, Mapping) else {}
+    # Branch B intentionally covers half-side and side-lying openings.  The
+    # complete existing collision model remains authoritative at the relaxed
+    # pose limit; this does not bypass any finger/body/box checks.
+    maximum_tilt = _safe_float(branch.get("maximum_candidate_tilt_deg"), 82.0)
+    gripper["geometry_candidate_max_tilt_deg"] = maximum_tilt
+    gripper["robot_safe_max_tilt_deg"] = _safe_float(
+        branch.get("robot_safe_max_tilt_deg"), maximum_tilt
+    )
+    raw["gripper"] = gripper
+    return GeometryConfig(raw)
+
+
+def _replace_mouth_instances(
+    instances: Sequence[SegmentationInstance],
+    replacements: Mapping[int, SegmentationInstance],
+) -> List[SegmentationInstance]:
+    result: List[SegmentationInstance] = []
+    replaced: set[int] = set()
+    for instance in instances:
+        if instance.class_name == "ring_mouth" and int(instance.instance_id) in replacements:
+            result.append(replacements[int(instance.instance_id)])
+            replaced.add(int(instance.instance_id))
+        else:
+            result.append(instance)
+    for instance_id, replacement in replacements.items():
+        if int(instance_id) not in replaced:
+            result.append(replacement)
+    return result
+
+
+def _replace_ring_instances(
+    instances: Sequence[SegmentationInstance],
+    replacements: Mapping[int, SegmentationInstance],
+) -> List[SegmentationInstance]:
+    """Replace only target foam-ring masks with evidence-gated model projections."""
+
+    result: List[SegmentationInstance] = []
+    replaced: set[int] = set()
+    for instance in instances:
+        if instance.class_name == "foam_ring" and int(instance.instance_id) in replacements:
+            result.append(replacements[int(instance.instance_id)])
+            replaced.add(int(instance.instance_id))
+        else:
+            result.append(instance)
+    for instance_id, replacement in replacements.items():
+        if int(instance_id) not in replaced:
+            result.append(replacement)
+    return result
+
+
 def _deferred_side_record(
     instance: SegmentationInstance,
     *,
@@ -743,6 +833,36 @@ def _m38a_candidate(
     return document
 
 
+def _compact_m38b_fit(fit: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "ring_instance_id": fit.get("ring_instance_id"),
+        "mouth_instance_id": fit.get("mouth_instance_id"),
+        "eligible": bool(fit.get("eligible", False)),
+        "rejection_reasons": list(fit.get("rejection_reasons") or []),
+        "warnings": list(fit.get("warnings") or []),
+        "association": deepcopy(fit.get("association") or {}),
+        "diagnostics": deepcopy(fit.get("diagnostics") or {}),
+        "timing_ms": deepcopy(fit.get("timing_ms") or {}),
+    }
+
+
+def _m38b_candidate(
+    candidate: Mapping[str, Any],
+    depth_record: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    document = deepcopy(dict(candidate))
+    document["grasp_branch"] = "m38_2_partial_opening_local_cylinder_rim_pinch"
+    document["grasp_mode"] = "rim_pinch"
+    document["pose_source"] = "partial_mouth_plus_local_outer_cylinder"
+    target = document.get("target") if isinstance(document.get("target"), dict) else {}
+    if depth_record:
+        target["surface_depth_mm"] = depth_record.get("surface_depth_mm")
+        target["depth_layer_index"] = depth_record.get("depth_layer_index")
+        target["depth_rank"] = depth_record.get("depth_rank")
+    document["target"] = target
+    return document
+
+
 def _m36_candidate(
     candidate: Mapping[str, Any],
     depth_record: Optional[Mapping[str, Any]],
@@ -790,6 +910,7 @@ def run_hybrid_grasp(
     geometry_config: GeometryConfig,
     analyze_fn: Callable[..., Dict[str, Any]] = analyze_scene,
     side_fit_fn: Callable[..., Dict[str, Any]] = fit_side_ring_instance,
+    partial_fit_fn: Callable[..., Dict[str, Any]] = fit_partial_opening_cylinder,
     associate_fn: Callable[..., Any] = _associate_ring_mouths_detailed,
 ) -> Dict[str, Any]:
     """Run depth-layer-first M36/M37 selection with bounded refinement."""
@@ -812,6 +933,9 @@ def run_hybrid_grasp(
     matched_ids = {int(ring.instance_id) for ring, _mouth, _metrics in matches}
     mouth_by_ring = {
         int(ring.instance_id): mouth for ring, mouth, _metrics in matches
+    }
+    association_by_ring = {
+        int(ring.instance_id): dict(metrics) for ring, _mouth, metrics in matches
     }
     ring_by_id = {int(item.instance_id): item for item in rings}
 
@@ -850,6 +974,11 @@ def run_hybrid_grasp(
     selected_m38a_candidate: Optional[Dict[str, Any]] = None
     selected_m38a_scene: Optional[Dict[str, Any]] = None
     last_m38a_scene: Optional[Dict[str, Any]] = None
+    selected_m38b_candidate: Optional[Dict[str, Any]] = None
+    selected_m38b_scene: Optional[Dict[str, Any]] = None
+    last_m38b_scene: Optional[Dict[str, Any]] = None
+    m38b_fit_records: List[Dict[str, Any]] = []
+    m38b_preselected_ring_ids: List[int] = []
     selected_m36_candidate: Optional[Dict[str, Any]] = None
     selected_m36_scene: Optional[Dict[str, Any]] = None
     last_m36_scene: Optional[Dict[str, Any]] = None
@@ -857,6 +986,9 @@ def run_hybrid_grasp(
     selected_layer_index: Optional[int] = None
     m38a_total_ms = 0.0
     m38a_attempt_count = 0
+    m38b_fit_total_ms = 0.0
+    m38b_geometry_total_ms = 0.0
+    m38b_attempt_count = 0
     m36_total_ms = 0.0
     m36_attempt_count = 0
     m37_lightweight_preselection_ms = 0.0
@@ -874,7 +1006,205 @@ def run_hybrid_grasp(
     maximum_side_attempts_reached = False
     active_layer_summaries: List[Dict[str, Any]] = []
 
-    for layer in layers:
+    # M38.2 changes branch scheduling as well as geometry: all depth layers are
+    # searched for evidence-backed M38 targets before the expensive retained
+    # M37.6 fallback is allowed to run.  This prevents a shallow side-only ring
+    # from consuming seconds while a slightly deeper clear/partial opening is
+    # already available.
+    matched_ring_ids_ordered = sorted(
+        matched_ids,
+        key=lambda instance_id: (
+            _safe_float(depth_by_id.get(instance_id, {}).get("surface_depth_mm"), float("inf")),
+            _safe_int(depth_by_id.get(instance_id, {}).get("depth_rank"), 10**9),
+            -float(ring_by_id[instance_id].confidence),
+            int(instance_id),
+        ),
+    )
+
+    if matched_ring_ids_ordered and hybrid_config.m38_branch_a_enabled:
+        m38a_attempt_count += 1
+        m38a_started = time.perf_counter()
+        m38a_scene = analyze_fn(
+            instances,
+            depth_mm,
+            intrinsics,
+            _scoped_m38a_geometry_config(geometry_config, matched_ring_ids_ordered),
+        )
+        m38a_elapsed = _elapsed_ms(m38a_started)
+        m38a_total_ms += m38a_elapsed
+        last_m38a_scene = m38a_scene
+        original_m38a = (
+            m38a_scene.get("robot_candidate")
+            if isinstance(m38a_scene.get("robot_candidate"), Mapping)
+            else None
+        )
+        active_layer_summaries.append({
+            "phase": "global_m38_1_branch_a",
+            "ring_instance_ids": list(matched_ring_ids_ordered),
+            "m38a_attempted": True,
+            "m38a_candidate_found": bool(original_m38a is not None),
+            "m38a_ms": float(m38a_elapsed),
+            "selected_branch": (
+                "m38_1_clear_mouth_front_annulus_rim_pinch"
+                if original_m38a is not None else "none"
+            ),
+        })
+        if original_m38a is not None:
+            ring_id = int((original_m38a.get("target") or {}).get("ring_instance_id"))
+            selected_m38a_candidate = _m38a_candidate(
+                original_m38a, depth_by_id.get(ring_id)
+            )
+            selected_m38a_scene = m38a_scene
+            selected_branch = "m38_1_clear_mouth_front_annulus_rim_pinch"
+            selected_layer_index = depth_by_id.get(ring_id, {}).get("depth_layer_index")
+
+    if (
+        selected_branch == "none"
+        and matched_ring_ids_ordered
+        and hybrid_config.m38_branch_b_enabled
+    ):
+        branch_b_raw = raw_config.get("m38_branch_b")
+        branch_b_raw = dict(branch_b_raw) if isinstance(branch_b_raw, Mapping) else {}
+        allowed_modes_raw = branch_b_raw.get(
+            "allowed_association_modes", ["strict_envelope", "bbox_fallback"]
+        )
+        allowed_modes = (
+            {str(value) for value in allowed_modes_raw}
+            if isinstance(allowed_modes_raw, Sequence)
+            and not isinstance(allowed_modes_raw, (str, bytes))
+            else {"strict_envelope", "bbox_fallback"}
+        )
+        minimum_center_offset = _safe_float(
+            branch_b_raw.get("minimum_ring_mouth_center_offset_px"), 3.0
+        )
+        minimum_containment = _safe_float(
+            branch_b_raw.get("minimum_mouth_containment"), 0.28
+        )
+        minimum_area_ratio = _safe_float(
+            branch_b_raw.get("minimum_mouth_to_ring_area_ratio"), 0.012
+        )
+        maximum_area_ratio = _safe_float(
+            branch_b_raw.get("maximum_mouth_to_ring_area_ratio"), 0.50
+        )
+        for ring_id in matched_ring_ids_ordered:
+            ring = ring_by_id[ring_id]
+            mouth = mouth_by_ring[ring_id]
+            metrics = association_by_ring.get(ring_id) or {}
+            center_offset = float(
+                np.linalg.norm(
+                    np.asarray(mouth.centroid_uv, dtype=np.float64)
+                    - np.asarray(ring.centroid_uv, dtype=np.float64)
+                )
+            )
+            area_ratio = _safe_float(
+                metrics.get("mouth_to_ring_area_ratio"),
+                float(mouth.area_px) / float(max(1, ring.area_px)),
+            )
+            if str(metrics.get("association_mode") or "") not in allowed_modes:
+                continue
+            if _safe_float(metrics.get("containment"), 0.0) < minimum_containment:
+                continue
+            if not (minimum_area_ratio <= area_ratio <= maximum_area_ratio):
+                continue
+            if center_offset <= minimum_center_offset:
+                continue
+            m38b_preselected_ring_ids.append(int(ring_id))
+        m38b_preselected_ring_ids = m38b_preselected_ring_ids[
+            : hybrid_config.m38_branch_b_maximum_candidates
+        ]
+
+        pose_by_ring: Dict[int, Mapping[str, Any]] = {}
+        synthetic_mouth_by_id: Dict[int, SegmentationInstance] = {}
+        synthetic_ring_by_id: Dict[int, SegmentationInstance] = {}
+        for ring_id in m38b_preselected_ring_ids:
+            ring = ring_by_id[ring_id]
+            mouth = mouth_by_ring[ring_id]
+            m38b_attempt_count += 1
+            fit_started = time.perf_counter()
+            fit = partial_fit_fn(
+                ring,
+                mouth,
+                association_by_ring.get(ring_id) or {},
+                rings,
+                depth_mm,
+                intrinsics,
+                raw_config,
+            )
+            fit_elapsed = _elapsed_ms(fit_started)
+            m38b_fit_total_ms += fit_elapsed
+            fit_public = _compact_m38b_fit(fit)
+            fit_public["surface_depth_mm"] = depth_by_id.get(ring_id, {}).get("surface_depth_mm")
+            fit_public["depth_layer_index"] = depth_by_id.get(ring_id, {}).get("depth_layer_index")
+            fit_public["depth_rank"] = depth_by_id.get(ring_id, {}).get("depth_rank")
+            m38b_fit_records.append(fit_public)
+            if not bool(fit.get("eligible", False)):
+                continue
+            payload = fit.get("pose_payload")
+            synthetic = fit.get("synthetic_mouth_instance")
+            synthetic_ring = fit.get("synthetic_ring_instance")
+            if (
+                not isinstance(payload, Mapping)
+                or not isinstance(synthetic, SegmentationInstance)
+                or not isinstance(synthetic_ring, SegmentationInstance)
+            ):
+                continue
+            pose_by_ring[int(ring_id)] = dict(payload)
+            synthetic_mouth_by_id[int(synthetic.instance_id)] = synthetic
+            synthetic_ring_by_id[int(synthetic_ring.instance_id)] = synthetic_ring
+
+        if pose_by_ring:
+            b_instances = _replace_ring_instances(instances, synthetic_ring_by_id)
+            b_instances = _replace_mouth_instances(b_instances, synthetic_mouth_by_id)
+            m38b_started = time.perf_counter()
+            m38b_scene = analyze_fn(
+                b_instances,
+                depth_mm,
+                intrinsics,
+                _scoped_m38b_geometry_config(
+                    geometry_config, sorted(pose_by_ring), pose_by_ring
+                ),
+            )
+            m38b_elapsed = _elapsed_ms(m38b_started)
+            m38b_geometry_total_ms += m38b_elapsed
+            last_m38b_scene = m38b_scene
+            original_m38b = (
+                m38b_scene.get("robot_candidate")
+                if isinstance(m38b_scene.get("robot_candidate"), Mapping)
+                else None
+            )
+            active_layer_summaries.append({
+                "phase": "global_m38_2_branch_b",
+                "ring_instance_ids": sorted(pose_by_ring),
+                "m38b_attempted": True,
+                "m38b_candidate_found": bool(original_m38b is not None),
+                "m38b_fit_ms": float(m38b_fit_total_ms),
+                "m38b_geometry_ms": float(m38b_elapsed),
+                "selected_branch": (
+                    "m38_2_partial_opening_local_cylinder_rim_pinch"
+                    if original_m38b is not None else "none"
+                ),
+            })
+            if original_m38b is not None:
+                ring_id = int((original_m38b.get("target") or {}).get("ring_instance_id"))
+                selected_m38b_candidate = _m38b_candidate(
+                    original_m38b, depth_by_id.get(ring_id)
+                )
+                selected_m38b_scene = m38b_scene
+                selected_branch = "m38_2_partial_opening_local_cylinder_rim_pinch"
+                selected_layer_index = depth_by_id.get(ring_id, {}).get("depth_layer_index")
+        else:
+            active_layer_summaries.append({
+                "phase": "global_m38_2_branch_b",
+                "ring_instance_ids": list(m38b_preselected_ring_ids),
+                "m38b_attempted": bool(m38b_attempt_count),
+                "m38b_candidate_found": False,
+                "m38b_fit_ms": float(m38b_fit_total_ms),
+                "m38b_geometry_ms": 0.0,
+                "selected_branch": "none",
+            })
+
+    layers_to_process = [] if selected_branch != "none" else layers
+    for layer in layers_to_process:
         layer_index = int(layer["layer_index"])
         layer_ids = [int(value) for value in layer["ring_instance_ids"]]
         layer_summary: Dict[str, Any] = {
@@ -899,7 +1229,10 @@ def run_hybrid_grasp(
         layer_summary["m38a_candidate_ring_ids"] = list(mouth_visible_ids)
         layer_summary["m36_candidate_ring_ids"] = list(mouth_visible_ids)
         if mouth_visible_ids and hybrid_config.prefer_mouth_visible:
-            if hybrid_config.m38_branch_a_enabled:
+            # M38.1/M38.2 are already evaluated globally above.  This retained
+            # per-layer block is intentionally disabled so a shallow M37.6
+            # candidate cannot run before a deeper evidence-backed M38 target.
+            if hybrid_config.m38_branch_a_enabled and not matched_ring_ids_ordered:
                 m38a_attempt_count += 1
                 layer_summary["m38a_attempted"] = True
                 m38a_started = time.perf_counter()
@@ -942,6 +1275,10 @@ def run_hybrid_grasp(
                 and (
                     not hybrid_config.m38_branch_a_enabled
                     or hybrid_config.m38_branch_a_fallback_to_m36
+                )
+                and (
+                    not hybrid_config.m38_branch_b_enabled
+                    or hybrid_config.m38_branch_b_fallback_to_m36
                 )
             ):
                 m36_attempt_count += 1
@@ -1231,10 +1568,14 @@ def run_hybrid_grasp(
     m36_base_scene_ms = 0.0
     if selected_m38a_scene is not None:
         result_scene = selected_m38a_scene
+    elif selected_m38b_scene is not None:
+        result_scene = selected_m38b_scene
     elif selected_m36_scene is not None:
         result_scene = selected_m36_scene
     elif last_m36_scene is not None:
         result_scene = last_m36_scene
+    elif last_m38b_scene is not None:
+        result_scene = last_m38b_scene
     elif last_m38a_scene is not None:
         result_scene = last_m38a_scene
     else:
@@ -1285,6 +1626,12 @@ def run_hybrid_grasp(
         and isinstance(selected_m38a_scene.get("robot_candidate"), Mapping)
         else None
     )
+    original_m38b_candidate = (
+        selected_m38b_scene.get("robot_candidate")
+        if selected_m38b_scene is not None
+        and isinstance(selected_m38b_scene.get("robot_candidate"), Mapping)
+        else None
+    )
     original_m36_candidate = (
         selected_m36_scene.get("robot_candidate")
         if selected_m36_scene is not None
@@ -1293,6 +1640,8 @@ def run_hybrid_grasp(
     )
     if selected_m38a_candidate is not None:
         selected_candidate = selected_m38a_candidate
+    elif selected_m38b_candidate is not None:
+        selected_candidate = selected_m38b_candidate
     elif selected_m36_candidate is not None:
         selected_candidate = selected_m36_candidate
     elif selected_side is not None:
@@ -1336,6 +1685,11 @@ def run_hybrid_grasp(
         if selected_m38a_scene is not None
         else (last_m38a_scene.get("eligible_count") if last_m38a_scene is not None else 0)
     )
+    result["m38_2_eligible_count"] = (
+        selected_m38b_scene.get("eligible_count")
+        if selected_m38b_scene is not None
+        else (last_m38b_scene.get("eligible_count") if last_m38b_scene is not None else 0)
+    )
     result["m36_eligible_count"] = (
         selected_m36_scene.get("eligible_count")
         if selected_m36_scene is not None
@@ -1348,13 +1702,14 @@ def run_hybrid_grasp(
         result["selected_clock_angle_deg_cw_from_12"] = None
         result["selected_clock_search_batch"] = None
     result["m38_1_robot_candidate"] = deepcopy(original_m38a_candidate)
+    result["m38_2_robot_candidate"] = deepcopy(original_m38b_candidate)
     result["m36_robot_candidate"] = deepcopy(original_m36_candidate)
     result["robot_candidate"] = selected_candidate
     result["selected_grasp_branch"] = selected_branch
     result["depth_layering"] = {
         "enabled": bool(hybrid_config.depth_layering_enabled),
         "ordering_rule": (
-            "depth_layer_ascending_then_M38.1_annulus_then_m36_then_M37.6_multisurface"
+            "global_M38.1_clear_annulus_then_global_M38.2_partial_opening_cylinder_then_legacy_depth_layers_M36_M37.6"
         ),
         "surface_depth_statistic": f"p{hybrid_config.surface_depth_percentile:g}",
         "layer_tolerance_mm": float(hybrid_config.depth_layer_tolerance_mm),
@@ -1376,10 +1731,11 @@ def run_hybrid_grasp(
     }
     result["hybrid_grasp"] = {
         "enabled": True,
-        "policy_version": "M38.1",
+        "policy_version": "M38.2",
         "branch_priority": [
-            "nearest_depth_layer",
-            "same_layer_M38.1_clear_mouth_front_annulus_rim_pinch",
+            "global_M38.1_clear_mouth_front_annulus_rim_pinch",
+            "global_M38.2_partial_opening_local_cylinder_rim_pinch",
+            "legacy_nearest_depth_layer",
             "same_layer_m36_legacy_fallback",
             "same_layer_m37_lightweight_preselection",
             "preliminary_pose_screen",
@@ -1396,6 +1752,7 @@ def run_hybrid_grasp(
             }
         ),
         "m38_1_candidate_found": bool(selected_m38a_candidate is not None),
+        "m38_2_candidate_found": bool(selected_m38b_candidate is not None),
         "m36_candidate_found": bool(selected_m36_candidate is not None),
         "m37_candidate_found": bool(selected_side is not None),
         "target_found": bool(selected_candidate is not None),
@@ -1404,6 +1761,9 @@ def run_hybrid_grasp(
             "depth_preselection_ms": float(depth_preselection_ms),
             "depth_layer_build_ms": float(depth_layer_build_ms),
             "m38_1_branch_a_ms": float(m38a_total_ms),
+            "m38_2_branch_b_fit_ms": float(m38b_fit_total_ms),
+            "m38_2_branch_b_geometry_ms": float(m38b_geometry_total_ms),
+            "m38_2_branch_b_total_ms": float(m38b_fit_total_ms + m38b_geometry_total_ms),
             "m36_branch_ms": float(m36_total_ms),
             "m36_base_scene_ms": float(m36_base_scene_ms),
             "m37_lightweight_preselection_ms": float(m37_lightweight_preselection_ms),
@@ -1458,6 +1818,38 @@ def run_hybrid_grasp(
         ),
         "pair_results": m38a_pair_results,
         "timing_ms": float(m38a_total_ms),
+        "legacy_m36_retained": True,
+        "m37_6_retained": True,
+    }
+    result["m38_2_branch_b"] = {
+        "enabled": bool(hybrid_config.m38_branch_b_enabled),
+        "pose_source": "partial_mouth_plus_local_outer_cylinder",
+        "fallback_to_m36": bool(hybrid_config.m38_branch_b_fallback_to_m36),
+        "maximum_candidates_per_trigger": int(
+            hybrid_config.m38_branch_b_maximum_candidates
+        ),
+        "attempt_count": int(m38b_attempt_count),
+        "preselected_ring_instance_ids": list(m38b_preselected_ring_ids),
+        "fit_candidate_count": int(len(m38b_fit_records)),
+        "geometry_attempted": bool(last_m38b_scene is not None),
+        "candidate_found": bool(selected_m38b_candidate is not None),
+        "selected_ring_instance_id": (
+            int((selected_m38b_candidate.get("target") or {}).get("ring_instance_id"))
+            if selected_m38b_candidate is not None
+            else None
+        ),
+        "fit_results": m38b_fit_records,
+        "timing_ms": {
+            "local_cylinder_fit_total_ms": float(m38b_fit_total_ms),
+            "rim_pinch_geometry_ms": float(m38b_geometry_total_ms),
+            "total_ms": float(m38b_fit_total_ms + m38b_geometry_total_ms),
+        },
+        "requires_observed_partial_opening": True,
+        "synthetic_opening_usage": (
+            "nominal inner and outer opening projections are created only after local "
+            "side-cylinder and partial-end evidence pass; they are used solely to recover "
+            "the measured wall section for the retained rim-pinch and collision evaluator"
+        ),
         "legacy_m36_retained": True,
         "m37_6_retained": True,
     }

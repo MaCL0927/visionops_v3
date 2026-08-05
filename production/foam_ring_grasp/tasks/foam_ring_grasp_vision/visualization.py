@@ -124,7 +124,11 @@ def draw_overlay(
         source_tag = (
             "A"
             if pose_source == "m38_1_front_annulus_depth_plane"
-            else ("E" if pose_source == "ellipse_stabilized" else "D")
+            else (
+                "B"
+                if pose_source == "m38_2_partial_mouth_local_outer_cylinder"
+                else ("E" if pose_source == "ellipse_stabilized" else "D")
+            )
         )
         best = (item.get("grasp") or {}).get("best_clock_candidate") or {}
         best_hour = best.get("clock_hour")
@@ -526,7 +530,15 @@ def render_paired_axis_overlay(
             cv2.circle(output, near_uv, endpoint_radius_px, near_color, -1, cv2.LINE_AA)
             cv2.circle(output, near_uv, endpoint_radius_px, (255, 255, 255), 1, cv2.LINE_AA)
 
-        source_tag = "E" if row["normal_source"] == "ellipse_stabilized" else "D"
+        source_tag = (
+            "A"
+            if row["normal_source"] == "m38_1_front_annulus_depth_plane"
+            else (
+                "B"
+                if row["normal_source"] == "m38_2_partial_mouth_local_outer_cylinder"
+                else ("E" if row["normal_source"] == "ellipse_stabilized" else "D")
+            )
+        )
         sign_tag = " SIGN?" if depth_order_status == "inconsistent_axis_sign" else ""
         line1 = "R%d-M%d t=%.1f L2D=%.1f dz=%.0f[%s]%s" % (
             ring_id,

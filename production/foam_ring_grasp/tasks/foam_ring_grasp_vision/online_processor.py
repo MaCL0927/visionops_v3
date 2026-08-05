@@ -738,7 +738,7 @@ class OnlineGeometryProcessor:
             )
             cv2.putText(
                 overlay,
-                "M37.6 multi-surface branch: " + branch_label,
+                "M38.2 hybrid branch: " + branch_label,
                 (10, max(36, overlay.shape[0] - 12)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.45,
@@ -888,6 +888,7 @@ class OnlineGeometryProcessor:
                 ),
                 "geometry_optimization": self.raw_config.get("geometry_optimization") or {},
                 "m38_branch_a": self.raw_config.get("m38_branch_a") or {},
+                "m38_branch_b": self.raw_config.get("m38_branch_b") or {},
                 "hybrid_grasp": self.raw_config.get("hybrid_grasp") or {},
                 "side_ring_template": self.raw_config.get("side_ring_template") or {},
             },
