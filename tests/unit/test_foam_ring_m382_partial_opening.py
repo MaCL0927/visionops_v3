@@ -147,7 +147,7 @@ def test_m382_branch_a_still_has_priority_and_skips_branch_b() -> None:
     assert calls == ["m38_1_front_annulus"]
     assert fit_calls == []
     assert scene["selected_grasp_branch"] == "m38_1_clear_mouth_front_annulus_rim_pinch"
-    assert scene["hybrid_grasp"]["policy_version"] == "M38.4"
+    assert scene["hybrid_grasp"]["policy_version"] == "M38.5"
 
 
 def test_m382_uses_partial_opening_cylinder_before_m36_and_m376() -> None:

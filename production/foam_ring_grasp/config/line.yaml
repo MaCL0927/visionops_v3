@@ -649,12 +649,69 @@ m38_branch_b:
   maximum_opening_center_error_px: 20.0
   maximum_opening_center_error_radius_ratio: 0.80
 
+  # M38.5 stop-loss: a depth-inferred aperture with little direct observed
+  # opening support must not enter the expensive 12-clock inner/outer gripper
+  # evaluator. It is handed to the pure-side outer-contact branch instead.
+  full_geometry_minimum_observed_opening_coverage: 0.15
+  full_geometry_side_on_angle_deg: 80.0
+  full_geometry_side_on_minimum_observed_opening_coverage: 0.25
+
   # Branch-B geometry may exceed the old M36 tilt limit, but all existing box,
   # neighbor, finger-body, insertion and motion collision checks remain active.
   maximum_candidate_tilt_deg: 90.0
   robot_safe_max_tilt_deg: 82.0
 
-# M38.4 branch C: after M38.1 and M38.3 exhaust observable opening evidence,
+# M38.5 branch D: pure-side outer contact geometry. This branch uses only the
+# observed outer cylindrical surface. It does not infer ring_mouth, does not
+# create an inner-finger point and does not run the 12-clock complete-gripper
+# collision evaluator. The output is camera-frame geometry and is not robot-ready.
+m38_branch_d:
+  enabled: true
+  only_without_mouth: true
+  # Keep this diagnostic-only branch focused on scenes where the segmentation
+  # model found no opening at all. Mixed scenes stay with M38.1/M38.3/C.
+  require_no_mouth_instances_in_scene: true
+  stop_after_first_eligible: true
+  maximum_candidates_per_trigger: 3
+
+  ring_mask_erode_px: 2
+  neighbor_exclusion_dilate_px: 1
+  side_depth_front_tolerance_mm: 16.0
+  side_depth_back_tolerance_mm: 48.0
+  depth_edge_threshold_mm: 18.0
+  depth_edge_dilate_px: 1
+  surface_component_minimum_ratio: 0.10
+  normal_neighbor_step_px: 2
+  minimum_side_points: 100
+  minimum_normal_points: 50
+  maximum_fit_points: 500
+  maximum_normal_fit_points: 400
+  central_axis_fraction: 0.70
+
+  # The normal covariance gives the undirected cylinder-axis seed. Only a small
+  # local two-angle refinement is searched around that seed.
+  local_axis_offsets_deg: [-12, -8, -4, 0, 4, 8, 12]
+  fixed_radius_iterations: 4
+  radial_inlier_threshold_mm: 7.0
+
+  minimum_radial_inlier_ratio: 0.65
+  maximum_radial_residual_median_mm: 5.0
+  maximum_radial_residual_p90_mm: 12.0
+  maximum_normal_axis_median_deg: 24.0
+  maximum_normal_axis_p90_deg: 52.0
+  maximum_normal_radial_median_deg: 35.0
+  minimum_visible_normal_span_deg: 60.0
+  minimum_observed_axis_span_mm: 25.0
+  minimum_axis_view_angle_deg: 65.0
+  maximum_normal_axis_eigenvalue_ratio: 0.55
+  bootstrap_group_count: 4
+  maximum_bootstrap_axis_dispersion_deg: 18.0
+
+  contact_support_axial_half_span_mm: 12.0
+  maximum_contact_support_error_mm: 14.0
+  minimum_contact_inside_mask_px: 2.0
+
+# M38.4 branch C: after M38.1, M38.3 and M38.5 exhaust usable geometry,
 # explicitly reject the trigger instead of asking M36/M37.6 to infer a hidden
 # opening from a nearly pure side surface. This is required by the current
 # gripper, which supports inner/outer rim pinch only.
@@ -666,7 +723,7 @@ m38_branch_c:
   operator_action: turn_or_agitate_box
 
 hybrid_grasp:
-  # M38.4 evidence-first trigger policy. Depth records remain available for
+  # M38.5 evidence-first trigger policy. Depth records remain available for
   # diagnostics and optional legacy comparison, but production does not run M36/M37.6.
   enabled: true
   prefer_mouth_visible: true

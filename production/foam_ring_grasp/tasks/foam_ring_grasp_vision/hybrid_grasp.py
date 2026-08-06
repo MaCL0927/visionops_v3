@@ -1,13 +1,14 @@
-"""M38.4 evidence-first foam-ring grasp selection with terminal branch C.
+"""M38.5 evidence-first foam-ring geometry selection.
 
 One Runtime segmentation result and its exact RGB-D frame feed every retained
 branch. M38.1 branch A globally searches clear segmented openings with a
 directly observed 3-D front annulus. M38.3 branch B then searches incomplete
 openings from either a genuinely off-centre segmented mouth or a depth-inferred
 aperture inside an unmatched ring, and solves a projection-constrained local
-outer cylinder. M38.4 branch C explicitly terminates the trigger when neither
-branch can provide a collision-checked inner/outer pinch candidate. Legacy M36
-and M37.6 code remains available behind disabled compatibility switches.
+outer cylinder. M38.5 then recovers an outer contact point and closing direction
+from a pure side surface without inventing a hidden opening. M38.4 branch C
+explicitly terminates the trigger only when A/B/D cannot provide usable
+geometry. Legacy M36 and M37.6 remain behind disabled compatibility switches.
 
 M37.6.1 stop-loss behavior remains active: depth-gradient is diagnostic only
 and online ``local_accurate`` refinement is disabled.
@@ -34,6 +35,7 @@ from .partial_opening_cylinder_m383 import (
     fit_partial_opening_cylinder_m383,
     infer_depth_partial_opening,
 )
+from .side_surface_outer_contact_m385 import fit_side_surface_outer_contact_m385
 from .side_ring_template import SideRingTemplateConfig, fit_side_ring_instance
 
 
@@ -59,8 +61,8 @@ def _m384_empty_scene(*, ring_count: int, mouth_count: int, matched_count: int) 
 
     return {
         "schema_version": "1.0",
-        "stage": "M38.4_branch_c_fast_reject",
-        "pose_strategy": "m38_4_branch_c_fast_reject",
+        "stage": "M38.5_outer_contact_then_branch_c_fast_reject",
+        "pose_strategy": "m38_5_outer_contact_or_m38_4_branch_c",
         "rings_detected": int(ring_count),
         "mouths_detected": int(mouth_count),
         "matched_pairs": int(matched_count),
@@ -187,6 +189,14 @@ class HybridGraspConfig:
     m38_branch_b_fallback_to_m36: bool = True
     m38_branch_b_maximum_candidates: int = 4
 
+    # M38.5 branch D: pure-side outer contact geometry. It does not infer an
+    # opening and intentionally skips inner-finger/full-gripper evaluation.
+    m38_branch_d_enabled: bool = False
+    m38_branch_d_only_without_mouth: bool = True
+    m38_branch_d_require_no_mouth_instances_in_scene: bool = True
+    m38_branch_d_stop_after_first_eligible: bool = True
+    m38_branch_d_maximum_candidates: int = 3
+
     # M38.4 branch C: explicit terminal rejection for side-only or otherwise
     # under-observed rings.  It prevents an expensive legacy search from trying
     # to infer a hidden opening that the inner/outer gripper cannot safely use.
@@ -223,6 +233,9 @@ class HybridGraspConfig:
         m38_branch_b = raw_config.get("m38_branch_b") or {}
         if not isinstance(m38_branch_b, Mapping):
             m38_branch_b = {}
+        m38_branch_d = raw_config.get("m38_branch_d") or {}
+        if not isinstance(m38_branch_d, Mapping):
+            m38_branch_d = {}
         m38_branch_c = raw_config.get("m38_branch_c") or {}
         if not isinstance(m38_branch_c, Mapping):
             m38_branch_c = {}
@@ -326,6 +339,19 @@ class HybridGraspConfig:
             ),
             m38_branch_b_maximum_candidates=max(
                 1, _safe_int(m38_branch_b.get("maximum_candidates_per_trigger"), 4)
+            ),
+            m38_branch_d_enabled=bool(m38_branch_d.get("enabled", False)),
+            m38_branch_d_only_without_mouth=bool(
+                m38_branch_d.get("only_without_mouth", True)
+            ),
+            m38_branch_d_require_no_mouth_instances_in_scene=bool(
+                m38_branch_d.get("require_no_mouth_instances_in_scene", True)
+            ),
+            m38_branch_d_stop_after_first_eligible=bool(
+                m38_branch_d.get("stop_after_first_eligible", True)
+            ),
+            m38_branch_d_maximum_candidates=max(
+                1, _safe_int(m38_branch_d.get("maximum_candidates_per_trigger"), 3)
             ),
             m38_branch_c_enabled=bool(m38_branch_c.get("enabled", False)),
             m38_branch_c_fast_terminate=bool(
@@ -978,6 +1004,34 @@ def _m38b_candidate(
     return document
 
 
+def _compact_m385_fit(fit: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "ring_instance_id": fit.get("ring_instance_id"),
+        "eligible": bool(fit.get("eligible", False)),
+        "rejection_reasons": list(fit.get("rejection_reasons") or []),
+        "warnings": list(fit.get("warnings") or []),
+        "diagnostics": deepcopy(fit.get("diagnostics") or {}),
+        "timing_ms": deepcopy(fit.get("timing_ms") or {}),
+    }
+
+
+def _m385_candidate(
+    candidate: Mapping[str, Any],
+    depth_record: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    document = deepcopy(dict(candidate))
+    document["grasp_branch"] = "m38_5_side_surface_outer_contact_only"
+    document["grasp_mode"] = "outer_contact_only"
+    document["pose_source"] = "observed_outer_cylinder_side_surface"
+    target = document.get("target") if isinstance(document.get("target"), dict) else {}
+    if depth_record:
+        target["surface_depth_mm"] = depth_record.get("surface_depth_mm")
+        target["depth_layer_index"] = depth_record.get("depth_layer_index")
+        target["depth_rank"] = depth_record.get("depth_rank")
+    document["target"] = target
+    return document
+
+
 def _m36_candidate(
     candidate: Mapping[str, Any],
     depth_record: Optional[Mapping[str, Any]],
@@ -1027,6 +1081,7 @@ def run_hybrid_grasp(
     side_fit_fn: Callable[..., Dict[str, Any]] = fit_side_ring_instance,
     partial_fit_fn: Callable[..., Dict[str, Any]] = fit_partial_opening_cylinder_m383,
     partial_infer_fn: Callable[..., Dict[str, Any]] = infer_depth_partial_opening,
+    outer_contact_fit_fn: Callable[..., Dict[str, Any]] = fit_side_surface_outer_contact_m385,
     associate_fn: Callable[..., Any] = _associate_ring_mouths_detailed,
 ) -> Dict[str, Any]:
     """Run depth-layer-first M36/M37 selection with bounded refinement."""
@@ -1097,6 +1152,12 @@ def run_hybrid_grasp(
     m38b_depth_inference_records: List[Dict[str, Any]] = []
     m38b_preselected_ring_ids: List[int] = []
     m38b_preselection_sources: Dict[int, str] = {}
+    selected_m385_candidate: Optional[Dict[str, Any]] = None
+    m385_fit_records: List[Dict[str, Any]] = []
+    m385_preselected_ring_ids: List[int] = []
+    m385_attempt_count = 0
+    m385_total_ms = 0.0
+    m38b_fast_gate_skipped_ring_ids: List[int] = []
     selected_m36_candidate: Optional[Dict[str, Any]] = None
     selected_m36_scene: Optional[Dict[str, Any]] = None
     last_m36_scene: Optional[Dict[str, Any]] = None
@@ -1352,8 +1413,51 @@ def run_hybrid_grasp(
             fit_public["surface_depth_mm"] = depth_by_id.get(ring_id, {}).get("surface_depth_mm")
             fit_public["depth_layer_index"] = depth_by_id.get(ring_id, {}).get("depth_layer_index")
             fit_public["depth_rank"] = depth_by_id.get(ring_id, {}).get("depth_rank")
+            source = str(candidate.get("source") or "unknown")
+            diagnostics = fit.get("diagnostics") if isinstance(fit.get("diagnostics"), Mapping) else {}
+            fast_gate_reason = None
+            if (
+                bool(fit.get("eligible", False))
+                and source == "depth_inferred_partial_opening"
+                and "observed_opening_coverage" in diagnostics
+            ):
+                observed_coverage = _safe_float(
+                    diagnostics.get("observed_opening_coverage"), 0.0
+                )
+                axis_view_angle = _safe_float(
+                    diagnostics.get("axis_view_angle_deg"), 90.0
+                )
+                minimum_observed = _safe_float(
+                    branch_b_raw.get("full_geometry_minimum_observed_opening_coverage"),
+                    0.15,
+                )
+                side_on_angle = _safe_float(
+                    branch_b_raw.get("full_geometry_side_on_angle_deg"), 80.0
+                )
+                side_on_minimum = _safe_float(
+                    branch_b_raw.get(
+                        "full_geometry_side_on_minimum_observed_opening_coverage"
+                    ),
+                    0.25,
+                )
+                if observed_coverage < minimum_observed:
+                    fast_gate_reason = "m385_weak_depth_opening_skips_inner_outer_geometry"
+                elif axis_view_angle >= side_on_angle and observed_coverage < side_on_minimum:
+                    fast_gate_reason = "m385_side_on_depth_opening_skips_inner_outer_geometry"
+            if fast_gate_reason is not None:
+                fit_public["rim_pinch_geometry_skipped"] = True
+                fit_public["rim_pinch_geometry_skip_reason"] = fast_gate_reason
+                fit_public["eligible_for_rim_pinch_geometry"] = False
+                m38b_fast_gate_skipped_ring_ids.append(ring_id)
+            else:
+                fit_public["rim_pinch_geometry_skipped"] = False
+                fit_public["eligible_for_rim_pinch_geometry"] = bool(
+                    fit.get("eligible", False)
+                )
             m38b_fit_records.append(fit_public)
             if not bool(fit.get("eligible", False)):
+                continue
+            if fast_gate_reason is not None:
                 continue
             payload = fit.get("pose_payload")
             synthetic = fit.get("synthetic_mouth_instance")
@@ -1427,6 +1531,146 @@ def run_hybrid_grasp(
                 "m38b_geometry_ms": 0.0,
                 "selected_branch": "none",
             })
+
+    # M38.5 branch D: when no complete inner/outer candidate survives, recover
+    # only the observed outer contact geometry from a pure cylindrical side.
+    # This branch never invents a hidden mouth and never invokes the expensive
+    # 12-clock inner-finger/full-gripper evaluator.
+    m385_scene_gate_passed = bool(
+        not hybrid_config.m38_branch_d_require_no_mouth_instances_in_scene
+        or not mouths
+    )
+    if (
+        selected_branch == "none"
+        and rings
+        and hybrid_config.m38_branch_d_enabled
+        and m385_scene_gate_passed
+    ):
+        unmatched_ids = {int(item.instance_id) for item in unmatched_rings}
+        allowed_ids = set(unmatched_ids)
+        if not hybrid_config.m38_branch_d_only_without_mouth:
+            allowed_ids.update(int(item.instance_id) for item in rings)
+
+        lightweight_rows: Dict[int, Dict[str, Any]] = {}
+        for ring_id in allowed_ids:
+            lightweight_rows[ring_id] = _lightweight_side_candidate_record(
+                ring_by_id[ring_id],
+                rings,
+                depth_mm,
+                depth_by_id.get(ring_id, {}),
+                hybrid_config,
+            )
+
+        priority_ids: List[int] = []
+        for ring_id in m38b_fast_gate_skipped_ring_ids:
+            if ring_id in allowed_ids and ring_id not in priority_ids:
+                priority_ids.append(ring_id)
+        remaining = sorted(
+            (ring_id for ring_id in allowed_ids if ring_id not in priority_ids),
+            key=lambda ring_id: (
+                _safe_float(
+                    depth_by_id.get(ring_id, {}).get("surface_depth_mm"),
+                    float("inf"),
+                ),
+                _safe_float(lightweight_rows.get(ring_id, {}).get("score"), float("inf")),
+                -float(ring_by_id[ring_id].confidence),
+                int(ring_id),
+            ),
+        )
+        priority_ids.extend(remaining)
+        m385_preselected_ring_ids = priority_ids[
+            : hybrid_config.m38_branch_d_maximum_candidates
+        ]
+
+        eligible_fits: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+        for ring_id in m385_preselected_ring_ids:
+            m385_attempt_count += 1
+            fit_started = time.perf_counter()
+            fit = outer_contact_fit_fn(
+                ring_by_id[ring_id], rings, depth_mm, intrinsics, raw_config
+            )
+            elapsed = _elapsed_ms(fit_started)
+            m385_total_ms += elapsed
+            public = _compact_m385_fit(fit)
+            public["surface_depth_mm"] = depth_by_id.get(ring_id, {}).get(
+                "surface_depth_mm"
+            )
+            public["depth_layer_index"] = depth_by_id.get(ring_id, {}).get(
+                "depth_layer_index"
+            )
+            public["depth_rank"] = depth_by_id.get(ring_id, {}).get("depth_rank")
+            public["preselection"] = deepcopy(lightweight_rows.get(ring_id, {}))
+            m385_fit_records.append(public)
+            candidate = fit.get("candidate")
+            if bool(fit.get("eligible", False)) and isinstance(candidate, Mapping):
+                eligible_fits.append((dict(candidate), public))
+                if hybrid_config.m38_branch_d_stop_after_first_eligible:
+                    break
+
+        if eligible_fits:
+            priority_order = {
+                int(ring_id): int(index)
+                for index, ring_id in enumerate(m385_preselected_ring_ids)
+            }
+            fast_gate_ids = set(int(value) for value in m38b_fast_gate_skipped_ring_ids)
+            eligible_fits.sort(
+                key=lambda item: (
+                    0
+                    if int((item[0].get("target") or {}).get("ring_instance_id"))
+                    in fast_gate_ids
+                    else 1,
+                    priority_order.get(
+                        int((item[0].get("target") or {}).get("ring_instance_id")),
+                        10**9,
+                    ),
+                    _safe_float(
+                        (item[1].get("diagnostics") or {}).get(
+                            "radial_residual_median_mm"
+                        ),
+                        float("inf"),
+                    ),
+                    -_safe_float(
+                        (item[1].get("diagnostics") or {}).get(
+                            "radial_inlier_ratio"
+                        ),
+                        0.0,
+                    ),
+                )
+            )
+            original, _public = eligible_fits[0]
+            ring_id = int((original.get("target") or {}).get("ring_instance_id"))
+            selected_m385_candidate = _m385_candidate(
+                original, depth_by_id.get(ring_id)
+            )
+            selected_branch = "m38_5_side_surface_outer_contact_only"
+            selected_layer_index = depth_by_id.get(ring_id, {}).get(
+                "depth_layer_index"
+            )
+
+        active_layer_summaries.append({
+            "phase": "global_m38_5_side_surface_outer_contact",
+            "ring_instance_ids": list(m385_preselected_ring_ids),
+            "attempt_count": int(m385_attempt_count),
+            "candidate_found": bool(selected_m385_candidate is not None),
+            "m385_ms": float(m385_total_ms),
+            "selected_branch": selected_branch if selected_m385_candidate is not None else "none",
+        })
+    elif (
+        selected_branch == "none"
+        and rings
+        and hybrid_config.m38_branch_d_enabled
+        and not m385_scene_gate_passed
+    ):
+        active_layer_summaries.append({
+            "phase": "global_m38_5_side_surface_outer_contact",
+            "ring_instance_ids": [],
+            "attempt_count": 0,
+            "candidate_found": False,
+            "m385_ms": 0.0,
+            "scene_gate_passed": False,
+            "skip_reason": "m385_scene_contains_ring_mouth_instances",
+            "selected_branch": "none",
+        })
 
     legacy_m36_allowed = bool(hybrid_config.legacy_m36_enabled)
     legacy_m37_allowed = bool(hybrid_config.side_ring_fallback_enabled)
@@ -1832,6 +2076,12 @@ def run_hybrid_grasp(
         result_scene = last_m38b_scene
     elif last_m38a_scene is not None:
         result_scene = last_m38a_scene
+    elif selected_m385_candidate is not None:
+        result_scene = _m384_empty_scene(
+            ring_count=len(rings),
+            mouth_count=len(mouths),
+            matched_count=len(matches),
+        )
     elif m38c_fast_terminated:
         result_scene = _m384_empty_scene(
             ring_count=len(rings),
@@ -1906,6 +2156,8 @@ def run_hybrid_grasp(
         selected_candidate = selected_m38a_candidate
     elif selected_m38b_candidate is not None:
         selected_candidate = selected_m38b_candidate
+    elif selected_m385_candidate is not None:
+        selected_candidate = selected_m385_candidate
     elif selected_m36_candidate is not None:
         selected_candidate = selected_m36_candidate
     elif selected_side is not None:
@@ -1957,6 +2209,7 @@ def run_hybrid_grasp(
         if selected_m38b_scene is not None
         else (last_m38b_scene.get("eligible_count") if last_m38b_scene is not None else 0)
     )
+    result["m38_5_eligible_count"] = int(selected_m385_candidate is not None)
     result["m36_eligible_count"] = (
         selected_m36_scene.get("eligible_count")
         if selected_m36_scene is not None
@@ -1968,8 +2221,18 @@ def run_hybrid_grasp(
         result["selected_clock_hour"] = None
         result["selected_clock_angle_deg_cw_from_12"] = None
         result["selected_clock_search_batch"] = None
+    elif selected_m385_candidate is not None:
+        result["eligible_count"] = 1
+        result["selected_ring_instance_id"] = int(
+            (selected_m385_candidate.get("target") or {}).get("ring_instance_id")
+        )
+        result["selected_clock_hour"] = None
+        result["selected_clock_angle_deg_cw_from_12"] = None
+        result["selected_clock_search_batch"] = None
     result["m38_1_robot_candidate"] = deepcopy(original_m38a_candidate)
     result["m38_3_robot_candidate"] = deepcopy(original_m38b_candidate)
+    result["m38_5_outer_contact_candidate"] = deepcopy(selected_m385_candidate)
+    result["outer_contact_candidate"] = deepcopy(selected_m385_candidate)
     # Deprecated M38.2 aliases retained for dashboards and robot clients during rollout.
     result["m38_2_robot_candidate"] = deepcopy(original_m38b_candidate)
     result["m36_robot_candidate"] = deepcopy(original_m36_candidate)
@@ -1978,7 +2241,7 @@ def run_hybrid_grasp(
     result["depth_layering"] = {
         "enabled": bool(hybrid_config.depth_layering_enabled),
         "ordering_rule": (
-            "global_M38.1_clear_annulus_then_global_M38.3_depth_or_segmented_partial_opening_constrained_cylinder_then_M38.4_terminal_branch_C"
+            "global_M38.1_clear_annulus_then_global_M38.3_partial_opening_then_M38.5_pure_side_outer_contact_then_M38.4_terminal_branch_C"
         ),
         "surface_depth_statistic": f"p{hybrid_config.surface_depth_percentile:g}",
         "layer_tolerance_mm": float(hybrid_config.depth_layer_tolerance_mm),
@@ -2000,10 +2263,11 @@ def run_hybrid_grasp(
     }
     result["hybrid_grasp"] = {
         "enabled": True,
-        "policy_version": "M38.4",
+        "policy_version": "M38.5",
         "branch_priority": [
             "global_M38.1_clear_mouth_front_annulus_rim_pinch",
             "global_M38.3_depth_or_segmented_partial_opening_constrained_cylinder_rim_pinch",
+            "global_M38.5_pure_side_outer_contact_geometry",
             "global_M38.4_branch_C_explicit_reject_and_fast_terminate",
         ],
         "selected_branch": reported_branch,
@@ -2017,6 +2281,7 @@ def run_hybrid_grasp(
         "m38_1_candidate_found": bool(selected_m38a_candidate is not None),
         "m38_3_candidate_found": bool(selected_m38b_candidate is not None),
         "m38_2_candidate_found": bool(selected_m38b_candidate is not None),
+        "m38_5_candidate_found": bool(selected_m385_candidate is not None),
         "m36_candidate_found": bool(selected_m36_candidate is not None),
         "m37_candidate_found": bool(selected_side is not None),
         "target_found": bool(selected_candidate is not None),
@@ -2032,6 +2297,7 @@ def run_hybrid_grasp(
             "m38_3_branch_b_fit_ms": float(m38b_fit_total_ms),
             "m38_3_branch_b_geometry_ms": float(m38b_geometry_total_ms),
             "m38_3_branch_b_total_ms": float(m38b_inference_total_ms + m38b_fit_total_ms + m38b_geometry_total_ms),
+            "m38_5_outer_contact_ms": float(m385_total_ms),
             "m36_branch_ms": float(m36_total_ms),
             "m36_base_scene_ms": float(m36_base_scene_ms),
             "m37_lightweight_preselection_ms": float(m37_lightweight_preselection_ms),
@@ -2109,6 +2375,28 @@ def run_hybrid_grasp(
             else None
         ),
         "fit_results": m38b_fit_records,
+        "fast_gate_skipped_ring_ids": list(m38b_fast_gate_skipped_ring_ids),
+        "fast_gate_policy": {
+            "depth_inferred_opening_only": True,
+            "minimum_observed_opening_coverage": _safe_float(
+                (raw_config.get("m38_branch_b") or {}).get(
+                    "full_geometry_minimum_observed_opening_coverage"
+                ),
+                0.15,
+            ),
+            "side_on_angle_deg": _safe_float(
+                (raw_config.get("m38_branch_b") or {}).get(
+                    "full_geometry_side_on_angle_deg"
+                ),
+                80.0,
+            ),
+            "side_on_minimum_observed_opening_coverage": _safe_float(
+                (raw_config.get("m38_branch_b") or {}).get(
+                    "full_geometry_side_on_minimum_observed_opening_coverage"
+                ),
+                0.25,
+            ),
+        },
         "timing_ms": {
             "depth_opening_inference_total_ms": float(m38b_inference_total_ms),
             "constrained_cylinder_fit_total_ms": float(m38b_fit_total_ms),
@@ -2124,6 +2412,38 @@ def run_hybrid_grasp(
         ),
         "legacy_m36_retained": bool(hybrid_config.legacy_m36_enabled),
         "m37_6_retained": bool(hybrid_config.side_ring_fallback_enabled),
+    }
+    result["m38_5_branch_d"] = {
+        "enabled": bool(hybrid_config.m38_branch_d_enabled),
+        "pose_source": "observed_outer_cylinder_side_surface",
+        "grasp_mode": "outer_contact_only",
+        "requires_ring_mouth": False,
+        "only_without_mouth": bool(hybrid_config.m38_branch_d_only_without_mouth),
+        "require_no_mouth_instances_in_scene": bool(
+            hybrid_config.m38_branch_d_require_no_mouth_instances_in_scene
+        ),
+        "scene_gate_passed": bool(m385_scene_gate_passed),
+        "stop_after_first_eligible": bool(
+            hybrid_config.m38_branch_d_stop_after_first_eligible
+        ),
+        "maximum_candidates_per_trigger": int(
+            hybrid_config.m38_branch_d_maximum_candidates
+        ),
+        "attempt_count": int(m385_attempt_count),
+        "preselected_ring_instance_ids": list(m385_preselected_ring_ids),
+        "candidate_found": bool(selected_m385_candidate is not None),
+        "selected_ring_instance_id": (
+            int((selected_m385_candidate.get("target") or {}).get("ring_instance_id"))
+            if selected_m385_candidate is not None
+            else None
+        ),
+        "fit_results": m385_fit_records,
+        "candidate": deepcopy(selected_m385_candidate),
+        "timing_ms": float(m385_total_ms),
+        "robot_ready": False,
+        "scope": (
+            "outer contact point, outer surface normal, inward closing direction and undirected cylinder axis only"
+        ),
     }
     m38c_reason_code, m38c_reason = _m384_terminal_reason(
         m38a_pair_results=m38a_pair_results,
@@ -2146,10 +2466,16 @@ def run_hybrid_grasp(
         for item in m38b_fit_records
         if item.get("ring_instance_id") is not None
     }
+    m385_fit_by_ring = {
+        int(item["ring_instance_id"]): item
+        for item in m385_fit_records
+        if item.get("ring_instance_id") is not None
+    }
     for ring_id in sorted(ring_by_id):
         a_row = m38a_by_ring.get(ring_id)
         depth_row = m38b_depth_by_ring.get(ring_id)
         fit_row = m38b_fit_by_ring.get(ring_id)
+        outer_row = m385_fit_by_ring.get(ring_id)
         rejection_reasons: List[str] = []
         if a_row is not None:
             rejection_reasons.extend(str(value) for value in a_row.get("rejection_reasons") or [])
@@ -2159,6 +2485,10 @@ def run_hybrid_grasp(
             rejection_reasons.extend(str(value) for value in depth_row.get("rejection_reasons") or [])
         if fit_row is not None and not bool(fit_row.get("eligible", False)):
             rejection_reasons.extend(str(value) for value in fit_row.get("rejection_reasons") or [])
+        if outer_row is not None and not bool(outer_row.get("eligible", False)):
+            rejection_reasons.extend(
+                str(value) for value in outer_row.get("rejection_reasons") or []
+            )
         if not rejection_reasons:
             rejection_reasons.append(m38c_reason_code)
         m38c_ring_results.append({
@@ -2167,6 +2497,7 @@ def run_hybrid_grasp(
             "m38_1_checked": bool(a_row is not None),
             "m38_3_depth_opening_checked": bool(depth_row is not None),
             "m38_3_fit_checked": bool(fit_row is not None),
+            "m38_5_outer_contact_checked": bool(outer_row is not None),
             "rejection_reasons": list(dict.fromkeys(rejection_reasons)),
         })
     result["m38_4_branch_c"] = {
@@ -2188,7 +2519,9 @@ def run_hybrid_grasp(
     result["terminal_decision"] = deepcopy(result["m38_4_branch_c"])
     result["grasp_result_status"] = (
         "rejected_requires_box_turning" if m38c_fast_terminated else (
-            "candidate_found" if selected_candidate is not None else "no_candidate"
+            "outer_contact_geometry_available_not_robot_ready"
+            if selected_m385_candidate is not None
+            else ("candidate_found" if selected_candidate is not None else "no_candidate")
         )
     )
     result["operator_action"] = (

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M38.4 evidence-first trigger service with explicit branch-C rejection.
+"""M38.5 evidence-first trigger service with pure-side outer-contact geometry.
 
 The service keeps the synchronized RGB-D cache, Runtime client, geometry config
 and box calibration resident. Explicit trigger requests are serialized by one
@@ -380,7 +380,7 @@ class FoamRingOnlineService:
                     prepared,
                     save_debug=job.save_debug,
                     generate_overlay=bool(self.settings["latest_overlay_enabled"]),
-                    stage="M38.4_branch_c_fast_reject_hybrid_persistent_trigger_service",
+                    stage="M38.5_outer_contact_fast_reject_hybrid_persistent_trigger_service",
                     geometry_queue_wait_ms=geometry_wait_ms,
                 )
                 service_processing_ms = max(
@@ -481,6 +481,11 @@ class FoamRingOnlineService:
             if isinstance(scene.get("m38_4_branch_c"), Mapping)
             else {}
         )
+        branch_d = (
+            scene.get("m38_5_branch_d")
+            if isinstance(scene.get("m38_5_branch_d"), Mapping)
+            else {}
+        )
         hybrid_timing = (
             hybrid.get("timing_ms")
             if isinstance(hybrid.get("timing_ms"), Mapping)
@@ -501,7 +506,7 @@ class FoamRingOnlineService:
         return {
             "schema_version": "1.0",
             "message_type": "foam_ring_trigger_result",
-            "stage": str(payload.get("stage") or "M38.4_branch_c_fast_reject_hybrid_persistent_trigger_service"),
+            "stage": str(payload.get("stage") or "M38.5_outer_contact_fast_reject_hybrid_persistent_trigger_service"),
             "status": "ok",
             "request_id": job.request_id,
             "idempotent_replay": False,
@@ -535,6 +540,9 @@ class FoamRingOnlineService:
                 "terminal_reject": bool(branch_c.get("fast_terminated", False)),
                 "terminal_reject_reason": branch_c.get("decision"),
                 "operator_action": branch_c.get("operator_action"),
+                "m38_5_candidate_found": hybrid.get("m38_5_candidate_found"),
+                "m38_5_selected_ring_instance_id": branch_d.get("selected_ring_instance_id"),
+                "m38_5_robot_ready": branch_d.get("robot_ready"),
                 "m36_candidate_found": hybrid.get("m36_candidate_found"),
                 "m37_candidate_found": hybrid.get("m37_candidate_found"),
                 "m37_candidate_count": side_branch.get("candidate_count"),
@@ -561,6 +569,7 @@ class FoamRingOnlineService:
                 "association_prepass_ms": hybrid_timing.get("association_prepass_ms"),
                 "depth_preselection_ms": hybrid_timing.get("depth_preselection_ms"),
                 "depth_layer_build_ms": hybrid_timing.get("depth_layer_build_ms"),
+                "m38_5_outer_contact_ms": hybrid_timing.get("m38_5_outer_contact_ms"),
                 "m36_branch_ms": hybrid_timing.get("m36_branch_ms"),
                 "m37_lightweight_preselection_ms": hybrid_timing.get("m37_lightweight_preselection_ms"),
                 "m37_screen_total_ms": hybrid_timing.get("m37_screen_total_ms"),
@@ -892,7 +901,7 @@ def run(
     )
     thread.start()
     print(
-        "Foam Ring M38.4 Branch-C Fast-Reject Hybrid Service started: http={}:{} runtime={} "
+        "Foam Ring M38.5 Pure-Side Outer-Contact Fast-Reject Service started: http={}:{} runtime={} "
         "m36_mode={} hybrid={} queue={}".format(
             settings["listen_host"],
             settings["listen_port"],

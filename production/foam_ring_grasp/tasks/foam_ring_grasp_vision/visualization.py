@@ -298,6 +298,75 @@ def draw_overlay(
                     1,
                     cv2.LINE_AA,
                 )
+
+    # M38.5 diagnostic-only pure-side geometry.  Cyan marks the observed
+    # camera-near outer contact, green points inward along the requested closing
+    # direction, and magenta is the undirected cylinder axis.  No inner-finger
+    # or complete-gripper feasibility is implied by this overlay.
+    m385 = scene.get("m38_5_outer_contact_candidate")
+    if isinstance(m385, Mapping):
+        outer = m385.get("outer_contact")
+        target = m385.get("target") if isinstance(m385.get("target"), Mapping) else {}
+        if isinstance(outer, Mapping):
+            contact_value = outer.get("contact_camera_mm")
+            closing_value = outer.get("closing_direction_camera")
+            axis_value = outer.get("cylinder_axis_camera_undirected")
+            try:
+                contact_3d = np.asarray(contact_value, dtype=np.float64).reshape(3)
+                closing_3d = np.asarray(closing_value, dtype=np.float64).reshape(3)
+                axis_3d = np.asarray(axis_value, dtype=np.float64).reshape(3)
+            except (TypeError, ValueError):
+                contact_3d = closing_3d = axis_3d = None
+            if (
+                contact_3d is not None
+                and np.isfinite(contact_3d).all()
+                and np.isfinite(closing_3d).all()
+                and np.isfinite(axis_3d).all()
+            ):
+                contact_uv = project_point(contact_3d, intrinsics)
+                closing_uv = project_point(contact_3d + closing_3d * 35.0, intrinsics)
+                axis_a_uv = project_point(contact_3d - axis_3d * 30.0, intrinsics)
+                axis_b_uv = project_point(contact_3d + axis_3d * 30.0, intrinsics)
+                if contact_uv is not None:
+                    contact_px = tuple(np.rint(contact_uv).astype(int).tolist())
+                    cv2.rectangle(
+                        output,
+                        (contact_px[0] - 7, contact_px[1] - 7),
+                        (contact_px[0] + 7, contact_px[1] + 7),
+                        (255, 220, 0),
+                        2,
+                        cv2.LINE_AA,
+                    )
+                    if closing_uv is not None:
+                        cv2.arrowedLine(
+                            output,
+                            contact_px,
+                            tuple(np.rint(closing_uv).astype(int).tolist()),
+                            (0, 255, 0),
+                            2,
+                            cv2.LINE_AA,
+                            tipLength=0.25,
+                        )
+                    if axis_a_uv is not None and axis_b_uv is not None:
+                        cv2.line(
+                            output,
+                            tuple(np.rint(axis_a_uv).astype(int).tolist()),
+                            tuple(np.rint(axis_b_uv).astype(int).tolist()),
+                            (255, 0, 255),
+                            2,
+                            cv2.LINE_AA,
+                        )
+                    ring_id = target.get("ring_instance_id", -1)
+                    cv2.putText(
+                        output,
+                        f"M38.5 OUTER R{ring_id} (geometry only)",
+                        (contact_px[0] + 10, max(16, contact_px[1] - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.40,
+                        (255, 255, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
     return output
 
 
