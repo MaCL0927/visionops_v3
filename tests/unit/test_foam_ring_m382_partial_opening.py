@@ -100,8 +100,8 @@ def _fit_payload(ring: SegmentationInstance, mouth: SegmentationInstance) -> dic
 def test_m382_production_configuration_enables_branch_b_and_m384_terminal_c() -> None:
     raw = load_yaml(LINE_CONFIG)
     hybrid = HybridGraspConfig.from_mapping(raw)
-    assert raw["schema_version"] == "6.3"
-    assert raw["task"] == "foam_ring_rim_pinch_m38_4_branch_c_fast_reject"
+    assert raw["schema_version"] == "6.4"
+    assert raw["task"] == "foam_ring_rim_pinch_m38_6_direction_collision_contact_fix"
     assert hybrid.m38_branch_a_enabled is True
     assert hybrid.m38_branch_b_enabled is True
     assert hybrid.m38_branch_b_fallback_to_m36 is False
@@ -147,7 +147,7 @@ def test_m382_branch_a_still_has_priority_and_skips_branch_b() -> None:
     assert calls == ["m38_1_front_annulus"]
     assert fit_calls == []
     assert scene["selected_grasp_branch"] == "m38_1_clear_mouth_front_annulus_rim_pinch"
-    assert scene["hybrid_grasp"]["policy_version"] == "M38.5"
+    assert scene["hybrid_grasp"]["policy_version"] == "M38.6"
 
 
 def test_m382_uses_partial_opening_cylinder_before_m36_and_m376() -> None:

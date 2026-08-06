@@ -738,7 +738,7 @@ class OnlineGeometryProcessor:
             )
             cv2.putText(
                 overlay,
-                "M38.5 hybrid branch: " + branch_label,
+                "M38.6 hybrid branch: " + branch_label,
                 (10, max(36, overlay.shape[0] - 12)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.45,
@@ -746,6 +746,37 @@ class OnlineGeometryProcessor:
                 1,
                 cv2.LINE_AA,
             )
+            branch_c = (
+                scene.get("m38_4_branch_c")
+                if isinstance(scene, Mapping)
+                and isinstance(scene.get("m38_4_branch_c"), Mapping)
+                else {}
+            )
+            reject_text = str(branch_c.get("display_reason_short") or "")
+            reject_detail = str(branch_c.get("display_reason_detail") or "")
+            if bool(branch_c.get("fast_terminated")) and reject_text:
+                cv2.rectangle(overlay, (6, 6), (min(overlay.shape[1] - 6, 520), 58), (0, 0, 0), -1)
+                cv2.putText(
+                    overlay,
+                    reject_text,
+                    (14, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.62,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+                if reject_detail:
+                    cv2.putText(
+                        overlay,
+                        reject_detail,
+                        (14, 49),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.38,
+                        (255, 255, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
             ok, encoded = cv2.imencode(
                 ".jpg",
                 overlay,
@@ -819,7 +850,7 @@ class OnlineGeometryProcessor:
             "request_id": prepared.request_id,
             "robot_ready": False,
             "robot_ready_reason": (
-                "M38.5 returns camera-frame candidate/rejection data only; hand-eye transform, "
+                "M38.6 returns camera-frame candidate/rejection data only; hand-eye transform, "
                 "robot reachability and final robot protocol are not enabled"
             ),
             "capture_id": capture_id,

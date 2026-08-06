@@ -180,7 +180,7 @@ def _synthetic_scene(*, flat_mouth: bool = False):
 def test_m381_production_configuration_enables_branch_a_with_m384_legacy_disabled() -> None:
     raw = load_yaml(LINE_CONFIG)
     hybrid = HybridGraspConfig.from_mapping(raw)
-    assert raw["schema_version"] == "6.3"
+    assert raw["schema_version"] == "6.4"
     assert hybrid.m38_branch_a_enabled is True
     assert hybrid.m38_branch_a_fallback_to_m36 is False
     assert hybrid.legacy_m36_enabled is False

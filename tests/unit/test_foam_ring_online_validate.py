@@ -202,4 +202,4 @@ def test_online_validate_direct_script_can_import_repository():
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    assert "M36.4" in completed.stdout
+    assert "M38.6" in completed.stdout

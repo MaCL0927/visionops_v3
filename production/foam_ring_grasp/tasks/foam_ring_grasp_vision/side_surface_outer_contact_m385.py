@@ -1,4 +1,4 @@
-"""M38.5 pure-side outer-contact geometry.
+"""M38.6 pure-side outer-contact geometry.
 
 This branch deliberately does not infer a hidden opening and does not create an
 inner-finger candidate.  It uses only the observed outer cylindrical side patch
@@ -42,6 +42,54 @@ def _axis_angle_deg(first: np.ndarray, second: np.ndarray) -> float:
     second = _unit(second)
     cosine = float(np.clip(abs(float(np.dot(first, second))), 0.0, 1.0))
     return math.degrees(math.acos(cosine))
+
+
+def _camera_near_axial_contact(
+    line_origin: np.ndarray,
+    axis: np.ndarray,
+    axial_values: np.ndarray,
+    *,
+    lower_percentile: float,
+    upper_percentile: float,
+    fraction_from_near_end: float,
+) -> Dict[str, Any]:
+    """Choose a robust axial coordinate near the endpoint closest to camera.
+
+    Camera optical Z grows away from the camera. The endpoint with the smaller
+    centreline Z is therefore the camera-near end. The returned contact lies a
+    configurable fraction inward from that endpoint.
+    """
+
+    values = np.asarray(axial_values, dtype=np.float64)
+    if len(values) >= 20:
+        axial_low = float(np.percentile(values, lower_percentile))
+        axial_high = float(np.percentile(values, upper_percentile))
+    elif len(values):
+        axial_low = float(np.min(values))
+        axial_high = float(np.max(values))
+    else:
+        axial_low = axial_high = 0.0
+    low_endpoint = line_origin + axis * axial_low
+    high_endpoint = line_origin + axis * axial_high
+    if float(low_endpoint[2]) <= float(high_endpoint[2]):
+        near_axial, far_axial = axial_low, axial_high
+        selector = "lower_axial_endpoint"
+        near_endpoint, far_endpoint = low_endpoint, high_endpoint
+    else:
+        near_axial, far_axial = axial_high, axial_low
+        selector = "upper_axial_endpoint"
+        near_endpoint, far_endpoint = high_endpoint, low_endpoint
+    fraction = float(np.clip(fraction_from_near_end, 0.0, 0.50))
+    contact_axial = float(near_axial + fraction * (far_axial - near_axial))
+    return {
+        "contact_axial_coordinate_mm": contact_axial,
+        "near_endpoint_axial_coordinate_mm": float(near_axial),
+        "far_endpoint_axial_coordinate_mm": float(far_axial),
+        "near_endpoint_selector": selector,
+        "near_endpoint_camera_mm": near_endpoint,
+        "far_endpoint_camera_mm": far_endpoint,
+        "fraction_from_camera_near_end": fraction,
+    }
 
 
 def _occupied_span_deg(angles: np.ndarray) -> float:
@@ -135,7 +183,8 @@ def _evaluate_axis(
         else 0.0
     )
     median_axial = float(np.median(span_values)) if len(span_values) else float(np.median(axial))
-    axis_point = basis_u * float(center_2d[0]) + basis_v * float(center_2d[1]) + axis * median_axial
+    line_origin = basis_u * float(center_2d[0]) + basis_v * float(center_2d[1])
+    axis_point = line_origin + axis * median_axial
 
     normal_axis_error = np.empty((0,), dtype=np.float64)
     normal_radial_error = np.empty((0,), dtype=np.float64)
@@ -174,6 +223,7 @@ def _evaluate_axis(
         "basis_v": basis_v,
         "circle_center_2d": center_2d,
         "axis_point": axis_point,
+        "line_origin": line_origin,
         "radial_inlier_mask": inlier,
         "axial_coordinate_mm": axial,
         "radial_inlier_ratio": radial_ratio,
@@ -332,9 +382,54 @@ def fit_side_surface_outer_contact_m385(
     canonical_axis = None
     frame = None
     axis_view_angle_deg = None
+    contact_axial_fraction = None
+    contact_axial_coordinate_mm = None
+    near_endpoint_axial_coordinate_mm = None
+    far_endpoint_axial_coordinate_mm = None
+    near_endpoint_camera_mm = None
+    far_endpoint_camera_mm = None
+    near_endpoint_selector = None
     if best is not None:
         canonical_axis = _canonical_undirected_axis(np.asarray(best["axis"], dtype=np.float64))
-        axis_point = np.asarray(best["axis_point"], dtype=np.float64)
+        line_origin = np.asarray(best.get("line_origin"), dtype=np.float64)
+        # M38.6 no longer anchors the outer contact at the observed axial
+        # midpoint.  Recover robust observed endpoints on the fitted cylinder
+        # centreline, choose the endpoint whose centreline point has the
+        # smaller camera-Z value, then move 15% inward from that camera-near
+        # end.  The axis itself remains undirected.
+        all_axial = points @ canonical_axis if len(points) else np.empty((0,), dtype=np.float64)
+        lower_percentile = float(
+            np.clip(_safe_float(section.get("contact_axial_lower_percentile"), 8.0), 0.0, 45.0)
+        )
+        upper_percentile = float(
+            np.clip(_safe_float(section.get("contact_axial_upper_percentile"), 92.0), 55.0, 100.0)
+        )
+        axial_choice = _camera_near_axial_contact(
+            line_origin,
+            canonical_axis,
+            all_axial,
+            lower_percentile=lower_percentile,
+            upper_percentile=upper_percentile,
+            fraction_from_near_end=_safe_float(
+                section.get("contact_from_camera_near_end_fraction"), 0.15
+            ),
+        )
+        contact_axial_fraction = float(axial_choice["fraction_from_camera_near_end"])
+        contact_axial_coordinate_mm = float(axial_choice["contact_axial_coordinate_mm"])
+        near_endpoint_axial_coordinate_mm = float(
+            axial_choice["near_endpoint_axial_coordinate_mm"]
+        )
+        far_endpoint_axial_coordinate_mm = float(
+            axial_choice["far_endpoint_axial_coordinate_mm"]
+        )
+        near_endpoint_selector = str(axial_choice["near_endpoint_selector"])
+        near_endpoint_camera_mm = np.asarray(
+            axial_choice["near_endpoint_camera_mm"], dtype=np.float64
+        )
+        far_endpoint_camera_mm = np.asarray(
+            axial_choice["far_endpoint_camera_mm"], dtype=np.float64
+        )
+        axis_point = line_origin + canonical_axis * contact_axial_coordinate_mm
         view_to_camera = _unit(-axis_point)
         axis_view_angle_deg = math.degrees(
             math.acos(
@@ -363,7 +458,7 @@ def fit_side_surface_outer_contact_m385(
                 reasons.append("m385_outer_contact_not_projectable")
 
             inlier = np.asarray(best["radial_inlier_mask"], dtype=bool)
-            axial = np.asarray(best["axial_coordinate_mm"], dtype=np.float64)
+            axial = fit_points @ canonical_axis
             center_axial = float(np.dot(axis_point, canonical_axis))
             support_mask = inlier & (
                 np.abs(axial - center_axial)
@@ -461,6 +556,20 @@ def fit_side_surface_outer_contact_m385(
         "observed_axis_span_mm": (best or {}).get("observed_axis_span_mm"),
         "axis_view_angle_deg": axis_view_angle_deg,
         "contact_support_error_mm": support_error,
+        "contact_axial_policy": "camera_near_endpoint_then_inward_fraction",
+        "contact_axial_fraction_from_camera_near_end": contact_axial_fraction,
+        "contact_axial_coordinate_mm": contact_axial_coordinate_mm,
+        "near_endpoint_axial_coordinate_mm": near_endpoint_axial_coordinate_mm,
+        "far_endpoint_axial_coordinate_mm": far_endpoint_axial_coordinate_mm,
+        "near_endpoint_selector": near_endpoint_selector,
+        "near_endpoint_camera_mm": (
+            np.asarray(near_endpoint_camera_mm, dtype=np.float64).tolist()
+            if near_endpoint_camera_mm is not None else None
+        ),
+        "far_endpoint_camera_mm": (
+            np.asarray(far_endpoint_camera_mm, dtype=np.float64).tolist()
+            if far_endpoint_camera_mm is not None else None
+        ),
         "axis_direction_ambiguous": True,
     }
     candidate = None
@@ -493,6 +602,18 @@ def fit_side_surface_outer_contact_m385(
                 "cylinder_axis_camera_undirected": np.asarray(canonical_axis, dtype=np.float64).tolist(),
                 "axis_direction_ambiguous": True,
                 "contact_frame_camera": frame,
+                "axial_position": {
+                    "policy": "camera_near_endpoint_then_inward_fraction",
+                    "fraction_from_camera_near_end": contact_axial_fraction,
+                    "near_endpoint_camera_mm": (
+                        np.asarray(near_endpoint_camera_mm, dtype=np.float64).tolist()
+                        if near_endpoint_camera_mm is not None else None
+                    ),
+                    "far_endpoint_camera_mm": (
+                        np.asarray(far_endpoint_camera_mm, dtype=np.float64).tolist()
+                        if far_endpoint_camera_mm is not None else None
+                    ),
+                },
             },
             "quality": diagnostics,
             "warnings": warnings,

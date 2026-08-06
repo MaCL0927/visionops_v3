@@ -1,5 +1,5 @@
-schema_version: "6.3"
-task: foam_ring_rim_pinch_m38_4_branch_c_fast_reject
+schema_version: "6.4"
+task: foam_ring_rim_pinch_m38_6_direction_collision_contact_fix
 
 classes:
   foam_ring: foam_ring
@@ -226,7 +226,7 @@ full_gripper_static_collision:
   intersection_tolerance_mm: 1.5
   minimum_clearance_mm: 4.0
 
-  hard_reject_box_intersection: false
+  hard_reject_box_intersection: true
   hard_reject_box_clearance: false
   hard_reject_neighbor_intersection: true
   hard_reject_neighbor_clearance: true
@@ -268,7 +268,7 @@ full_gripper_motion_collision:
   intersection_tolerance_mm: 1.5
   minimum_clearance_mm: 4.0
 
-  hard_reject_box_intersection: false
+  hard_reject_box_intersection: true
   hard_reject_box_clearance: false
   hard_reject_neighbor_intersection: true
   hard_reject_neighbor_clearance: true
@@ -292,7 +292,10 @@ box_wall:
   enabled: true
   model: calibrated_3d_cuboid
   calibration_file: box_model.json
+  # M38.6 rejects confirmed intersections, while a missing/mismatched model is
+  # still reported separately by the existing configuration policy.
   hard_reject: false
+  hard_reject_intersection: true
 
   # Reject use of a stale model when ROI resolution or camera intrinsics change.
   resolution_tolerance_px: 0
@@ -390,6 +393,10 @@ geometry_optimization:
   # If it fails geometry/collision checks, try the next pair, up to this limit.
   stop_after_first_valid_target: true
   stop_after_first_valid_candidate: true
+  # M38.6 can override this per branch. A value greater than one means that a
+  # first valid clock direction is not accepted immediately; several top-ranked
+  # directions are fully collision-checked and the best valid one is selected.
+  minimum_full_candidates_before_accept: 1
   maximum_pairs_to_fully_analyze: 3
   maximum_full_candidates_per_pair: 12
 
@@ -525,6 +532,13 @@ online_geometry:
 m38_branch_a:
   enabled: true
   fallback_to_m36: false
+
+  # M38.6 direction selection. Keep lazy target ordering, but fully evaluate
+  # the top three clock directions for the selected ring before accepting a
+  # result. If those three all fail, continue until the first valid direction
+  # or the per-pair cap is reached.
+  compare_top_clock_candidates: 3
+  maximum_full_clock_candidates: 6
 
   # Clear-opening gate. BBox-fallback associations and extremely flat or
   # irregular mouth masks are not trusted by branch A.
@@ -710,6 +724,13 @@ m38_branch_d:
   contact_support_axial_half_span_mm: 12.0
   maximum_contact_support_error_mm: 14.0
   minimum_contact_inside_mask_px: 2.0
+
+  # M38.6 contact placement: robustly recover both observed axial endpoints,
+  # choose the endpoint whose centreline is closer to the camera, then move
+  # 15% inward from that end before selecting the camera-near outer arc.
+  contact_axial_lower_percentile: 8.0
+  contact_axial_upper_percentile: 92.0
+  contact_from_camera_near_end_fraction: 0.15
 
 # M38.4 branch C: after M38.1, M38.3 and M38.5 exhaust usable geometry,
 # explicitly reject the trigger instead of asking M36/M37.6 to infer a hidden

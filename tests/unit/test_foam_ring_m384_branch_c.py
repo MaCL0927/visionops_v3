@@ -145,6 +145,18 @@ def test_m384_branch_c_reports_opening_seen_but_no_safe_grasp() -> None:
                     "warnings": [],
                     "m38_branch_a": {"opening_clear": True, "annulus_point_count": 200},
                     "plane": {"inlier_ratio": 0.8, "residual_p95_mm": 3.0},
+                    "grasp": {
+                        "clock_candidates": [
+                            {
+                                "clock_hour": 12,
+                                "full_evaluated": True,
+                                "valid": False,
+                                "rejection_reasons": [
+                                    "full_gripper_static_neighbor_collision"
+                                ],
+                            }
+                        ]
+                    },
                 }
             ],
         }
@@ -161,4 +173,60 @@ def test_m384_branch_c_reports_opening_seen_but_no_safe_grasp() -> None:
     )
 
     assert scene["selected_grasp_branch"] == "m38_4_branch_c_fast_reject"
-    assert scene["m38_4_branch_c"]["decision"] == "m38_c_no_collision_free_inner_outer_grasp"
+    branch_c = scene["m38_4_branch_c"]
+    assert branch_c["decision"] == "m38_c_collision_blocked"
+    assert branch_c["reason"] == "夹爪会发生碰撞，无安全抓取方向"
+    assert branch_c["collision_check_performed"] is True
+    assert branch_c["collision_evaluated_candidate_count"] == 1
+
+
+def test_m384_branch_c_does_not_claim_collision_when_geometry_failed_first() -> None:
+    ring = _ring()
+    mouth_mask = np.zeros(ring.mask.shape, dtype=bool)
+    mouth_mask[22:36, 36:52] = True
+    mouth = SegmentationInstance(
+        instance_id=8,
+        class_id=1,
+        class_name="ring_mouth",
+        confidence=0.94,
+        mask=mouth_mask,
+        bbox_xyxy=(36, 22, 52, 36),
+    )
+    depth = np.zeros(ring.mask.shape, dtype=np.uint16)
+    depth[ring.mask] = 600
+
+    def associate(_rings, _mouths, _config):
+        return [(ring, mouth, {"association_mode": "strict_envelope"})], [], [], []
+
+    def analyze(_instances, _depth, _intrinsics, _config):
+        return {
+            "robot_candidate": None,
+            "eligible_count": 0,
+            "instances": [
+                {
+                    "ring_instance_id": 7,
+                    "mouth_instance_id": 8,
+                    "eligible": False,
+                    "rejection_reasons": ["tilt_exceeds_geometry_candidate_limit"],
+                    "warnings": [],
+                    "m38_branch_a": {"opening_clear": True, "annulus_point_count": 200},
+                    "plane": {"inlier_ratio": 0.8, "residual_p95_mm": 3.0},
+                    "grasp": {"clock_candidates": []},
+                }
+            ],
+        }
+
+    raw = _raw()
+    scene = run_hybrid_grasp(
+        [ring, mouth],
+        depth,
+        {"fx": 500.0, "fy": 500.0, "cx": 50.0, "cy": 30.0},
+        raw_config=raw,
+        geometry_config=GeometryConfig(raw),
+        associate_fn=associate,
+        analyze_fn=analyze,
+    )
+    branch_c = scene["m38_4_branch_c"]
+    assert branch_c["decision"] == "m38_c_pose_unreliable"
+    assert branch_c["reason"] == "姿态不可靠，无法确定稳定抓取方向"
+    assert branch_c["collision_check_performed"] is False

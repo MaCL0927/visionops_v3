@@ -1058,6 +1058,43 @@ def test_m3642_first_valid_analyzes_only_first_successful_pair() -> None:
     assert {candidate.get("search_batch") for candidate in candidates} == {"primary"}
 
 
+def test_m386_first_valid_compares_top_three_full_candidates_before_accept(monkeypatch) -> None:
+    import production.foam_ring_grasp.tasks.foam_ring_grasp_vision.geometry as geometry_module
+
+    light_scores = {12: 100.0, 2: 90.0, 3: 80.0, 5: 70.0, 6: 60.0, 8: 50.0, 9: 40.0, 11: 30.0}
+    full_scores = {12: 50.0, 2: 95.0, 3: 70.0}
+
+    def fake_clock_candidate(clock, *args, evaluation_level="full", **kwargs):
+        hour = int(clock.get("clock_hour"))
+        light = str(evaluation_level).lower() != "full"
+        return {
+            **dict(clock),
+            "evaluation_stage": "light" if light else "full",
+            "full_evaluated": not light,
+            "light_valid": True,
+            "valid": not light,
+            "score": light_scores.get(hour, 1.0) if light else full_scores.get(hour, 1.0),
+            "light_score": light_scores.get(hour, 1.0),
+            "warnings": [],
+            "rejection_reasons": [],
+            "neighbor_3d": {"status": "clear"},
+            "full_gripper_static": {"status": "clear"},
+            "full_gripper_motion": {"status": "clear"},
+        }
+
+    monkeypatch.setattr(geometry_module, "_clock_candidate", fake_clock_candidate)
+    instances, depth, intrinsics = _synthetic_scene()
+    raw = _config().raw
+    config = _first_valid_config(raw)
+    config.raw["geometry_optimization"]["minimum_full_candidates_before_accept"] = 3
+    config.raw["geometry_optimization"]["maximum_full_candidates_per_pair"] = 6
+    scene = analyze_scene(instances, depth, intrinsics, config)
+    optimization = scene["geometry_optimization"]
+    assert optimization["full_candidate_evaluated_count"] == 3
+    assert optimization["full_candidate_valid_count"] == 3
+    assert scene["selected_clock_hour"] == 2
+
+
 def test_m3642_adaptive_clock_adds_four_fallbacks_only_after_primary_failure(monkeypatch) -> None:
     import production.foam_ring_grasp.tasks.foam_ring_grasp_vision.geometry as geometry_module
 

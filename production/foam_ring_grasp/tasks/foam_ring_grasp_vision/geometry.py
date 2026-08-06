@@ -107,6 +107,9 @@ def _optimization_settings(config: GeometryConfig) -> Dict[str, Any]:
         "expand_if_no_valid": bool(section.get("expand_if_no_valid", True)),
         "stop_after_first_valid_target": bool(section.get("stop_after_first_valid_target", True)),
         "stop_after_first_valid_candidate": bool(section.get("stop_after_first_valid_candidate", True)),
+        "minimum_full_candidates_before_accept": max(
+            1, _safe_int(section.get("minimum_full_candidates_before_accept"), 1)
+        ),
         "maximum_pairs_to_fully_analyze": max(
             1, _safe_int(section.get("maximum_pairs_to_fully_analyze"), 3)
         ),
@@ -2517,7 +2520,9 @@ def _clock_candidate(
             warnings.append(reason)
     elif box_status == "intersects":
         reason = "finger_sweep_intersects_3d_box_wall" if is_3d_box else "finger_sweep_intersects_box_wall"
-        if bool(box_wall.get("hard_reject")):
+        if bool(box_wall.get("hard_reject")) or bool(
+            box_section.get("hard_reject_intersection", False)
+        ):
             reasons.append(reason)
         else:
             warnings.append(reason)
@@ -4062,11 +4067,18 @@ def analyze_scene(
                     ),
                     reverse=True,
                 )
+                minimum_before_accept = int(
+                    optimization.get("minimum_full_candidates_before_accept", 1)
+                )
                 for candidate_index in primary_order:
                     if evaluate_candidate(candidate_index):
                         valid_found = True
-                        if bool(optimization.get("stop_after_first_valid_candidate", True)):
-                            break
+                    if (
+                        valid_found
+                        and bool(optimization.get("stop_after_first_valid_candidate", True))
+                        and evaluated_for_pair >= minimum_before_accept
+                    ):
+                        break
 
                 if (
                     not valid_found
@@ -4121,8 +4133,12 @@ def analyze_scene(
                     for candidate_index in fallback_order:
                         if evaluate_candidate(candidate_index):
                             valid_found = True
-                            if bool(optimization.get("stop_after_first_valid_candidate", True)):
-                                break
+                        if (
+                            valid_found
+                            and bool(optimization.get("stop_after_first_valid_candidate", True))
+                            and evaluated_for_pair >= minimum_before_accept
+                        ):
+                            break
 
             for candidate in ((pair_result.get("grasp") or {}).get("clock_candidates") or []):
                 if not candidate.get("full_evaluated"):

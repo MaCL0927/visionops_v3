@@ -3,11 +3,13 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np  # type: ignore
+import pytest  # type: ignore
 
 from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.geometry import GeometryConfig
 from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.hybrid_grasp import run_hybrid_grasp
 from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.segmentation import SegmentationInstance
 from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.side_surface_outer_contact_m385 import (
+    _camera_near_axial_contact,
     fit_side_surface_outer_contact_m385,
 )
 
@@ -152,6 +154,31 @@ def test_m385_recovers_outer_contact_from_synthetic_side_cylinder() -> None:
     assert float(normal[2]) < -0.98
     assert np.allclose(closing, -normal, atol=1e-6)
     assert result["diagnostics"]["radial_inlier_ratio"] > 0.95
+
+
+def test_m386_places_contact_fifteen_percent_from_camera_near_endpoint() -> None:
+    axis = np.asarray([0.8, 0.0, 0.6], dtype=np.float64)
+    axis /= np.linalg.norm(axis)
+    line_origin = np.asarray([0.0, 0.0, 600.0], dtype=np.float64)
+    axial = np.linspace(-35.0, 35.0, 200)
+    choice = _camera_near_axial_contact(
+        line_origin,
+        axis,
+        axial,
+        lower_percentile=0.0,
+        upper_percentile=100.0,
+        fraction_from_near_end=0.15,
+    )
+    near = np.asarray(choice["near_endpoint_camera_mm"], dtype=np.float64)
+    far = np.asarray(choice["far_endpoint_camera_mm"], dtype=np.float64)
+    contact_axial = float(choice["contact_axial_coordinate_mm"])
+    expected = float(choice["near_endpoint_axial_coordinate_mm"]) + 0.15 * (
+        float(choice["far_endpoint_axial_coordinate_mm"])
+        - float(choice["near_endpoint_axial_coordinate_mm"])
+    )
+    assert near[2] < far[2]
+    assert contact_axial == pytest.approx(expected)
+    assert choice["fraction_from_camera_near_end"] == pytest.approx(0.15)
 
 
 def test_m385_weak_depth_opening_skips_expensive_geometry_and_returns_outer_contact() -> None:

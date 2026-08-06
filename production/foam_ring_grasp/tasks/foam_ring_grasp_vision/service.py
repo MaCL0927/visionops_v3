@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M38.5 evidence-first trigger service with pure-side outer-contact geometry.
+"""M38.6 evidence-first trigger service with safer direction selection.
 
 The service keeps the synchronized RGB-D cache, Runtime client, geometry config
 and box calibration resident. Explicit trigger requests are serialized by one
@@ -380,7 +380,7 @@ class FoamRingOnlineService:
                     prepared,
                     save_debug=job.save_debug,
                     generate_overlay=bool(self.settings["latest_overlay_enabled"]),
-                    stage="M38.5_outer_contact_fast_reject_hybrid_persistent_trigger_service",
+                    stage="M38.6_direction_collision_contact_fix_hybrid_persistent_trigger_service",
                     geometry_queue_wait_ms=geometry_wait_ms,
                 )
                 service_processing_ms = max(
@@ -506,7 +506,7 @@ class FoamRingOnlineService:
         return {
             "schema_version": "1.0",
             "message_type": "foam_ring_trigger_result",
-            "stage": str(payload.get("stage") or "M38.5_outer_contact_fast_reject_hybrid_persistent_trigger_service"),
+            "stage": str(payload.get("stage") or "M38.6_direction_collision_contact_fix_hybrid_persistent_trigger_service"),
             "status": "ok",
             "request_id": job.request_id,
             "idempotent_replay": False,
@@ -515,6 +515,9 @@ class FoamRingOnlineService:
             "fallback_triggered": bool(hybrid.get("fallback_triggered", False)),
             "terminal_reject": bool(branch_c.get("fast_terminated", False)),
             "terminal_reject_reason": branch_c.get("decision"),
+            "terminal_reject_message": branch_c.get("reason"),
+            "terminal_reject_display": branch_c.get("display_reason_short"),
+            "collision_check_performed": branch_c.get("collision_check_performed"),
             "operator_action": branch_c.get("operator_action"),
             "robot_ready": False,
             "robot_ready_reason": payload.get("robot_ready_reason"),
@@ -539,6 +542,9 @@ class FoamRingOnlineService:
                 "selected_grasp_branch": hybrid.get("selected_branch") or scene.get("selected_grasp_branch"),
                 "terminal_reject": bool(branch_c.get("fast_terminated", False)),
                 "terminal_reject_reason": branch_c.get("decision"),
+                "terminal_reject_message": branch_c.get("reason"),
+                "terminal_reject_display": branch_c.get("display_reason_short"),
+                "collision_check_performed": branch_c.get("collision_check_performed"),
                 "operator_action": branch_c.get("operator_action"),
                 "m38_5_candidate_found": hybrid.get("m38_5_candidate_found"),
                 "m38_5_selected_ring_instance_id": branch_d.get("selected_ring_instance_id"),
@@ -901,7 +907,7 @@ def run(
     )
     thread.start()
     print(
-        "Foam Ring M38.5 Pure-Side Outer-Contact Fast-Reject Service started: http={}:{} runtime={} "
+        "Foam Ring M38.6 Direction/Collision/Contact-Fix Service started: http={}:{} runtime={} "
         "m36_mode={} hybrid={} queue={}".format(
             settings["listen_host"],
             settings["listen_port"],

@@ -1,4 +1,4 @@
-"""M38.5 evidence-first foam-ring geometry selection.
+"""M38.6 evidence-first foam-ring geometry selection.
 
 One Runtime segmentation result and its exact RGB-D frame feed every retained
 branch. M38.1 branch A globally searches clear segmented openings with a
@@ -61,7 +61,7 @@ def _m384_empty_scene(*, ring_count: int, mouth_count: int, matched_count: int) 
 
     return {
         "schema_version": "1.0",
-        "stage": "M38.5_outer_contact_then_branch_c_fast_reject",
+        "stage": "M38.6_direction_collision_contact_fix",
         "pose_strategy": "m38_5_outer_contact_or_m38_4_branch_c",
         "rings_detected": int(ring_count),
         "mouths_detected": int(mouth_count),
@@ -87,12 +87,53 @@ def _m384_empty_scene(*, ring_count: int, mouth_count: int, matched_count: int) 
     }
 
 
+_COLLISION_REASON_TOKENS = (
+    "collision",
+    "intersects_box_wall",
+    "clearance_too_small",
+)
+
+
+def _full_candidate_outcome(scene: Optional[Mapping[str, Any]]) -> Dict[str, int]:
+    summary = {
+        "evaluated": 0,
+        "valid": 0,
+        "collision_rejected": 0,
+        "other_rejected": 0,
+    }
+    if not isinstance(scene, Mapping):
+        return summary
+    for item in scene.get("instances") or []:
+        if not isinstance(item, Mapping):
+            continue
+        grasp = item.get("grasp") if isinstance(item.get("grasp"), Mapping) else {}
+        for candidate in grasp.get("clock_candidates") or []:
+            if not isinstance(candidate, Mapping) or not bool(candidate.get("full_evaluated")):
+                continue
+            summary["evaluated"] += 1
+            if bool(candidate.get("valid")):
+                summary["valid"] += 1
+                continue
+            reasons = [str(value) for value in candidate.get("rejection_reasons") or []]
+            collision = any(
+                any(token in reason for token in _COLLISION_REASON_TOKENS)
+                for reason in reasons
+            )
+            if collision:
+                summary["collision_rejected"] += 1
+            else:
+                summary["other_rejected"] += 1
+    return summary
+
+
 def _m384_terminal_reason(
     *,
     m38a_pair_results: Sequence[Mapping[str, Any]],
     m38b_fit_records: Sequence[Mapping[str, Any]],
     m38b_depth_records: Sequence[Mapping[str, Any]],
-) -> Tuple[str, str]:
+    m38a_scene: Optional[Mapping[str, Any]] = None,
+    m38b_scene: Optional[Mapping[str, Any]] = None,
+) -> Tuple[str, str, str, str, Dict[str, int]]:
     """Classify why A/B produced no robot candidate without guessing a hidden opening."""
 
     clear_opening_observed = any(
@@ -104,20 +145,68 @@ def _m384_terminal_reason(
     partial_opening_observed = any(
         bool(item.get("eligible", False)) for item in m38b_depth_records
     ) or bool(m38b_fit_records)
+    opening_failure_tokens = (
+        "opening_not_supported",
+        "opening_evidence",
+        "mouth_area_too_small",
+        "opening_axis_not_camera_facing",
+        "axis_too_side_on_for_inner_entry",
+    )
+    opening_support_failed = any(
+        any(
+            token in str(reason)
+            for token in opening_failure_tokens
+        )
+        for item in m38b_fit_records
+        for reason in item.get("rejection_reasons") or []
+    )
 
+    collision = _full_candidate_outcome(m38a_scene)
+    second = _full_candidate_outcome(m38b_scene)
+    for key in collision:
+        collision[key] += second[key]
+    if (
+        collision["evaluated"] > 0
+        and collision["valid"] == 0
+        and collision["collision_rejected"] == collision["evaluated"]
+    ):
+        return (
+            "m38_c_collision_blocked",
+            "夹爪会发生碰撞，无安全抓取方向",
+            "REJECT: GRIPPER COLLISION",
+            "Collision checked: all evaluated directions blocked",
+            collision,
+        )
+    if partial_opening_observed and opening_support_failed:
+        return (
+            "m38_c_opening_evidence_insufficient",
+            "开口观测不足，无法确认内夹爪入口",
+            "REJECT: OPENING NOT CLEAR",
+            "Collision check not reached",
+            collision,
+        )
     if clear_opening_observed or partial_pose_observed:
         return (
-            "m38_c_no_collision_free_inner_outer_grasp",
-            "opening geometry was observed, but no collision-checked inner/outer pinch candidate remained",
+            "m38_c_pose_unreliable",
+            "姿态不可靠，无法确定稳定抓取方向",
+            "REJECT: POSE UNRELIABLE",
+            "Collision check not reached or geometry remained uncertain",
+            collision,
         )
     if partial_opening_observed:
         return (
-            "m38_c_partial_opening_evidence_insufficient",
-            "a possible partial opening was observed, but its endpoint/axis/opening support was insufficient for inner-finger entry",
+            "m38_c_opening_evidence_insufficient",
+            "开口观测不足，无法确认内夹爪入口",
+            "REJECT: OPENING NOT CLEAR",
+            "Collision check not reached",
+            collision,
         )
     return (
         "m38_c_no_accessible_opening_evidence",
-        "only side surface or otherwise insufficient opening/end evidence was observed",
+        "没有可用开口，只观察到侧面或证据不足",
+        "REJECT: NO ACCESSIBLE OPENING",
+        "Collision check not reached",
+        collision,
     )
 
 
@@ -720,6 +809,22 @@ def _scoped_m38a_geometry_config(
     runtime = dict(runtime) if isinstance(runtime, Mapping) else {}
     runtime["pose_strategy"] = "m38_1_front_annulus"
     raw["_runtime"] = runtime
+    branch = raw.get("m38_branch_a")
+    branch = dict(branch) if isinstance(branch, Mapping) else {}
+    optimization = raw.get("geometry_optimization")
+    optimization = dict(optimization) if isinstance(optimization, Mapping) else {}
+    optimization["enabled"] = True
+    optimization["mode"] = "first_valid"
+    optimization["stop_after_first_valid_target"] = True
+    optimization["stop_after_first_valid_candidate"] = True
+    optimization["minimum_full_candidates_before_accept"] = max(
+        1, _safe_int(branch.get("compare_top_clock_candidates"), 3)
+    )
+    optimization["maximum_full_candidates_per_pair"] = max(
+        optimization["minimum_full_candidates_before_accept"],
+        _safe_int(branch.get("maximum_full_clock_candidates"), 6),
+    )
+    raw["geometry_optimization"] = optimization
     return GeometryConfig(raw)
 
 
@@ -2263,7 +2368,7 @@ def run_hybrid_grasp(
     }
     result["hybrid_grasp"] = {
         "enabled": True,
-        "policy_version": "M38.5",
+        "policy_version": "M38.6",
         "branch_priority": [
             "global_M38.1_clear_mouth_front_annulus_rim_pinch",
             "global_M38.3_depth_or_segmented_partial_opening_constrained_cylinder_rim_pinch",
@@ -2445,10 +2550,18 @@ def run_hybrid_grasp(
             "outer contact point, outer surface normal, inward closing direction and undirected cylinder axis only"
         ),
     }
-    m38c_reason_code, m38c_reason = _m384_terminal_reason(
+    (
+        m38c_reason_code,
+        m38c_reason,
+        m38c_display_short,
+        m38c_display_detail,
+        m38c_collision_summary,
+    ) = _m384_terminal_reason(
         m38a_pair_results=m38a_pair_results,
         m38b_fit_records=m38b_fit_records,
         m38b_depth_records=m38b_depth_inference_records,
+        m38a_scene=selected_m38a_scene or last_m38a_scene,
+        m38b_scene=selected_m38b_scene or last_m38b_scene,
     )
     m38c_ring_results: List[Dict[str, Any]] = []
     m38a_by_ring = {
@@ -2506,6 +2619,17 @@ def run_hybrid_grasp(
         "fast_terminated": bool(m38c_fast_terminated),
         "decision": m38c_reason_code if m38c_fast_terminated else None,
         "reason": m38c_reason if m38c_fast_terminated else None,
+        "display_reason_short": m38c_display_short if m38c_fast_terminated else None,
+        "display_reason_detail": m38c_display_detail if m38c_fast_terminated else None,
+        "collision_check_performed": bool(
+            m38c_fast_terminated and m38c_collision_summary.get("evaluated", 0) > 0
+        ),
+        "collision_evaluated_candidate_count": int(
+            m38c_collision_summary.get("evaluated", 0)
+        ),
+        "collision_rejected_candidate_count": int(
+            m38c_collision_summary.get("collision_rejected", 0)
+        ),
         "operator_action": (
             hybrid_config.m38_branch_c_action if m38c_fast_terminated else None
         ),

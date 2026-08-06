@@ -299,7 +299,7 @@ def draw_overlay(
                     cv2.LINE_AA,
                 )
 
-    # M38.5 diagnostic-only pure-side geometry.  Cyan marks the observed
+    # M38.6 diagnostic-only pure-side geometry.  Cyan marks the observed
     # camera-near outer contact, green points inward along the requested closing
     # direction, and magenta is the undirected cylinder axis.  No inner-finger
     # or complete-gripper feasibility is implied by this overlay.
@@ -359,7 +359,7 @@ def draw_overlay(
                     ring_id = target.get("ring_instance_id", -1)
                     cv2.putText(
                         output,
-                        f"M38.5 OUTER R{ring_id} (geometry only)",
+                        f"M38.6 OUTER R{ring_id} @ near-end 15%",
                         (contact_px[0] + 10, max(16, contact_px[1] - 10)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.40,
