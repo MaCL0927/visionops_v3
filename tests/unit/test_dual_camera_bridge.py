@@ -123,3 +123,72 @@ def test_hp60c_watchdog_ignores_uninstalled_bridge() -> None:
     script = (Path(__file__).resolve().parents[2] / "production/carton_line/scripts/watch_hp60c_bridge.sh").read_text(encoding="utf-8")
     assert 'systemctl cat "$BRIDGE_SERVICE"' in script
     assert "must never advance reboot counters" in script
+
+
+def test_apply_orbbec_exposure_settings_writes_env_and_keeps_auto_default(tmp_path: Path, monkeypatch) -> None:
+    env_path = tmp_path / "orbbec336l.env"
+    env_path.write_text(
+        "VISIONOPS_ORBBEC336L_HTTP_HOST=0.0.0.0\n"
+        "VISIONOPS_ORBBEC336L_HTTP_PORT=18182\n"
+        "VISIONOPS_ORBBEC336L_COLOR_WIDTH=640\n"
+        "VISIONOPS_ORBBEC336L_COLOR_HEIGHT=480\n"
+        "VISIONOPS_ORBBEC336L_DEPTH_WIDTH=640\n"
+        "VISIONOPS_ORBBEC336L_DEPTH_HEIGHT=480\n"
+        "VISIONOPS_ORBBEC336L_FPS=30\n",
+        encoding="utf-8",
+    )
+    selection = tmp_path / "active_camera.json"
+    monkeypatch.setenv("VISIONOPS_CAMERA_SELECTION_FILE", str(selection))
+    camera_selection.write_camera_selection("orbbec336l")
+    monkeypatch.setitem(sdk_bridge_settings.CAMERA_CONFIG["orbbec336l"], "env_path", env_path)
+    monkeypatch.setattr(sdk_bridge_settings, "restart_service", lambda service: {"ok": True, "service": service})
+    monkeypatch.setattr(sdk_bridge_settings, "wait_bridge_health", lambda model, values: {
+        "ok": True,
+        "response": {
+            "camera_connected": True,
+            "color_exposure_applied": True,
+            "color_auto_exposure_actual": False,
+            "color_exposure_actual": 50,
+            "color_exposure_error": "",
+        },
+    })
+    monkeypatch.setattr(sdk_bridge_settings, "restart_camera_consumers", lambda: [])
+    monkeypatch.setattr(sdk_bridge_settings, "collect_profiles", lambda model, values: {
+        "source": "env_current_fallback", "profile_url": "", "warning": None,
+        "color": [sdk_bridge_settings.make_profile(model, 640, 480, 30, "color")],
+        "depth": [sdk_bridge_settings.make_profile(model, 640, 480, 30, "depth", ["Y16"])],
+    })
+    monkeypatch.setattr(sdk_bridge_settings, "service_status", lambda service: {
+        "name": service, "active": "active", "enabled": "enabled", "active_ok": True,
+    })
+
+    result = sdk_bridge_settings.apply_sdk_bridge_settings({
+        "camera_model": "orbbec336l",
+        "rgb_profile": "orbbec336l:640x480@30",
+        "depth_profile": "orbbec336l:640x480@30",
+        "camera_exposure_mode": "manual",
+        "camera_exposure": 50,
+    })
+    text = env_path.read_text(encoding="utf-8")
+    assert "VISIONOPS_ORBBEC336L_COLOR_AUTO_EXPOSURE=false" in text
+    assert "VISIONOPS_ORBBEC336L_COLOR_EXPOSURE=50" in text
+    assert result["settings"]["camera_exposure_mode"] == "manual"
+    assert result["settings"]["camera_exposure"] == 50
+
+
+def test_orbbec_bridge_contract_contains_exposure_reapply_and_status() -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "edge/camera_bridge/orbbec336l_bridge/visionops_orbbec336l_bridge.cpp"
+    ).read_text(encoding="utf-8")
+    for token in (
+        "VISIONOPS_ORBBEC336L_COLOR_AUTO_EXPOSURE",
+        "VISIONOPS_ORBBEC336L_COLOR_EXPOSURE",
+        "configure_color_exposure(pipeline->getDevice())",
+        "OB_PROP_COLOR_AUTO_EXPOSURE_BOOL",
+        "OB_PROP_COLOR_EXPOSURE_INT",
+        "color_exposure_applied",
+        "color_exposure_error",
+    ):
+        assert token in source
+

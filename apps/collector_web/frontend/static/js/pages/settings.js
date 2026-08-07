@@ -23,6 +23,8 @@ const fields = {
   hp60c_cx: "setting-hp60c-cx",
   hp60c_cy: "setting-hp60c-cy",
   camera_jpeg_quality: "setting-camera-jpeg-quality",
+  camera_exposure_mode: "setting-camera-exposure-mode",
+  camera_exposure: "setting-camera-exposure",
   default_mode: "setting-default-mode",
   models_root: "setting-models-root",
   data_root: "setting-data-root",
@@ -233,14 +235,36 @@ function updateBridgeStatus(settings) {
   }
 }
 
+function updateExposureUi() {
+  const model = getValue(fields.camera_model, "orbbec336l");
+  const mode = getValue(fields.camera_exposure_mode, "auto");
+  const exposure = Math.max(1, Math.min(10000, Math.round(getNumber(fields.camera_exposure, 50))));
+  const input = element(fields.camera_exposure);
+  const hint = element("setting-camera-exposure-hint");
+  if (input) input.disabled = model !== "orbbec336l" || mode !== "manual";
+  if (!hint) return;
+  if (model !== "orbbec336l") {
+    hint.textContent = "HP60C 的曝光由 Angstrong 配置文件控制，此处不写入。";
+    hint.className = "profile-match-hint warn";
+  } else if (mode === "manual") {
+    hint.textContent = `保存后关闭自动曝光，并应用手动曝光值 ${exposure}；Bridge 重启及 USB 重连后都会重新应用。`;
+    hint.className = "profile-match-hint ok";
+  } else {
+    hint.textContent = `当前使用自动曝光；手动值 ${exposure} 会保留，但暂不生效。`;
+    hint.className = "profile-match-hint ok";
+  }
+}
+
 function updateCameraSpecificFields(model) {
   const hp = model === "hp60c";
   const serialField = element("setting-orbbec-serial-field");
   const hpConfigField = element("setting-hp60c-config-field");
   const hpIntrinsics = element("setting-hp60c-intrinsics");
+  const exposureSection = element("setting-orbbec-exposure-section");
   if (serialField) serialField.hidden = hp;
   if (hpConfigField) hpConfigField.hidden = !hp;
   if (hpIntrinsics) hpIntrinsics.hidden = !hp;
+  if (exposureSection) exposureSection.hidden = hp;
   const source = element(fields.rgb_source_preference);
   const order = element(fields.rgb_order);
   const rgbProfile = element(fields.rgb_profile);
@@ -253,8 +277,9 @@ function updateCameraSpecificFields(model) {
   if (hint) {
     hint.textContent = hp
       ? "HP60C 参数写入 hp60c_sdk_bridge.env，Bridge 端口 18181。保存后重启 HP60C Bridge 与当前 Runtime。实际曝光/profile 仍由 Angstrong 配置文件决定。"
-      : "Orbbec 参数写入 orbbec336l_bridge.env，Bridge 端口 18182。保存后重启 Orbbec Bridge 与当前 Runtime。";
+      : "Orbbec 参数写入 orbbec336l_bridge.env，Bridge 端口 18182。RGB 曝光会在服务启动和 USB 重连时重新应用。";
   }
+  updateExposureUi();
 }
 
 
@@ -420,6 +445,8 @@ async function loadCameraSettings(requestedModel = "") {
     setValue(fields.camera_model, model);
     setValue(fields.display_fps, current.display_fps ?? getState().config.display_fps);
     setValue(fields.camera_jpeg_quality, current.camera_jpeg_quality ?? getState().config.camera_jpeg_quality);
+    setValue(fields.camera_exposure_mode, current.camera_exposure_mode ?? getState().config.camera_exposure_mode ?? "auto");
+    setValue(fields.camera_exposure, current.camera_exposure ?? getState().config.camera_exposure ?? 50);
     setValue(fields.flip_vertical, String(current.flip_vertical ?? getState().config.flip_vertical));
     setValue(fields.flip_horizontal, String(current.flip_horizontal ?? getState().config.flip_horizontal));
     setValue(fields.depth_unit, current.depth_unit ?? getState().config.depth_unit);
@@ -641,6 +668,8 @@ function readConfigFromForm() {
     camera_read_fps: rgbParsed.fps,
     camera_resolution: rgbParsed.resolution,
     camera_jpeg_quality: getNumber(fields.camera_jpeg_quality, 100),
+    camera_exposure_mode: getValue(fields.camera_exposure_mode, "auto"),
+    camera_exposure: Math.max(1, Math.min(10000, Math.round(getNumber(fields.camera_exposure, 50)))),
     default_mode: getValue(fields.default_mode, "factory"),
     models_root: getValue(fields.models_root, "/opt/visionops_v3/models"),
     data_root: getValue(fields.data_root, "/opt/visionops_v3/data"),
@@ -670,6 +699,8 @@ function buildCameraPayload(config) {
     depth_profile: config.depth_profile,
     display_fps: config.display_fps,
     camera_jpeg_quality: config.camera_jpeg_quality,
+    camera_exposure_mode: config.camera_exposure_mode,
+    camera_exposure: config.camera_exposure,
     flip_vertical: config.flip_vertical,
     flip_horizontal: config.flip_horizontal,
     depth_unit: config.depth_unit,
@@ -757,7 +788,16 @@ async function saveSettings() {
     populateProfileSelect(fields.rgb_profile, result.profiles?.color || [], result.settings?.rgb_profile || config.rgb_profile, "未读取到 RGB profile");
     populateProfileSelect(fields.depth_profile, result.profiles?.depth || [], result.settings?.depth_profile || config.depth_profile, "未读取到 Depth profile");
     updateDepthMatchHint();
+    setValue(fields.camera_exposure_mode, result.settings?.camera_exposure_mode ?? config.camera_exposure_mode);
+    setValue(fields.camera_exposure, result.settings?.camera_exposure ?? config.camera_exposure);
     updateCameraSpecificFields(cameraModel);
+    const exposureRuntime = result.bridge_health?.response || {};
+    const exposureHint = element("setting-camera-exposure-hint");
+    if (cameraModel === "orbbec336l" && exposureHint && exposureRuntime.color_exposure_applied === true) {
+      const actualMode = exposureRuntime.color_auto_exposure_actual ? "自动" : "手动";
+      exposureHint.textContent = `设备已应用：${actualMode}曝光，当前读回值 ${exposureRuntime.color_exposure_actual ?? result.settings?.camera_exposure ?? 50}。`;
+      exposureHint.className = "profile-match-hint ok";
+    }
     if (result.changed === false) messages.push("相机设置未变化");
     else if (result.camera_switched) messages.push(`相机已切换为 ${cameraModel === "hp60c" ? "HP60C" : "Orbbec 336L"}，Runtime 图像源已重启`);
     else messages.push("相机 Bridge 参数已应用");
@@ -810,6 +850,10 @@ export function initSettings() {
   element("settings-modal").addEventListener("click", (event) => { if (event.target.id === "settings-modal") close(); });
   document.querySelectorAll(".settings-main-tab").forEach((tab) => tab.addEventListener("click", () => activateSettingsTab(tab.dataset.settingsTab)));
   document.querySelectorAll("#settings-modal input, #settings-modal select").forEach((input) => input.addEventListener("change", markUnsaved));
+  const exposureMode = element(fields.camera_exposure_mode);
+  if (exposureMode) exposureMode.addEventListener("change", updateExposureUi);
+  const exposureValue = element(fields.camera_exposure);
+  if (exposureValue) exposureValue.addEventListener("input", updateExposureUi);
   [fields.rgb_profile, fields.depth_profile].forEach((id) => {
     const node = element(id);
     if (node) node.addEventListener("change", updateDepthMatchHint);

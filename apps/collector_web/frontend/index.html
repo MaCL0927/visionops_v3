@@ -400,6 +400,25 @@
               </div>
             </div>
 
+            <div id="setting-orbbec-exposure-section" class="settings-section implemented-setting-block">
+              <div class="settings-section-title"><b>RGB / 彩色相机曝光</b><span>仅 Orbbec Gemini 336L</span></div>
+              <div class="settings-grid three">
+                <label class="setting-field">曝光模式
+                  <select id="setting-camera-exposure-mode">
+                    <option value="auto">自动曝光（默认）</option>
+                    <option value="manual">手动曝光</option>
+                  </select>
+                </label>
+                <label class="setting-field">手动曝光值
+                  <input id="setting-camera-exposure" type="number" min="1" max="10000" step="1" value="50">
+                  <small>仅在“手动曝光”下生效；设备不支持该数值时 Bridge 日志会给出错误。</small>
+                </label>
+                <label class="setting-field readonly-setting-field">当前设置说明
+                  <div id="setting-camera-exposure-hint" class="profile-match-hint ok">当前使用自动曝光；手动值 50 暂不生效。</div>
+                </label>
+              </div>
+            </div>
+
             <div class="settings-section reserved-setting-block">
               <div class="settings-section-title"><b>Depth / 深度图 profile</b></div>
               <div class="settings-grid three">

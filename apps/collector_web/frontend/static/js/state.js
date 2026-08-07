@@ -52,6 +52,7 @@ const state = {
     camera_brightness: 50,
     camera_contrast: 50,
     camera_exposure_mode: "auto",
+    camera_exposure: 50,
     default_mode: "factory",
     models_root: "/opt/visionops_v3/models",
     data_root: "/opt/visionops_v3/data",
@@ -140,6 +141,10 @@ export function normalizeConfig(config = {}) {
     hp60c_cx: clampNumber(config.hp60c_cx, 0),
     hp60c_cy: clampNumber(config.hp60c_cy, 0),
     camera_jpeg_quality: clampNumber(config.camera_jpeg_quality, 100, 10, 100),
+    camera_exposure_mode: ["auto", "manual"].includes(config.camera_exposure_mode)
+      ? config.camera_exposure_mode
+      : "auto",
+    camera_exposure: clampNumber(config.camera_exposure, 50, 1, 10000),
     camera_brightness: clampNumber(config.camera_brightness, 50, 0, 100),
     camera_contrast: clampNumber(config.camera_contrast, 50, 0, 100),
     disk_warning_percent: clampNumber(config.disk_warning_percent, 85, 50, 99),
@@ -207,6 +212,7 @@ export function persistConfig(config) {
     camera_brightness: next.camera_brightness,
     camera_contrast: next.camera_contrast,
     camera_exposure_mode: next.camera_exposure_mode,
+    camera_exposure: next.camera_exposure,
     default_mode: next.default_mode,
     models_root: next.models_root,
     data_root: next.data_root,

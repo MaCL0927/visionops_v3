@@ -41,6 +41,7 @@ CAMERA_CONFIG: dict[str, dict[str, Any]] = {
             "HTTP_HOST": "0.0.0.0", "HTTP_PORT": "18182", "COLOR_WIDTH": "640", "COLOR_HEIGHT": "480",
             "DEPTH_WIDTH": "640", "DEPTH_HEIGHT": "480", "FPS": "30", "MJPEG_FPS": "10",
             "JPEG_QUALITY": "85", "FLIP_VERTICAL": "false", "FLIP_HORIZONTAL": "false",
+            "COLOR_AUTO_EXPOSURE": "true", "COLOR_EXPOSURE": "50",
             "DEPTH_UNIT": "mm", "SERIAL": "",
         },
     },
@@ -308,6 +309,14 @@ def current_settings(model: str, values: dict[str, str]) -> dict[str, Any]:
         "depth_unit": env_value(values, cfg, "DEPTH_UNIT") or "mm",
         "bridge_url": bridge_base_url(model, values),
         "orbbec_serial": env_value(values, cfg, "SERIAL") if model == "orbbec336l" else "",
+        "camera_exposure_mode": (
+            "auto" if model != "orbbec336l" or parse_bool(env_value(values, cfg, "COLOR_AUTO_EXPOSURE"), True)
+            else "manual"
+        ),
+        "camera_exposure": (
+            clamp_int(env_value(values, cfg, "COLOR_EXPOSURE"), 50, 1, 10000)
+            if model == "orbbec336l" else 50
+        ),
         "rgb_source_preference": env_value(values, cfg, "RGB_SOURCE") if model == "hp60c" else "auto",
         "rgb_order": env_value(values, cfg, "RGB_ORDER") if model == "hp60c" else "auto",
         "hp60c_config_path": env_value(values, cfg, "CONFIG") if model == "hp60c" else "",
@@ -422,6 +431,19 @@ def apply_sdk_bridge_settings(payload: dict[str, Any]) -> dict[str, Any]:
     }
     if model == "orbbec336l":
         updates[prefix + "SERIAL"] = str(payload.get("orbbec_serial") or "").strip()
+        current_auto = parse_bool(env_value(values, cfg, "COLOR_AUTO_EXPOSURE"), True)
+        raw_mode = payload.get("camera_exposure_mode")
+        if raw_mode is None:
+            auto_exposure = current_auto
+        else:
+            mode = str(raw_mode).strip().lower()
+            if mode not in {"auto", "manual"}:
+                raise ValueError("Orbbec RGB 曝光模式必须为 auto 或 manual")
+            auto_exposure = mode == "auto"
+        exposure_fallback = clamp_int(env_value(values, cfg, "COLOR_EXPOSURE"), 50, 1, 10000)
+        exposure_value = clamp_int(payload.get("camera_exposure"), exposure_fallback, 1, 10000)
+        updates[prefix + "COLOR_AUTO_EXPOSURE"] = str(auto_exposure).lower()
+        updates[prefix + "COLOR_EXPOSURE"] = str(exposure_value)
     else:
         source = str(payload.get("rgb_source_preference") or "auto").strip().lower()
         if source not in {"auto", "mjpeg", "rgb", "yuyv"}:
@@ -469,6 +491,14 @@ def apply_sdk_bridge_settings(payload: dict[str, Any]) -> dict[str, Any]:
                 f"{CAMERA_SPECS[model]['display_name']} Bridge 重启后没有新 RGB/Depth 帧: "
                 f"{bridge_health.get('error') or 'health timeout'}"
             )
+        if model == "orbbec336l":
+            health_response = bridge_health.get("response") or {}
+            exposure_error = str(health_response.get("color_exposure_error") or "").strip()
+            exposure_applied = health_response.get("color_exposure_applied")
+            if exposure_error:
+                raise RuntimeError(f"Orbbec RGB 曝光设置失败: {exposure_error}")
+            if exposure_applied is False:
+                raise RuntimeError("Orbbec RGB 曝光设置未被设备接受")
 
     selection = write_camera_selection(model) if switch_changed else read_camera_selection()
     consumer_restarts: list[dict[str, Any]] = []

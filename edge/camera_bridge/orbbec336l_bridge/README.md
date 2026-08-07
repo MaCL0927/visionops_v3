@@ -4,6 +4,7 @@
 
 本版新增：
 
+- RGB 自动/手动曝光配置：默认自动曝光；Web 设置写入 env 后重启 Bridge，USB 重连时自动重新应用。
 - `GET /stream/profiles`：从 Orbbec SDK 实时枚举 Color / Depth 支持的 `(width, height, fps, format)` 组合。
 - Collector Web 设置 API 可读取该 profile 列表，写入 `orbbec336l_bridge.env`（由 `orbbec336l_bridge.env.example` 初始化） 并重启 `visionops-orbbec336l-bridge.service`。
 
@@ -14,6 +15,22 @@ cd /opt/visionops_v3/edge/camera_bridge/orbbec336l_bridge
 sudo bash install_orbbec336l_bridge_service.sh
 sudo systemctl restart visionops-orbbec336l-bridge.service
 ```
+
+RGB 曝光配置：
+
+```bash
+# 默认自动曝光
+VISIONOPS_ORBBEC336L_COLOR_AUTO_EXPOSURE=true
+VISIONOPS_ORBBEC336L_COLOR_EXPOSURE=50
+
+# 手动曝光示例
+VISIONOPS_ORBBEC336L_COLOR_AUTO_EXPOSURE=false
+VISIONOPS_ORBBEC336L_COLOR_EXPOSURE=50
+```
+
+手动曝光值仅在关闭自动曝光时生效。Bridge 的 `/stream/status` 会返回配置值、
+设备读回值、是否应用成功及错误信息。Web 的“设置 → 相机设置”会写入这两项并重启
+Bridge；相机 USB 拔插后也会重新应用。
 
 检查：
 

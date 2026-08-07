@@ -11,6 +11,8 @@
 //   POST /api/coordinate/sample_deproject
 //        {"points":[[sample_u,sample_v,project_u,project_v], ...], ...}
 //   GET  /stream/profiles     SDK-supported color/depth profiles
+//   Color exposure is configured by VISIONOPS_ORBBEC336L_COLOR_AUTO_EXPOSURE
+//   and VISIONOPS_ORBBEC336L_COLOR_EXPOSURE, and is reapplied after USB reconnect.
 //   GET  /stream.mjpeg, /stream/mjpeg, /stream.mjpg
 //   POST /stream/start, /stream/stop  compatibility no-op endpoints
 
@@ -191,6 +193,8 @@ public:
           depth_width_(getenv_int("VISIONOPS_ORBBEC336L_DEPTH_WIDTH", 640)),
           depth_height_(getenv_int("VISIONOPS_ORBBEC336L_DEPTH_HEIGHT", 480)),
           fps_(getenv_int("VISIONOPS_ORBBEC336L_FPS", 30)),
+          color_auto_exposure_configured_(getenv_bool("VISIONOPS_ORBBEC336L_COLOR_AUTO_EXPOSURE", true)),
+          color_exposure_configured_(std::max(1, getenv_int("VISIONOPS_ORBBEC336L_COLOR_EXPOSURE", 50))),
           jpeg_quality_(getenv_int("VISIONOPS_ORBBEC336L_JPEG_QUALITY", 85)),
           mjpeg_fps_(getenv_int("VISIONOPS_ORBBEC336L_MJPEG_FPS", 10)),
           stale_timeout_ms_(std::max(500, getenv_int("VISIONOPS_ORBBEC336L_STALE_TIMEOUT_MS", 3000))),
@@ -837,6 +841,111 @@ private:
         }
     }
 
+
+    void update_color_exposure_status(
+        bool ae_supported,
+        bool exposure_supported,
+        bool applied,
+        bool actual_auto,
+        int actual_exposure,
+        const std::string &error) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        color_auto_exposure_supported_ = ae_supported;
+        color_exposure_supported_ = exposure_supported;
+        color_exposure_applied_ = applied;
+        color_auto_exposure_actual_ = actual_auto;
+        color_exposure_actual_ = actual_exposure;
+        color_exposure_error_ = error;
+    }
+
+    void configure_color_exposure(const std::shared_ptr<ob::Device> &device) {
+        bool ae_supported = false;
+        bool exposure_supported = false;
+        bool actual_auto = color_auto_exposure_configured_;
+        int actual_exposure = color_exposure_configured_;
+        bool applied = false;
+        std::string error;
+
+        try {
+            if (!device) {
+                throw std::runtime_error("Orbbec device is null while configuring color exposure");
+            }
+
+            ae_supported = device->isPropertySupported(
+                OB_PROP_COLOR_AUTO_EXPOSURE_BOOL,
+                OB_PERMISSION_WRITE);
+            if (!ae_supported) {
+                throw std::runtime_error("color auto-exposure property is not writable");
+            }
+
+            device->setBoolProperty(
+                OB_PROP_COLOR_AUTO_EXPOSURE_BOOL,
+                color_auto_exposure_configured_);
+
+            if (device->isPropertySupported(
+                    OB_PROP_COLOR_AUTO_EXPOSURE_BOOL,
+                    OB_PERMISSION_READ)) {
+                actual_auto = device->getBoolProperty(
+                    OB_PROP_COLOR_AUTO_EXPOSURE_BOOL);
+            }
+
+            exposure_supported = device->isPropertySupported(
+                OB_PROP_COLOR_EXPOSURE_INT,
+                OB_PERMISSION_WRITE);
+
+            if (!color_auto_exposure_configured_) {
+                if (!exposure_supported) {
+                    throw std::runtime_error("manual color exposure property is not writable");
+                }
+                device->setIntProperty(
+                    OB_PROP_COLOR_EXPOSURE_INT,
+                    color_exposure_configured_);
+            }
+
+            if (device->isPropertySupported(
+                    OB_PROP_COLOR_EXPOSURE_INT,
+                    OB_PERMISSION_READ)) {
+                actual_exposure = device->getIntProperty(
+                    OB_PROP_COLOR_EXPOSURE_INT);
+            }
+
+            applied = color_auto_exposure_configured_
+                ? actual_auto
+                : !actual_auto;
+        } catch (const ob::Error &e) {
+            error = e.getMessage();
+        } catch (const std::exception &e) {
+            error = e.what();
+        } catch (...) {
+            error = "unknown color exposure configuration error";
+        }
+
+        update_color_exposure_status(
+            ae_supported,
+            exposure_supported,
+            applied,
+            actual_auto,
+            actual_exposure,
+            error);
+
+        if (error.empty()) {
+            std::cerr
+                << "[INFO] Orbbec color exposure mode="
+                << (actual_auto ? "auto" : "manual")
+                << " configured=" << color_exposure_configured_
+                << " actual=" << actual_exposure
+                << std::endl;
+        } else {
+            std::cerr
+                << "[WARN] failed to apply Orbbec color exposure: "
+                << error
+                << "; requested_mode="
+                << (color_auto_exposure_configured_ ? "auto" : "manual")
+                << "; requested_exposure=" << color_exposure_configured_
+                << std::endl;
+        }
+    }
+
     std::shared_ptr<ob::Pipeline> open_pipeline() {
         std::shared_ptr<ob::Context> context;
         std::shared_ptr<ob::Pipeline> pipeline;
@@ -866,6 +975,9 @@ private:
         auto depth_profile = enable_depth_stream(pipeline, cfg);
         cfg->setAlignMode(ALIGN_D2C_SW_MODE);
         pipeline->start(cfg);
+        // Device properties may reset after a USB disconnect. Apply the configured
+        // exposure every time a new Pipeline/device handle is opened.
+        configure_color_exposure(pipeline->getDevice());
         auto calibration = pipeline->getCalibrationParam(cfg);
 
         {
@@ -1851,6 +1963,14 @@ private:
            << "\"jpeg_frame_count\":" << jpeg_sequence_ << ","
            << "\"jpeg_source_sequence\":" << jpeg_source_sequence_ << ","
            << "\"capture_fps_configured\":" << fps_ << ","
+           << "\"color_auto_exposure_configured\":" << (color_auto_exposure_configured_ ? "true" : "false") << ","
+           << "\"color_exposure_configured\":" << color_exposure_configured_ << ","
+           << "\"color_auto_exposure_supported\":" << (color_auto_exposure_supported_ ? "true" : "false") << ","
+           << "\"color_exposure_supported\":" << (color_exposure_supported_ ? "true" : "false") << ","
+           << "\"color_exposure_applied\":" << (color_exposure_applied_ ? "true" : "false") << ","
+           << "\"color_auto_exposure_actual\":" << (color_auto_exposure_actual_ ? "true" : "false") << ","
+           << "\"color_exposure_actual\":" << color_exposure_actual_ << ","
+           << "\"color_exposure_error\":\"" << json_escape(color_exposure_error_) << "\","
            << "\"mjpeg_fps_configured\":" << mjpeg_fps_ << ","
            << "\"capture_fps_measured\":" << std::fixed << std::setprecision(3) << measured_color_fps_ << ","
            << "\"mjpeg_fps_measured\":" << std::fixed << std::setprecision(3) << measured_mjpeg_fps_ << ","
@@ -2210,6 +2330,8 @@ private:
     int depth_width_;
     int depth_height_;
     int fps_;
+    bool color_auto_exposure_configured_;
+    int color_exposure_configured_;
     int jpeg_quality_;
     int mjpeg_fps_;
     int stale_timeout_ms_;
@@ -2291,6 +2413,12 @@ private:
     int depth_w_ = 0;
     int depth_h_ = 0;
     float depth_scale_ = 1.0f;
+    bool color_auto_exposure_supported_ = false;
+    bool color_exposure_supported_ = false;
+    bool color_exposure_applied_ = false;
+    bool color_auto_exposure_actual_ = true;
+    int color_exposure_actual_ = 0;
+    std::string color_exposure_error_ = "not applied yet";
     std::string color_format_ = "";
     std::string fault_code_ = "CAMERA_STARTING";
     std::string last_error_ = "";
