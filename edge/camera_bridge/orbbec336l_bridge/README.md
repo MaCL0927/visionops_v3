@@ -4,6 +4,7 @@
 
 本版新增：
 
+- `GET /stream/camera_info` 输出 RGB 镜头畸变模型与 `k1~k6/p1/p2`，并在 Brown-Conrady 模型下直接给出 OpenCV 顺序的 `opencv_dist_coeffs`。
 - RGB 自动/手动曝光配置：默认自动曝光；Web 设置写入 env 后重启 Bridge，USB 重连时自动重新应用。
 - `GET /stream/profiles`：从 Orbbec SDK 实时枚举 Color / Depth 支持的 `(width, height, fps, format)` 组合。
 - Collector Web 设置 API 可读取该 profile 列表，写入 `orbbec336l_bridge.env`（由 `orbbec336l_bridge.env.example` 初始化） 并重启 `visionops-orbbec336l-bridge.service`。
@@ -37,7 +38,46 @@ Bridge；相机 USB 拔插后也会重新应用。
 ```bash
 curl -s http://127.0.0.1:18182/stream/profiles | python3 -m json.tool
 curl -s http://127.0.0.1:18182/stream/status | python3 -m json.tool
+curl -s http://127.0.0.1:18182/stream/camera_info | python3 -m json.tool
 ```
+
+`/stream/camera_info` 现在同时返回 RGB 内参与畸变参数，例如：
+
+```json
+{
+  "ok": true,
+  "coordinate_frame": "color_camera",
+  "unit": "mm",
+  "depth_aligned_to_color": true,
+  "color_intrinsic": {
+    "fx": 607.56,
+    "fy": 607.307,
+    "cx": 639.952,
+    "cy": 362.551,
+    "width": 1280,
+    "height": 720
+  },
+  "color_distortion": {
+    "model": 3,
+    "model_name": "brown_conrady",
+    "opencv_compatible": true,
+    "k1": 0.0,
+    "k2": 0.0,
+    "k3": 0.0,
+    "k4": 0.0,
+    "k5": 0.0,
+    "k6": 0.0,
+    "p1": 0.0,
+    "p2": 0.0,
+    "opencv_order": ["k1", "k2", "p1", "p2", "k3", "k4", "k5", "k6"],
+    "opencv_dist_coeffs": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  }
+}
+```
+
+上面的数值仅用于说明 JSON 结构，实际值来自当前 Color `VideoStreamProfile::getDistortion()`。
+只有 `none`、`brown_conrady`、`brown_conrady_k6` 被标记为 `opencv_compatible=true`；
+其它 Orbbec 畸变模型仍完整输出原始系数，但 `opencv_dist_coeffs` 返回 `null`，避免被直接误用到 OpenCV Brown-Conrady 模型。
 
 ## Tube-pick 相机三维坐标接口
 

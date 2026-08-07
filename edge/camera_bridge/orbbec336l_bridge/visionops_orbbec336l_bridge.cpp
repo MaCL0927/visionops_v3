@@ -136,6 +136,24 @@ static std::string json_escape(const std::string &s) {
     return os.str();
 }
 
+static const char *distortion_model_name(OBCameraDistortionModel model) {
+    switch (model) {
+    case OB_DISTORTION_NONE: return "none";
+    case OB_DISTORTION_MODIFIED_BROWN_CONRADY: return "modified_brown_conrady";
+    case OB_DISTORTION_INVERSE_BROWN_CONRADY: return "inverse_brown_conrady";
+    case OB_DISTORTION_BROWN_CONRADY: return "brown_conrady";
+    case OB_DISTORTION_BROWN_CONRADY_K6: return "brown_conrady_k6";
+    case OB_DISTORTION_KANNALA_BRANDT4: return "kannala_brandt4";
+    default: return "unknown";
+    }
+}
+
+static bool distortion_model_opencv_compatible(OBCameraDistortionModel model) {
+    return model == OB_DISTORTION_NONE
+        || model == OB_DISTORTION_BROWN_CONRADY
+        || model == OB_DISTORTION_BROWN_CONRADY_K6;
+}
+
 static bool encode_jpeg(const cv::Mat &bgr, int quality, std::vector<uchar> &out) {
     if (bgr.empty()) return false;
     std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, std::max(1, std::min(100, quality))};
@@ -1542,7 +1560,10 @@ private:
         }
         if (!profile) return "{\"ok\":false,\"error\":\"color profile unavailable\"}";
         try {
-            auto intrinsic = profile->getIntrinsic();
+            const auto intrinsic = profile->getIntrinsic();
+            const auto distortion = profile->getDistortion();
+            const bool opencv_compatible = distortion_model_opencv_compatible(distortion.model);
+
             std::ostringstream os;
             os << "{"
                << "\"ok\":true,"
@@ -1556,7 +1577,36 @@ private:
                << "\"cy\":" << intrinsic.cy << ","
                << "\"width\":" << intrinsic.width << ","
                << "\"height\":" << intrinsic.height
-               << "}}";
+               << "},"
+               << "\"color_distortion\":{"
+               << "\"model\":" << static_cast<int>(distortion.model) << ","
+               << "\"model_name\":\"" << distortion_model_name(distortion.model) << "\","
+               << "\"opencv_compatible\":" << (opencv_compatible ? "true" : "false") << ","
+               << "\"k1\":" << distortion.k1 << ","
+               << "\"k2\":" << distortion.k2 << ","
+               << "\"k3\":" << distortion.k3 << ","
+               << "\"k4\":" << distortion.k4 << ","
+               << "\"k5\":" << distortion.k5 << ","
+               << "\"k6\":" << distortion.k6 << ","
+               << "\"p1\":" << distortion.p1 << ","
+               << "\"p2\":" << distortion.p2 << ","
+               << "\"opencv_order\":[\"k1\",\"k2\",\"p1\",\"p2\",\"k3\",\"k4\",\"k5\",\"k6\"],"
+               << "\"opencv_dist_coeffs\":";
+            if (opencv_compatible) {
+                os << "["
+                   << distortion.k1 << ","
+                   << distortion.k2 << ","
+                   << distortion.p1 << ","
+                   << distortion.p2 << ","
+                   << distortion.k3 << ","
+                   << distortion.k4 << ","
+                   << distortion.k5 << ","
+                   << distortion.k6
+                   << "]";
+            } else {
+                os << "null";
+            }
+            os << "}}";
             return os.str();
         } catch (const std::exception &e) {
             return std::string("{\"ok\":false,\"error\":\"") + json_escape(e.what()) + "\"}";
