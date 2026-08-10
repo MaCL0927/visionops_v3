@@ -1,5 +1,5 @@
-schema_version: "6.4"
-task: foam_ring_rim_pinch_m38_6_direction_collision_contact_fix
+schema_version: "6.5"
+task: foam_ring_rim_pinch_m39_2_left_robot_pose_transform
 
 classes:
   foam_ring: foam_ring
@@ -442,6 +442,52 @@ robot_interface:
   #   +Y: Z cross X, completing a right-handed frame.
   closing_axis_name: x
   approach_axis_name: z
+
+# M39.2: convert the M38.6 visual grasp frame into the LEFT robot base frame.
+# Transform notation is T_A_B: coordinates in B -> coordinates in A.
+# This section is deliberately arm-locked.  A right-arm calibration file causes
+# startup failure instead of silently producing a mirrored/wrong robot pose.
+robot_pose_transform:
+  enabled: true
+  arm: left
+
+  frames:
+    base: base_link
+    # M38.6 uses camera_color_optical_frame while M39.1 stores color_camera.
+    # They are two names for the same aligned Orbbec RGB optical frame here; no
+    # extra transform is inserted between them.
+    camera_aliases: [camera_color_optical_frame, color_camera]
+    visual_grasp: m38_6_visual_grasp
+    hand_tcp: hand_tcp_link
+    flange: left_link7
+
+  handeye:
+    calibration_file: handeye_left_20260808_094336.json
+    sha256: 1c2e3f41b5f8e02fb235417208e17de6706290697bb9e114bb05222ec2b798e6
+    required_calibration_type: eye_to_hand
+    required_source_frame: color_camera
+    required_target_frame: base_link
+    # This exact left-hand calibration selected ANDREFF even though PARK was the
+    # preferred method in the calibration configuration. Use the selected result.
+    required_selected_method: ANDREFF
+    allowed_quality_status: [PASS, PROVISIONAL_PASS]
+
+  visual_grasp_to_hand_tcp:
+    enabled: true
+    origin_policy: exact_origin_verified
+    T_grasp_hand_tcp_rows:
+      - [0.0,  0.0, 1.0, 0.0]
+      - [0.0, -1.0, 0.0, 0.0]
+      - [1.0,  0.0, 0.0, 0.0]
+      - [0.0,  0.0, 0.0, 1.0]
+
+  hand_tcp_to_flange:
+    enabled: true
+    T_hand_tcp_flange_rows:
+      - [1.0, 0.0, 0.0, -130.5]
+      - [0.0, 1.0, 0.0,    0.0]
+      - [0.0, 0.0, 1.0,   60.0]
+      - [0.0, 0.0, 0.0,    1.0]
 
 online_rgbd:
   # M36.3 caches exact RGB/D2C-depth pairs before Runtime inference returns.

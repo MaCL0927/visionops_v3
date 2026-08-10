@@ -1,4 +1,4 @@
-"""M38.6 one-shot direction/collision/contact-fix validation.
+"""M39.2 one-shot LEFT robot-pose validation on the M38.6 geometry baseline.
 
 M36.5 reuses the same :class:`OnlineGeometryProcessor` in a persistent service;
 this command intentionally starts and stops the processor once so the historical
@@ -58,7 +58,7 @@ def run_once(
         return processor.process(
             save_debug=None,
             generate_overlay=False,
-            stage="M38.6_direction_collision_contact_fix_online_geometry_once",
+            stage="M39.2_left_robot_pose_transform_online_geometry_once",
         ).payload
     finally:
         processor.stop()
@@ -66,7 +66,7 @@ def run_once(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="M38.6：M38.1前三方向比较、确认碰撞硬拒绝、分支C直观原因、纯侧面近端15%外接触点",
+        description="M39.2：基于M38.6几何结果增加LEFT camera→base→hand_tcp变换，并保留M38.6方向/碰撞/接触逻辑",
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--runtime-url")
@@ -154,11 +154,11 @@ def main() -> int:
             geometry_mode=args.geometry_mode,
         )
     except (OnlineGeometryError, OSError, ValueError, json.JSONDecodeError) as error:
-        print(f"[FAIL] M38.6 hybrid online geometry failed: {error}", file=sys.stderr)
+        print(f"[FAIL] M39.2 LEFT robot-pose online geometry failed: {error}", file=sys.stderr)
         return 2
     document = payload if args.print_full_json else _summary(payload)
     print(json.dumps(document, ensure_ascii=False, indent=2))
-    print("[PASS] M38.6 direction/collision/contact-fix online geometry completed.")
+    print("[PASS] M39.2 LEFT robot-pose online geometry completed.")
     return 0
 
 

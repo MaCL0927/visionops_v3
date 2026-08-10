@@ -46,6 +46,10 @@ from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.rgbd_cache import (
     RgbdFrame,
     RgbdFrameCache,
 )
+from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.robot_pose_transform import (  # noqa: E402
+    RobotPoseTransformError,
+    RobotPoseTransformer,
+)
 from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.segmentation import (  # noqa: E402
     RuntimeSegmentationAdaptation,
     runtime_result_to_segmentation_instances,
@@ -331,6 +335,12 @@ class OnlineGeometryProcessor:
         )
         self.geometry_config = GeometryConfig(self.raw_config)
         self.hybrid_config = HybridGraspConfig.from_mapping(self.raw_config)
+        try:
+            self.robot_pose_transformer = RobotPoseTransformer.from_mapping(
+                self.raw_config, self.config_path
+            )
+        except RobotPoseTransformError as error:
+            raise OnlineGeometryError(f"M39.2 Robot Pose Transform配置无效: {error}") from error
         self._analyze_fn = analyze_fn
         self._started = False
         self._lifecycle_lock = threading.Lock()
@@ -449,6 +459,7 @@ class OnlineGeometryProcessor:
                     "m36_mouth_visible_rim_pinch",
                     "m37_side_ring_near_visible_crown",
                 ],
+                "robot_pose_transform": self.robot_pose_transformer.status(),
             },
         }
 
@@ -635,6 +646,14 @@ class OnlineGeometryProcessor:
         timings["geometry_ms"] = _perf_ms(geometry_started)
         scene_clean = _strip_debug(scene)
         selected = scene_clean.get("robot_candidate") if isinstance(scene_clean, Mapping) else None
+
+        transform_started = time.perf_counter()
+        try:
+            robot_pose_transform = self.robot_pose_transformer.transform_candidate(selected)
+        except RobotPoseTransformError as error:
+            raise OnlineGeometryError(f"M39.2 Robot Pose Transform失败: {error}") from error
+        timings["robot_pose_transform_ms"] = _perf_ms(transform_started)
+        robot_pose_transform_ready = str(robot_pose_transform.get("status") or "") == "ok"
 
         if save_debug is None:
             save_flags = {
@@ -848,10 +867,12 @@ class OnlineGeometryProcessor:
             "stage": str(stage),
             "status": "ok",
             "request_id": prepared.request_id,
+            "robot_pose_transform_ready": bool(robot_pose_transform_ready),
             "robot_ready": False,
             "robot_ready_reason": (
-                "M38.6 returns camera-frame candidate/rejection data only; hand-eye transform, "
-                "robot reachability and final robot protocol are not enabled"
+                "M39.2 provides the LEFT-arm base_link Visual Grasp pose; exact hand_tcp/flange poses "
+                "remain gated until their fixed tool transforms are configured, and robot reachability, "
+                "controller trajectory validation and the final robot protocol are not enabled"
             ),
             "capture_id": capture_id,
             "capture_timestamp_ms": prepared.capture_timestamp_ms,
@@ -930,6 +951,7 @@ class OnlineGeometryProcessor:
             },
             "scene": scene_clean,
             "candidate": selected,
+            "robot_pose_transform": robot_pose_transform,
             "files": files,
             "cache_status": self.cache.status(),
         }

@@ -100,8 +100,8 @@ def _fit_payload(ring: SegmentationInstance, mouth: SegmentationInstance) -> dic
 def test_m382_production_configuration_enables_branch_b_and_m384_terminal_c() -> None:
     raw = load_yaml(LINE_CONFIG)
     hybrid = HybridGraspConfig.from_mapping(raw)
-    assert raw["schema_version"] == "6.4"
-    assert raw["task"] == "foam_ring_rim_pinch_m38_6_direction_collision_contact_fix"
+    assert raw["schema_version"] == "6.5"
+    assert raw["task"] == "foam_ring_rim_pinch_m39_2_left_robot_pose_transform"
     assert hybrid.m38_branch_a_enabled is True
     assert hybrid.m38_branch_b_enabled is True
     assert hybrid.m38_branch_b_fallback_to_m36 is False

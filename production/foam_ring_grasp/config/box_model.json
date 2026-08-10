@@ -5,48 +5,48 @@
   "coordinate_frame": "camera_color_optical_frame",
   "origin_definition": "front_left_top_inner_corner",
   "origin_camera_mm": [
-    -170.64788593420775,
-    -98.69886957017079,
-    490.8701235711678
+    -304.82266310761145,
+    -139.6469224532787,
+    740.1717155355758
   ],
   "axes_camera": {
     "x_right": [
-      0.9998561933107094,
-      -0.000865248695352624,
-      0.016936470792718206
+      0.9999662933435195,
+      -0.0014478691211799435,
+      -0.008081822308755088
     ],
     "y_down": [
-      -0.0002790042124199805,
-      0.9977231045428392,
-      0.06744278180834817
+      0.0011893188217537134,
+      0.9994901915420933,
+      -0.03190521167286099
     ],
     "z_inside": [
-      -0.01695626299828055,
-      -0.06743780843187445,
-      0.9975793838783152
+      0.00812389669817263,
+      0.03189452439146532,
+      0.9994582240475485
     ]
   },
   "rotation_camera_from_box_rows": [
     [
-      0.9998561933107094,
-      -0.0002790042124199805,
-      -0.01695626299828055
+      0.9999662933435195,
+      0.0011893188217537134,
+      0.00812389669817263
     ],
     [
-      -0.000865248695352624,
-      0.9977231045428392,
-      -0.06743780843187445
+      -0.0014478691211799435,
+      0.9994901915420933,
+      0.03189452439146532
     ],
     [
-      0.016936470792718206,
-      0.06744278180834817,
-      0.9975793838783152
+      -0.008081822308755088,
+      -0.03190521167286099,
+      0.9994582240475485
     ]
   ],
   "inner_size_mm": {
-    "width": 345.4084534341728,
-    "height": 252.20698319835714,
-    "depth": 288.5833992684202
+    "width": 420.0,
+    "height": 280.0,
+    "depth": 90.0
   },
   "safety_margin_mm": {
     "left": 8.0,
@@ -56,90 +56,104 @@
     "back": 8.0
   },
   "camera_resolution": {
-    "width": 528,
-    "height": 455
+    "width": 640,
+    "height": 640
   },
   "intrinsics": {
-    "fx": 611.9945068359375,
-    "fy": 612.1162109375,
-    "cx": 261.81781005859375,
-    "cy": 197.63986206054688
+    "fx": 607.5596923828125,
+    "fy": 607.3067626953125,
+    "cx": 344.95159912109375,
+    "cy": 362.55133056640625
   },
   "calibration": {
-    "status": "calibrated_requires_visual_confirmation",
-    "method": "rear_and_bottom_ransac_plus_orthogonal_cuboid_constraints",
+    "status": "calibrated_three_frame_manual_opening_corners",
+    "method": "three_frame_floor_plane_plus_user_corrected_opening_corners_after_camera_move",
     "source": {
-      "capture_id": "visionops_20260729_193931_444",
-      "rgb_filename": "visionops_20260729_193931_444.jpg",
-      "depth_filename": "visionops_20260729_193931_444.png",
-      "meta_filename": "visionops_20260729_193931_444.json"
-    },
-    "input": {
-      "rear_roi_xywh": [
-        130,
-        110,
-        270,
-        180
+      "batch": "rk3576-252_empty_box2_20260808_021510",
+      "capture_ids": [
+        "visionops_20260808_021445_977",
+        "visionops_20260808_021449_464",
+        "visionops_20260808_021452_267"
       ],
-      "bottom_roi_xywh": [
-        100,
-        300,
-        330,
-        90
+      "rgb_filenames": [
+        "visionops_20260808_021445_977.jpg",
+        "visionops_20260808_021449_464.jpg",
+        "visionops_20260808_021452_267.jpg"
       ],
-      "rear_corners_uv_tl_tr_br_bl": [
-        [
-          124.0,
-          105.0
-        ],
-        [
-          401.0,
-          105.0
-        ],
-        [
-          391.0,
-          302.0
-        ],
-        [
-          126.0,
-          302.0
-        ]
+      "depth_filenames": [
+        "visionops_20260808_021445_977.png",
+        "visionops_20260808_021449_464.png",
+        "visionops_20260808_021452_267.png"
       ],
-      "front_bottom_edge_uv_left_right": [
-        [
-          57.0,
-          378.0
-        ],
-        [
-          471.0,
-          378.0
-        ]
+      "meta_filenames": [
+        "visionops_20260808_021445_977.json",
+        "visionops_20260808_021449_464.json",
+        "visionops_20260808_021452_267.json"
       ]
     },
-    "rear_plane": {
-      "normal_toward_opening": [
-        0.01695626299828055,
-        0.06743780843187445,
-        -0.9975793838783152
-      ],
-      "offset": 787.8149005973349,
-      "inlier_ratio": 0.7900974562272878,
-      "residual_median_mm": 1.7264975152788793,
-      "residual_p95_mm": 3.608185266947288,
-      "point_count": 48432
+    "nominal_inner_size_mm": {
+      "width": 420.0,
+      "height": 280.0,
+      "depth": 90.0,
+      "source": "user_measured"
     },
-    "bottom_plane": {
-      "normal_inward": [
-        0.0009671677676010013,
-        -0.994162682438671,
-        -0.10788709576615518
+    "input": {
+      "manual_opening_corners_uv": {
+        "TL": [
+          93.0,
+          247.0
+        ],
+        "TR": [
+          440.0,
+          246.0
+        ],
+        "BR": [
+          441.0,
+          480.0
+        ],
+        "BL": [
+          94.0,
+          480.0
+        ]
+      },
+      "floor_roi_xyxy": [
+        100,
+        170,
+        470,
+        410
       ],
-      "offset": 204.67452990290516,
-      "inlier_ratio": 0.9450373532550693,
-      "residual_median_mm": 1.1271621758983486,
-      "residual_p95_mm": 3.2485753211154074,
-      "point_count": 14992
+      "depth_keep_range_mm": [
+        790,
+        860
+      ],
+      "nominal_depth_offset_mm": 90.0
     },
-    "raw_rear_bottom_normal_angle_deg": 87.67325562271726
+    "stability": {
+      "origin_std_mm_xyz": [
+        0.03348420696201044,
+        0.006608874762374876,
+        0.16042722418153302
+      ],
+      "origin_std_norm_mm": 0.16401757101021633,
+      "plane_residual_median_mm_mean": 1.72289478763424,
+      "plane_residual_p95_mm_mean": 5.244170501207983,
+      "fitted_point_count_mean": 57111.333333333336
+    },
+    "derived": {
+      "opening_center_camera_mm": [
+        -94.66323687042684,
+        -0.02234815283341618,
+        734.0078032165367
+      ],
+      "bottom_center_camera_mm": [
+        -93.93208616759131,
+        2.8481590423984624,
+        823.9590433808161
+      ],
+      "box_z_vs_camera_z_deg": 1.8861103656632114,
+      "box_x_yaw_in_image_deg": -0.08295952824728098,
+      "manual_top_edge_length_projected_mm": 422.2514816389628,
+      "manual_left_edge_length_projected_mm": 282.4352010470806
+    }
   }
 }

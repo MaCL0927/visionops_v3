@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M38.6 evidence-first trigger service with safer direction selection.
+"""M39.2 left-arm robot-pose trigger service on the M38.6 geometry baseline.
 
 The service keeps the synchronized RGB-D cache, Runtime client, geometry config
 and box calibration resident. Explicit trigger requests are serialized by one
@@ -380,7 +380,7 @@ class FoamRingOnlineService:
                     prepared,
                     save_debug=job.save_debug,
                     generate_overlay=bool(self.settings["latest_overlay_enabled"]),
-                    stage="M38.6_direction_collision_contact_fix_hybrid_persistent_trigger_service",
+                    stage="M39.2_left_robot_pose_transform_persistent_trigger_service",
                     geometry_queue_wait_ms=geometry_wait_ms,
                 )
                 service_processing_ms = max(
@@ -506,7 +506,7 @@ class FoamRingOnlineService:
         return {
             "schema_version": "1.0",
             "message_type": "foam_ring_trigger_result",
-            "stage": str(payload.get("stage") or "M38.6_direction_collision_contact_fix_hybrid_persistent_trigger_service"),
+            "stage": str(payload.get("stage") or "M39.2_left_robot_pose_transform_persistent_trigger_service"),
             "status": "ok",
             "request_id": job.request_id,
             "idempotent_replay": False,
@@ -519,8 +519,10 @@ class FoamRingOnlineService:
             "terminal_reject_display": branch_c.get("display_reason_short"),
             "collision_check_performed": branch_c.get("collision_check_performed"),
             "operator_action": branch_c.get("operator_action"),
+            "robot_pose_transform_ready": bool(payload.get("robot_pose_transform_ready", False)),
             "robot_ready": False,
             "robot_ready_reason": payload.get("robot_ready_reason"),
+            "robot_pose_transform": deepcopy(payload.get("robot_pose_transform") or {}),
             "capture_timestamp_ms": payload.get("capture_timestamp_ms"),
             "rgbd_timestamp_delta_ms": (payload.get("rgbd_match") or {}).get("timestamp_delta_ms"),
             "runtime_result_id": (payload.get("runtime") or {}).get("result_id"),
@@ -572,6 +574,7 @@ class FoamRingOnlineService:
                 "prepare_total_ms": timing.get("prepare_total_ms"),
                 "polygon_to_mask_ms": timing.get("polygon_to_mask_ms"),
                 "geometry_ms": timing.get("geometry_ms"),
+                "robot_pose_transform_ms": timing.get("robot_pose_transform_ms"),
                 "association_prepass_ms": hybrid_timing.get("association_prepass_ms"),
                 "depth_preselection_ms": hybrid_timing.get("depth_preselection_ms"),
                 "depth_layer_build_ms": hybrid_timing.get("depth_layer_build_ms"),
@@ -907,7 +910,7 @@ def run(
     )
     thread.start()
     print(
-        "Foam Ring M38.6 Direction/Collision/Contact-Fix Service started: http={}:{} runtime={} "
+        "Foam Ring M39.2 LEFT Robot Pose Transform Service started: http={}:{} runtime={} "
         "m36_mode={} hybrid={} queue={}".format(
             settings["listen_host"],
             settings["listen_port"],
