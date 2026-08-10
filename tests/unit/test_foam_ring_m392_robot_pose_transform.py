@@ -53,7 +53,11 @@ def test_left_calibration_is_locked_to_andreff() -> None:
 
 
 def test_m392_left_camera_to_base_grasp_is_ready_but_tcp_is_gated_without_exact_origin() -> None:
-    raw = load_yaml(CONFIG)
+    raw = copy.deepcopy(load_yaml(CONFIG))
+    raw["robot_pose_transform"]["visual_grasp_to_hand_tcp"]["enabled"] = False
+    raw["robot_pose_transform"]["visual_grasp_to_hand_tcp"]["T_grasp_hand_tcp_rows"] = None
+    raw["robot_pose_transform"]["hand_tcp_to_flange"]["enabled"] = False
+    raw["robot_pose_transform"]["hand_tcp_to_flange"]["T_hand_tcp_flange_rows"] = None
     transformer = RobotPoseTransformer.from_mapping(raw, CONFIG)
     result = transformer.transform_candidate(_candidate())
     assert result["status"] == "base_grasp_ready"
@@ -135,7 +139,10 @@ def test_right_arm_calibration_is_hard_rejected(tmp_path: Path) -> None:
 
 
 def test_flange_pose_is_never_guessed_when_fixed_transform_missing() -> None:
-    transformer = RobotPoseTransformer.from_mapping(load_yaml(CONFIG), CONFIG)
+    raw = copy.deepcopy(load_yaml(CONFIG))
+    raw["robot_pose_transform"]["hand_tcp_to_flange"]["enabled"] = False
+    raw["robot_pose_transform"]["hand_tcp_to_flange"]["T_hand_tcp_flange_rows"] = None
+    transformer = RobotPoseTransformer.from_mapping(raw, CONFIG)
     result = transformer.transform_candidate(_candidate())
     assert result["flange"]["available"] is False
     assert "collision-model" in result["flange"]["reason"]

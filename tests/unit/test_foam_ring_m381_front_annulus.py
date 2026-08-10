@@ -91,9 +91,15 @@ def _geometry_config() -> GeometryConfig:
                 "depth_edge_threshold_mm": 30.0,
                 "depth_edge_dilate_px": 0,
                 "point_sample_stride": 1,
+                "front_depth_layer_separation_enabled": True,
+                "front_depth_layer_minimum_gap_mm": 18.0,
+                "front_depth_layer_minimum_fraction": 0.15,
+                "front_depth_layer_minimum_near_points": 40,
+                "minimum_front_layer_angular_coverage_deg": 135.0,
+                "minimum_front_layer_inlier_angular_coverage_deg": 135.0,
                 "angular_sector_count": 16,
                 "minimum_angular_coverage_deg": 180.0,
-                "minimum_inlier_angular_coverage_deg": 160.0,
+                "minimum_inlier_angular_coverage_deg": 150.0,
                 "minimum_valid_points": 40,
                 "minimum_depth_valid_ratio": 0.20,
                 "minimum_plane_inlier_ratio": 0.40,
@@ -201,6 +207,70 @@ def test_m381_clear_opening_uses_direct_3d_annulus_plane() -> None:
     normal = np.asarray(item["ring_axis_toward_camera"], dtype=np.float64)
     assert normal == pytest.approx(np.asarray([0.0, 0.0, -1.0]), abs=1e-6)
     assert item["pose"]["normal_source"] == "m38_1_front_annulus_depth_plane"
+
+
+def test_m3922_strong_two_layer_annulus_keeps_camera_near_front_face() -> None:
+    height, width = 260, 360
+    ring = np.zeros((height, width), dtype=np.uint8)
+    mouth = np.zeros_like(ring)
+    cv2.circle(ring, (180, 130), 42, 1, -1)
+    cv2.circle(mouth, (180, 130), 20, 1, -1)
+    depth = np.zeros((height, width), dtype=np.uint16)
+    depth[ring.astype(bool)] = 800
+    ys, _xs = np.indices((height, width))
+    deeper_inner_side = ring.astype(bool) & (ys >= 130)
+    depth[deeper_inner_side] = 860
+    depth[mouth.astype(bool)] = 870
+    instances = [
+        _instance(0, 0, "foam_ring", ring),
+        _instance(1, 1, "ring_mouth", mouth),
+    ]
+    intrinsics = {"fx": 400.0, "fy": 400.0, "cx": 180.0, "cy": 130.0}
+
+    scene = analyze_scene(instances, depth, intrinsics, _geometry_config())
+    item = scene["instances"][0]
+    layer = item["m38_branch_a"]["front_depth_layer"]
+    assert layer["applied"] is True
+    assert layer["depth_gap_mm"] == pytest.approx(60.0)
+    assert layer["near_fraction"] == pytest.approx(0.5, abs=0.03)
+    assert item["plane"]["centroid_camera_mm"][2] == pytest.approx(800.0, abs=1.0)
+    assert item["tilt_deg"] == pytest.approx(0.0, abs=0.2)
+    assert scene["robot_candidate"] is not None
+
+
+def test_m3922_robot_safe_tilt_is_hard_gate_for_robot_candidate() -> None:
+    height, width = 260, 360
+    ring = np.zeros((height, width), dtype=np.uint8)
+    mouth = np.zeros_like(ring)
+    cv2.circle(ring, (180, 130), 42, 1, -1)
+    cv2.circle(mouth, (180, 130), 20, 1, -1)
+    intrinsics = {"fx": 400.0, "fy": 400.0, "cx": 180.0, "cy": 130.0}
+    theta = np.deg2rad(35.0)
+    normal = np.asarray([np.sin(theta), 0.0, -np.cos(theta)], dtype=np.float64)
+    center = np.asarray([0.0, 0.0, 800.0], dtype=np.float64)
+    offset = -float(np.dot(normal, center))
+    depth = np.zeros((height, width), dtype=np.uint16)
+    ys, xs = np.nonzero(ring)
+    for y, x in zip(ys, xs):
+        ray = np.asarray([(x - 180.0) / 400.0, (y - 130.0) / 400.0, 1.0])
+        scale = -offset / float(np.dot(normal, ray))
+        depth[y, x] = int(round(scale))
+    depth[mouth.astype(bool)] = 900
+    instances = [
+        _instance(0, 0, "foam_ring", ring),
+        _instance(1, 1, "ring_mouth", mouth),
+    ]
+
+    scene = analyze_scene(instances, depth, intrinsics, _geometry_config())
+    item = scene["instances"][0]
+    assert item["tilt_deg"] == pytest.approx(35.0, abs=0.5)
+    assert item["eligible"] is True
+    assert item["robot_safe_tilt"] is False
+    assert item["robot_eligible"] is False
+    assert "tilt_above_robot_safe_limit" in item["warnings"]
+    assert scene["eligible_count"] == 1
+    assert scene["robot_eligible_count"] == 0
+    assert scene["robot_candidate"] is None
 
 
 def test_m381_flat_partial_opening_is_rejected_before_grasp_search() -> None:

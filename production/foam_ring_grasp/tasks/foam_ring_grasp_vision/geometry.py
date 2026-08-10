@@ -3002,6 +3002,124 @@ def _m38a_angular_coverage_deg(
     return 360.0 * float(len(occupied)) / float(sectors), len(occupied), occupied
 
 
+def _m3922_select_front_depth_layer(
+    points: np.ndarray,
+    pixels: np.ndarray,
+    section: Mapping[str, Any],
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """Keep the camera-near annulus layer when a strong two-layer split exists.
+
+    A near-horizontal foam ring exposes both the true front annulus and the
+    inner/deeper wall to the RGB-D camera.  A single RANSAC over both layers can
+    therefore lock onto the back layer or a false plane spanning the two depth
+    populations.  M39.2.2 detects only *strong* bimodality: the split must have
+    a sufficiently large depth gap and both sides must contain a meaningful
+    fraction of the samples.  When that evidence is present, only the
+    camera-near layer is allowed to seed the front-face plane.
+
+    The conservative fraction gate is intentional.  Small far-depth tails are
+    common at D2C boundaries and must not cause an otherwise valid tilted ring
+    to be truncated.
+    """
+    raw_count = int(len(points))
+    diagnostics: Dict[str, Any] = {
+        "enabled": bool(section.get("front_depth_layer_separation_enabled", True)),
+        "applied": False,
+        "policy": "camera_near_layer_on_strong_bimodal_depth_gap",
+        "raw_point_count": raw_count,
+        "selected_point_count": raw_count,
+        "depth_gap_mm": None,
+        "split_depth_mm": None,
+        "near_point_count": raw_count,
+        "far_point_count": 0,
+        "near_fraction": 1.0 if raw_count else 0.0,
+        "far_fraction": 0.0,
+        "minimum_gap_mm": float(
+            max(1.0, _safe_float(section.get("front_depth_layer_minimum_gap_mm"), 18.0))
+        ),
+        "minimum_layer_fraction": float(
+            np.clip(
+                _safe_float(section.get("front_depth_layer_minimum_fraction"), 0.15),
+                0.01,
+                0.49,
+            )
+        ),
+        "reason": "not_evaluated",
+    }
+    if raw_count < 3 or not diagnostics["enabled"]:
+        diagnostics["reason"] = "disabled_or_insufficient_points"
+        return points, pixels, diagnostics
+
+    minimum_near_points = max(
+        20,
+        _safe_int(
+            section.get("front_depth_layer_minimum_near_points"),
+            _safe_int(section.get("minimum_valid_points"), 80),
+        ),
+    )
+    fraction = float(diagnostics["minimum_layer_fraction"])
+    minimum_group_points = max(3, int(math.ceil(float(raw_count) * fraction)))
+    minimum_group_points = min(minimum_group_points, max(3, raw_count // 2))
+    if raw_count < 2 * minimum_group_points:
+        diagnostics["reason"] = "insufficient_points_for_two_supported_layers"
+        return points, pixels, diagnostics
+
+    depths = points[:, 2].astype(np.float64, copy=False)
+    order = np.argsort(depths, kind="stable")
+    sorted_depths = depths[order]
+    gaps = np.diff(sorted_depths)
+    first_split_index = minimum_group_points - 1
+    last_split_index = raw_count - minimum_group_points - 1
+    if last_split_index < first_split_index:
+        diagnostics["reason"] = "no_supported_split_position"
+        return points, pixels, diagnostics
+
+    supported_gaps = gaps[first_split_index : last_split_index + 1]
+    if supported_gaps.size == 0:
+        diagnostics["reason"] = "no_supported_depth_gap"
+        return points, pixels, diagnostics
+    local_index = int(np.argmax(supported_gaps))
+    split_index = first_split_index + local_index
+    gap_mm = float(gaps[split_index])
+    near_count = int(split_index + 1)
+    far_count = int(raw_count - near_count)
+    split_depth = 0.5 * float(sorted_depths[split_index] + sorted_depths[split_index + 1])
+    near_fraction = float(near_count) / float(raw_count)
+    far_fraction = float(far_count) / float(raw_count)
+    diagnostics.update(
+        {
+            "depth_gap_mm": gap_mm,
+            "split_depth_mm": split_depth,
+            "near_point_count": near_count,
+            "far_point_count": far_count,
+            "near_fraction": near_fraction,
+            "far_fraction": far_fraction,
+            "minimum_near_points": int(minimum_near_points),
+        }
+    )
+
+    if gap_mm < float(diagnostics["minimum_gap_mm"]):
+        diagnostics["reason"] = "largest_supported_gap_below_threshold"
+        return points, pixels, diagnostics
+    if near_count < minimum_near_points:
+        diagnostics["reason"] = "camera_near_layer_too_small"
+        return points, pixels, diagnostics
+
+    selected_mask = depths <= split_depth
+    selected_points = points[selected_mask]
+    selected_pixels = pixels[selected_mask]
+    diagnostics.update(
+        {
+            "applied": True,
+            "selected_point_count": int(len(selected_points)),
+            "selected_depth_min_mm": float(np.min(selected_points[:, 2])),
+            "selected_depth_max_mm": float(np.max(selected_points[:, 2])),
+            "reason": "strong_bimodal_depth_split_use_camera_near_layer",
+        }
+    )
+    return selected_points, selected_pixels, diagnostics
+
+
 def _m38a_ellipse_boundary_quality(ellipse: Mapping[str, Any]) -> Dict[str, float]:
     contour_raw = ellipse.get("contour")
     contour = (
@@ -3125,7 +3243,7 @@ def _m38a_front_annulus_pose(
     annulus_mask &= ~depth_edges
 
     stride = max(1, _safe_int(section.get("point_sample_stride"), 1))
-    points, pixels = depth_pixels_to_points(
+    raw_points, raw_pixels = depth_pixels_to_points(
         depth,
         annulus_mask,
         intrinsics,
@@ -3134,8 +3252,21 @@ def _m38a_front_annulus_pose(
         stride=stride,
     )
     pixel_count = int(np.count_nonzero(annulus_mask))
-    valid_ratio = float(len(points)) / float(max(1, pixel_count))
+    valid_ratio = float(len(raw_points)) / float(max(1, pixel_count))
+    points, pixels, front_layer = _m3922_select_front_depth_layer(
+        raw_points,
+        raw_pixels,
+        section,
+    )
+    front_layer_mask = np.zeros_like(annulus_mask, dtype=bool)
+    if len(pixels):
+        front_layer_mask[pixels[:, 1], pixels[:, 0]] = True
     sector_count = max(8, _safe_int(section.get("angular_sector_count"), 16))
+    raw_coverage_deg, raw_occupied_count, raw_occupied = _m38a_angular_coverage_deg(
+        raw_pixels,
+        tuple(ellipse["center_uv"]),
+        sector_count,
+    )
     coverage_deg, occupied_count, occupied = _m38a_angular_coverage_deg(
         pixels,
         tuple(ellipse["center_uv"]),
@@ -3156,8 +3287,12 @@ def _m38a_front_annulus_pose(
     )
     if valid_ratio < minimum_valid_ratio:
         reasons.append("m38a_low_annulus_depth_valid_ratio")
-    if coverage_deg < _safe_float(section.get("minimum_angular_coverage_deg"), 180.0):
+    if raw_coverage_deg < _safe_float(section.get("minimum_angular_coverage_deg"), 180.0):
         reasons.append("m38a_annulus_angular_coverage_too_small")
+    if bool(front_layer.get("applied")) and coverage_deg < _safe_float(
+        section.get("minimum_front_layer_angular_coverage_deg"), 135.0
+    ):
+        reasons.append("m3922_front_layer_angular_coverage_too_small")
 
     plane = fit_plane_ransac(points, config) if len(points) >= 3 else None
     inlier_coverage_deg = 0.0
@@ -3186,9 +3321,12 @@ def _m38a_front_annulus_pose(
             section.get("maximum_plane_residual_p95_mm"), 7.0
         ):
             reasons.append("m38a_annulus_plane_residual_too_high")
-        if inlier_coverage_deg < _safe_float(
-            section.get("minimum_inlier_angular_coverage_deg"), 160.0
-        ):
+        minimum_inlier_coverage = (
+            _safe_float(section.get("minimum_front_layer_inlier_angular_coverage_deg"), 135.0)
+            if bool(front_layer.get("applied"))
+            else _safe_float(section.get("minimum_inlier_angular_coverage_deg"), 150.0)
+        )
+        if inlier_coverage_deg < minimum_inlier_coverage:
             reasons.append("m38a_annulus_inlier_angular_coverage_too_small")
 
     diagnostics: Dict[str, Any] = {
@@ -3204,14 +3342,19 @@ def _m38a_front_annulus_pose(
         "ring_mask_erode_px": int(ring_erode),
         "annulus_pixel_count": int(pixel_count),
         "annulus_point_count": int(len(points)),
+        "raw_annulus_point_count": int(len(raw_points)),
         "annulus_depth_valid_ratio": float(valid_ratio),
         "angular_sector_count": int(sector_count),
-        "angular_coverage_deg": float(coverage_deg),
-        "occupied_sector_count": int(occupied_count),
-        "occupied_sectors": occupied,
+        "angular_coverage_deg": float(raw_coverage_deg),
+        "occupied_sector_count": int(raw_occupied_count),
+        "occupied_sectors": raw_occupied,
+        "front_layer_angular_coverage_deg": float(coverage_deg),
+        "front_layer_occupied_sector_count": int(occupied_count),
+        "front_layer_occupied_sectors": occupied,
         "inlier_angular_coverage_deg": float(inlier_coverage_deg),
         "inlier_occupied_sector_count": int(inlier_occupied_count),
         "inlier_occupied_sectors": inlier_occupied,
+        "front_depth_layer": front_layer,
         "depth_edge_threshold_mm": float(depth_edge_threshold),
         "normal_disagreement_deg": 0.0,
         "pose_conflict_signals": [],
@@ -3220,9 +3363,12 @@ def _m38a_front_annulus_pose(
     return {
         "plane": plane,
         "annulus_mask": annulus_mask,
+        "front_layer_mask": front_layer_mask,
         "depth_edge_mask": depth_edges,
         "points": points,
         "pixels": pixels,
+        "raw_points": raw_points,
+        "raw_pixels": raw_pixels,
         "pixel_count": int(pixel_count),
         "valid_ratio": float(valid_ratio),
         "diagnostics": diagnostics,
@@ -3311,7 +3457,7 @@ def analyze_ring_pair(
             ellipse,
         )
         timing_ms["m38a_annulus_pose_ms"] = _elapsed_ms(depth_points_started)
-        front_band = annulus["annulus_mask"]
+        front_band = annulus.get("front_layer_mask", annulus["annulus_mask"])
         points = annulus["points"]
         pixels = annulus["pixels"]
         band_pixel_count = int(annulus["pixel_count"])
@@ -3346,6 +3492,7 @@ def analyze_ring_pair(
                 "timing_ms": timing_ms,
                 "_debug": {
                     "front_band_mask": front_band,
+                    "m38_raw_annulus_mask": annulus.get("annulus_mask"),
                     "m38_depth_edge_mask": annulus.get("depth_edge_mask"),
                     "plane_points": points,
                     "plane_pixels": pixels,
@@ -3724,6 +3871,11 @@ def analyze_ring_pair(
         "timing_ms": timing_ms,
         "_debug": {
             "front_band_mask": front_band,
+            "m38_raw_annulus_mask": (
+                annulus.get("annulus_mask")
+                if pose_strategy == "m38_1_front_annulus"
+                else None
+            ),
             "m38_depth_edge_mask": (
                 annulus.get("depth_edge_mask")
                 if pose_strategy == "m38_1_front_annulus"
@@ -3777,6 +3929,13 @@ def analyze_ring_pair(
             and str((best.get("full_gripper_static") or {}).get("status") or "unknown") == "clear"
             and str((best.get("full_gripper_motion") or {}).get("status") or "unknown") == "clear"
         )
+    safe_tilt_limit = _safe_float(gripper_cfg.get("robot_safe_max_tilt_deg"), 30.0)
+    result["robot_safe_tilt_limit_deg"] = float(safe_tilt_limit)
+    result["robot_safe_tilt"] = bool(float(tilt_deg) <= safe_tilt_limit)
+    result["robot_eligible"] = bool(result["eligible"] and result["robot_safe_tilt"])
+    if result["eligible"] and not result["robot_safe_tilt"]:
+        if "tilt_above_robot_safe_limit" not in result["warnings"]:
+            result["warnings"].append("tilt_above_robot_safe_limit")
     timing_ms["total_ms"] = _elapsed_ms(pair_started)
     return result
 
@@ -3791,6 +3950,15 @@ def _finalize_staged_pair(result: Dict[str, Any], config: GeometryConfig) -> Non
     grasp["best_clock_candidate"] = best
     result["grasp"] = grasp
     result["eligible"] = bool(len(result.get("rejection_reasons") or []) == 0 and best is not None)
+    safe_tilt_limit = _safe_float(config.section("gripper").get("robot_safe_max_tilt_deg"), 30.0)
+    result["robot_safe_tilt_limit_deg"] = float(safe_tilt_limit)
+    result["robot_safe_tilt"] = bool(float(result.get("tilt_deg", 180.0)) <= safe_tilt_limit)
+    result["robot_eligible"] = bool(result["eligible"] and result["robot_safe_tilt"])
+    warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
+    if result["eligible"] and not result["robot_safe_tilt"]:
+        if "tilt_above_robot_safe_limit" not in warnings:
+            warnings.append("tilt_above_robot_safe_limit")
+    result["warnings"] = warnings
     diagnostic_warnings = {"neighbor_2d_overlap_warning", "neighbor_2d_clearance_warning"}
     best_blocking_warnings = [
         warning for warning in (best.get("warnings") if best else [])
@@ -4152,9 +4320,15 @@ def analyze_scene(
                 _finalize_staged_pair(pair_result, config)
                 pair_result.pop("_optimization_context", None)
             pair_result["processing_status"] = (
-                "selected_first_valid" if pair_result.get("eligible") else "analyzed_no_valid_grasp"
+                "selected_first_valid"
+                if pair_result.get("robot_eligible")
+                else (
+                    "geometry_valid_robot_tilt_unsafe"
+                    if pair_result.get("eligible")
+                    else "analyzed_no_valid_grasp"
+                )
             )
-            if pair_result.get("eligible"):
+            if pair_result.get("robot_eligible"):
                 selected_found = True
                 if bool(optimization.get("stop_after_first_valid_target", True)):
                     optimization_summary["early_exit_triggered"] = True
@@ -4390,15 +4564,24 @@ def analyze_scene(
 
     selection_started = time.perf_counter()
     eligible = [item for item in results if item.get("eligible") and item.get("ring_center_camera_mm")]
+    robot_eligible = [
+        item
+        for item in eligible
+        if bool(item.get("robot_eligible"))
+    ]
     selected_ring_id: Optional[int] = None
     selected_clock: Optional[int] = None
     selected_clock_angle: Optional[float] = None
     selected_clock_search_batch: Optional[str] = None
     selected_robot_candidate: Optional[Dict[str, Any]] = None
-    if eligible:
-        nearest_z = min(float(item["ring_center_camera_mm"][2]) for item in eligible)
+    if robot_eligible:
+        nearest_z = min(float(item["ring_center_camera_mm"][2]) for item in robot_eligible)
         tolerance = _safe_float(config.section("gripper").get("top_layer_tolerance_mm"), 15.0)
-        top = [item for item in eligible if float(item["ring_center_camera_mm"][2]) <= nearest_z + tolerance]
+        top = [
+            item
+            for item in robot_eligible
+            if float(item["ring_center_camera_mm"][2]) <= nearest_z + tolerance
+        ]
         safe_tilt = _safe_float(config.section("gripper").get("robot_safe_max_tilt_deg"), 30.0)
         top.sort(
             key=lambda item: (
@@ -4530,6 +4713,7 @@ def analyze_scene(
         "unmatched_mouth_ids": [int(item.instance_id) for item in unmatched_mouths],
         "association_debug": association_debug,
         "eligible_count": len(eligible),
+        "robot_eligible_count": len(robot_eligible),
         "selected_ring_instance_id": selected_ring_id,
         "selected_clock_hour": selected_clock,
         "selected_clock_angle_deg_cw_from_12": selected_clock_angle,

@@ -608,12 +608,27 @@ m38_branch_a:
   depth_edge_dilate_px: 1
   point_sample_stride: 1
 
+  # M39.2.2: a near-horizontal hollow ring often exposes two valid depth
+  # populations inside the same annulus mask: the camera-near front foam face
+  # and the deeper inner wall / box-side layer.  Only split them when there is
+  # a strong supported depth gap; small far-depth tails on tilted/stacked rings
+  # are intentionally kept in the original RANSAC input.
+  front_depth_layer_separation_enabled: true
+  front_depth_layer_minimum_gap_mm: 18.0
+  front_depth_layer_minimum_fraction: 0.15
+  front_depth_layer_minimum_near_points: 80
+  minimum_front_layer_angular_coverage_deg: 135.0
+  minimum_front_layer_inlier_angular_coverage_deg: 135.0
+
   # A real front annulus must be observable around a sufficiently wide angular
   # span and must support one compact 3-D plane. Failure proceeds to M38.3 and
   # then to the explicit M38.4 branch-C decision.
   angular_sector_count: 16
   minimum_angular_coverage_deg: 180.0
-  minimum_inlier_angular_coverage_deg: 160.0
+  # 16 sectors quantize coverage in 22.5-degree steps.  150 degrees therefore
+  # means seven sectors (157.5 deg) and avoids rejecting a stable plane merely
+  # because the former 160-degree threshold sat just above that discrete bin.
+  minimum_inlier_angular_coverage_deg: 150.0
   minimum_valid_points: 80
   minimum_depth_valid_ratio: 0.30
   minimum_plane_inlier_ratio: 0.45
