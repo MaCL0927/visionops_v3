@@ -1150,3 +1150,102 @@ def test_m3642_command_mode_keeps_staged_and_exhaustive_compatibility() -> None:
     exhaustive_scene = analyze_scene(instances, depth, intrinsics, GeometryConfig(raw2))
     assert exhaustive_scene["geometry_optimization"]["mode"] == "exhaustive"
     assert len(exhaustive_scene["instances"][0]["grasp"]["clock_candidates"]) == 12
+
+
+def test_m3923_preferred_1_to_3_clock_directions_are_evaluated_before_higher_score_nonpreferred(monkeypatch) -> None:
+    import production.foam_ring_grasp.tasks.foam_ring_grasp_vision.geometry as geometry_module
+
+    # Deliberately give 12 o'clock the best geometry score. M39.2.3 should
+    # still fully evaluate the empirically reachable 1/2/3 o'clock group first.
+    light_scores = {12: 100.0, 1: 20.0, 2: 30.0, 3: 10.0, 5: 90.0, 6: 80.0, 8: 70.0, 9: 60.0, 11: 50.0}
+    full_scores = {1: 60.0, 2: 75.0, 3: 55.0, 12: 99.0}
+
+    def fake_clock_candidate(clock, *args, evaluation_level="full", **kwargs):
+        hour = int(clock.get("clock_hour"))
+        light = str(evaluation_level).lower() != "full"
+        return {
+            **dict(clock),
+            "evaluation_stage": "light" if light else "full",
+            "full_evaluated": not light,
+            "light_valid": True,
+            "valid": not light,
+            "score": light_scores.get(hour, 1.0) if light else full_scores.get(hour, 50.0),
+            "light_score": light_scores.get(hour, 1.0),
+            "warnings": [],
+            "rejection_reasons": [],
+            "neighbor_3d": {"status": "clear"},
+            "full_gripper_static": {"status": "clear"},
+            "full_gripper_motion": {"status": "clear"},
+        }
+
+    monkeypatch.setattr(geometry_module, "_clock_candidate", fake_clock_candidate)
+    instances, depth, intrinsics = _synthetic_scene()
+    raw = _config().raw
+    config = _first_valid_config(raw)
+    config.raw["clock_search"].update({
+        "preferred_clock_hours": [1, 2, 3],
+        "prefer_preferred_clock": True,
+        "promote_preferred_to_primary": True,
+    })
+    config.raw["geometry_optimization"]["minimum_full_candidates_before_accept"] = 3
+    config.raw["geometry_optimization"]["maximum_full_candidates_per_pair"] = 6
+
+    scene = analyze_scene(instances, depth, intrinsics, config)
+    candidates = scene["instances"][0]["grasp"]["clock_candidates"]
+    evaluated_hours = {
+        int(candidate["clock_hour"])
+        for candidate in candidates
+        if bool(candidate.get("full_evaluated"))
+    }
+    assert evaluated_hours == {1, 2, 3}
+    assert scene["selected_clock_hour"] == 2
+    assert scene["selected_clock_preferred"] is True
+    assert scene["preferred_clock_hours"] == [1, 2, 3]
+
+
+def test_m3923_nonpreferred_direction_remains_fallback_when_all_preferred_are_invalid(monkeypatch) -> None:
+    import production.foam_ring_grasp.tasks.foam_ring_grasp_vision.geometry as geometry_module
+
+    light_scores = {12: 100.0, 1: 30.0, 2: 20.0, 3: 10.0, 5: 90.0, 6: 80.0, 8: 70.0, 9: 60.0, 11: 50.0}
+
+    def fake_clock_candidate(clock, *args, evaluation_level="full", **kwargs):
+        hour = int(clock.get("clock_hour"))
+        light = str(evaluation_level).lower() != "full"
+        valid = (not light) and hour not in {1, 2, 3}
+        return {
+            **dict(clock),
+            "evaluation_stage": "light" if light else "full",
+            "full_evaluated": not light,
+            "light_valid": True,
+            "valid": bool(valid),
+            "score": light_scores.get(hour, 1.0) if light else (90.0 if valid else 5.0),
+            "light_score": light_scores.get(hour, 1.0),
+            "warnings": [],
+            "rejection_reasons": [] if valid or light else ["synthetic_preferred_invalid"],
+            "neighbor_3d": {"status": "clear" if valid else "rejected"},
+            "full_gripper_static": {"status": "clear" if valid else "rejected"},
+            "full_gripper_motion": {"status": "clear" if valid else "rejected"},
+        }
+
+    monkeypatch.setattr(geometry_module, "_clock_candidate", fake_clock_candidate)
+    instances, depth, intrinsics = _synthetic_scene()
+    raw = _config().raw
+    config = _first_valid_config(raw)
+    config.raw["clock_search"].update({
+        "preferred_clock_hours": [1, 2, 3],
+        "prefer_preferred_clock": True,
+        "promote_preferred_to_primary": True,
+    })
+    config.raw["geometry_optimization"]["minimum_full_candidates_before_accept"] = 3
+    config.raw["geometry_optimization"]["maximum_full_candidates_per_pair"] = 6
+
+    scene = analyze_scene(instances, depth, intrinsics, config)
+    candidates = scene["instances"][0]["grasp"]["clock_candidates"]
+    evaluated = [
+        int(candidate["clock_hour"])
+        for candidate in candidates
+        if bool(candidate.get("full_evaluated"))
+    ]
+    assert {1, 2, 3}.issubset(set(evaluated))
+    assert scene["selected_clock_hour"] == 12
+    assert scene["selected_clock_preferred"] is False

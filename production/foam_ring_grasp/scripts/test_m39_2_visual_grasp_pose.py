@@ -201,7 +201,12 @@ def print_result_summary(data: Dict[str, Any], rt: Dict[str, Any], poses: Dict[s
     print(f"target     : {data.get('target_found')}")
     print(f"arm        : {rt.get('arm')}")
     print(f"base frame : {rt.get('base_frame_id')}")
+    scene_summary = data.get("scene_summary") if isinstance(data.get("scene_summary"), dict) else {}
+    selected_clock = scene_summary.get("selected_clock_hour", data.get("selected_clock_hour"))
+    selected_preferred = scene_summary.get("selected_clock_preferred", data.get("selected_clock_preferred"))
+    preferred_hours = scene_summary.get("preferred_clock_hours", data.get("preferred_clock_hours"))
     print(f"branch     : {branch}")
+    print(f"clock      : {selected_clock}  preferred={selected_preferred}  preferred_hours={preferred_hours}")
     print("=" * 88)
 
     if "hand_tcp" in poses:

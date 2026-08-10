@@ -536,6 +536,8 @@ class FoamRingOnlineService:
                 "selected_clock_hour": scene.get("selected_clock_hour"),
                 "selected_clock_angle_deg_cw_from_12": scene.get("selected_clock_angle_deg_cw_from_12"),
                 "selected_clock_search_batch": scene.get("selected_clock_search_batch"),
+                "selected_clock_preferred": scene.get("selected_clock_preferred"),
+                "preferred_clock_hours": scene.get("preferred_clock_hours"),
                 "geometry_mode": geometry_optimization.get("mode"),
                 "fully_analyzed_pair_count": geometry_optimization.get("fully_analyzed_pair_count"),
                 "full_candidate_evaluated_count": geometry_optimization.get("full_candidate_evaluated_count"),

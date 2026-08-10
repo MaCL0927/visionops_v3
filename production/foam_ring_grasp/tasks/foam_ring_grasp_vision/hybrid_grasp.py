@@ -2326,6 +2326,7 @@ def run_hybrid_grasp(
         result["selected_clock_hour"] = None
         result["selected_clock_angle_deg_cw_from_12"] = None
         result["selected_clock_search_batch"] = None
+        result["selected_clock_preferred"] = False
     elif selected_m385_candidate is not None:
         result["eligible_count"] = 1
         result["selected_ring_instance_id"] = int(
@@ -2334,6 +2335,7 @@ def run_hybrid_grasp(
         result["selected_clock_hour"] = None
         result["selected_clock_angle_deg_cw_from_12"] = None
         result["selected_clock_search_batch"] = None
+        result["selected_clock_preferred"] = False
     result["m38_1_robot_candidate"] = deepcopy(original_m38a_candidate)
     result["m38_3_robot_candidate"] = deepcopy(original_m38b_candidate)
     result["m38_5_outer_contact_candidate"] = deepcopy(selected_m385_candidate)

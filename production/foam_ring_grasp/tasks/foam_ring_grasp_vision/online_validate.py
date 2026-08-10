@@ -104,6 +104,8 @@ def _summary(payload: Mapping[str, Any]) -> Dict[str, Any]:
         "selected_clock_hour": scene.get("selected_clock_hour"),
         "selected_clock_angle_deg_cw_from_12": scene.get("selected_clock_angle_deg_cw_from_12"),
         "selected_clock_search_batch": scene.get("selected_clock_search_batch"),
+        "selected_clock_preferred": scene.get("selected_clock_preferred"),
+        "preferred_clock_hours": scene.get("preferred_clock_hours"),
         "selected_grasp_branch": (scene.get("hybrid_grasp") or {}).get("selected_branch") or scene.get("selected_grasp_branch"),
         "terminal_reject": branch_c.get("fast_terminated"),
         "terminal_reject_reason": branch_c.get("decision"),

@@ -121,6 +121,17 @@ def _optimization_settings(config: GeometryConfig) -> Dict[str, Any]:
 
 def _clock_search_settings(config: GeometryConfig) -> Dict[str, Any]:
     section = config.section("clock_search")
+
+    preferred_raw = section.get("preferred_clock_hours")
+    preferred_hours: List[int] = []
+    if isinstance(preferred_raw, Sequence) and not isinstance(preferred_raw, (str, bytes)):
+        for value in preferred_raw:
+            hour = _safe_int(value, -1)
+            if hour == 0:
+                hour = 12
+            if 1 <= hour <= 12 and hour not in preferred_hours:
+                preferred_hours.append(hour)
+
     primary_raw = section.get("primary_clock_hours")
     primary_hours: List[int] = []
     if isinstance(primary_raw, Sequence) and not isinstance(primary_raw, (str, bytes)):
@@ -134,11 +145,45 @@ def _clock_search_settings(config: GeometryConfig) -> Dict[str, Any]:
         # Four cardinal directions plus four evenly distributed diagonals.
         # The remaining 1/4/7/10 o'clock directions form the fallback batch.
         primary_hours = [12, 2, 3, 5, 6, 8, 9, 11]
+
+    # M39.2.3: directions empirically easier for the left arm can be promoted
+    # into the cheap primary search batch. This changes only search/selection
+    # order; geometry and collision validity remain hard requirements.
+    promote_preferred = bool(section.get("promote_preferred_to_primary", True))
+    if promote_preferred and preferred_hours:
+        primary_hours = preferred_hours + [
+            hour for hour in primary_hours if hour not in preferred_hours
+        ]
+
     return {
         "mode": str(section.get("mode") or "adaptive_8_plus_4").strip().lower(),
         "primary_clock_hours": primary_hours,
         "fallback_to_remaining": bool(section.get("fallback_to_remaining", True)),
+        "preferred_clock_hours": preferred_hours,
+        "prefer_preferred_clock": bool(section.get("prefer_preferred_clock", bool(preferred_hours))),
+        "promote_preferred_to_primary": promote_preferred,
     }
+
+
+def _clock_is_preferred(candidate: Mapping[str, Any], config: GeometryConfig) -> bool:
+    settings = _clock_search_settings(config)
+    if not bool(settings.get("prefer_preferred_clock")):
+        return False
+    hour = _safe_int(candidate.get("clock_hour"), -1)
+    if hour == 0:
+        hour = 12
+    return hour in set(int(value) for value in settings.get("preferred_clock_hours") or [])
+
+
+def _clock_rank_key(
+    candidate: Mapping[str, Any],
+    config: GeometryConfig,
+    *,
+    light: bool = False,
+) -> Tuple[Any, ...]:
+    score_key = "light_score" if light else "score"
+    score = float(candidate.get(score_key, candidate.get("score", 0.0)) or 0.0)
+    return (bool(_clock_is_preferred(candidate, config)), score)
 
 
 def _adaptive_clock_batches(config: GeometryConfig) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -3780,12 +3825,12 @@ def analyze_ring_pair(
 
     if staged:
         light_valid = [item for item in clock_candidates if item.get("light_valid")]
-        light_valid.sort(key=lambda item: float(item.get("light_score", item.get("score", 0.0))), reverse=True)
+        light_valid.sort(key=lambda item: _clock_rank_key(item, config, light=True), reverse=True)
         best = None
         best_light = light_valid[0] if light_valid else None
     else:
         valid_candidates = [item for item in clock_candidates if item.get("valid")]
-        valid_candidates.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+        valid_candidates.sort(key=lambda item: _clock_rank_key(item, config), reverse=True)
         best = valid_candidates[0] if valid_candidates else None
         best_light = None
         if best is None:
@@ -3945,7 +3990,7 @@ def _finalize_staged_pair(result: Dict[str, Any], config: GeometryConfig) -> Non
     candidates = grasp.get("clock_candidates") if isinstance(grasp.get("clock_candidates"), list) else []
     full_candidates = [item for item in candidates if item.get("full_evaluated")]
     valid_candidates = [item for item in full_candidates if item.get("valid")]
-    valid_candidates.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    valid_candidates.sort(key=lambda item: _clock_rank_key(item, config), reverse=True)
     best = valid_candidates[0] if valid_candidates else None
     grasp["best_clock_candidate"] = best
     result["grasp"] = grasp
@@ -4230,9 +4275,7 @@ def analyze_scene(
                         index for index, candidate in enumerate(candidates)
                         if bool(candidate.get("light_valid"))
                     ],
-                    key=lambda index: float(
-                        candidates[index].get("light_score", candidates[index].get("score", 0.0))
-                    ),
+                    key=lambda index: _clock_rank_key(candidates[index], config, light=True),
                     reverse=True,
                 )
                 minimum_before_accept = int(
@@ -4290,11 +4333,10 @@ def analyze_scene(
                             for offset, candidate in enumerate(fallback_candidates)
                             if bool(candidate.get("light_valid"))
                         ],
-                        key=lambda index: float(
-                            pair_result["grasp"]["clock_candidates"][index].get(
-                                "light_score",
-                                pair_result["grasp"]["clock_candidates"][index].get("score", 0.0),
-                            )
+                        key=lambda index: _clock_rank_key(
+                            pair_result["grasp"]["clock_candidates"][index],
+                            config,
+                            light=True,
                         ),
                         reverse=True,
                     )
@@ -4406,6 +4448,7 @@ def analyze_scene(
                 rank = (
                     bool(in_top_layer) if bool(optimization.get("prefer_top_layer")) else True,
                     bool(float(item.get("tilt_deg", 180.0)) <= safe_tilt),
+                    bool(_clock_is_preferred(candidate, config)),
                     float(candidate.get("light_score", candidate.get("score", 0.0))),
                     0.5 * (float(item.get("ring_confidence", 0.0)) + float(item.get("mouth_confidence", 0.0))),
                     -float(item.get("tilt_deg", 180.0)),
@@ -4586,6 +4629,10 @@ def analyze_scene(
         top.sort(
             key=lambda item: (
                 bool(float(item.get("tilt_deg", 180.0)) <= safe_tilt),
+                bool(_clock_is_preferred(
+                    ((item.get("grasp") or {}).get("best_clock_candidate") or {}),
+                    config,
+                )),
                 float(((item.get("grasp") or {}).get("best_clock_candidate") or {}).get("score", 0.0)),
                 -float(item.get("tilt_deg", 180.0)),
                 0.5 * (float(item.get("ring_confidence", 0.0)) + float(item.get("mouth_confidence", 0.0))),
@@ -4601,6 +4648,7 @@ def analyze_scene(
             "top_layer_tolerance_mm": float(tolerance),
             "priority": [
                 "within_initial_robot_safe_tilt",
+                "preferred_clock_direction_1_to_3",
                 "clock_candidate_score",
                 "lower_tilt",
                 "segmentation_confidence",
@@ -4616,6 +4664,12 @@ def analyze_scene(
         selected_clock_search_batch = (
             str(best.get("search_batch")) if best.get("search_batch") is not None else None
         )
+        selected["selection_reason"]["selected_clock_preferred"] = bool(
+            _clock_is_preferred(best, config)
+        )
+        selected["selection_reason"]["preferred_clock_hours"] = list(
+            _clock_search_settings(config).get("preferred_clock_hours") or []
+        )
         selected_robot_candidate = {
             "schema_version": "1.0",
             "message_type": "foam_ring_rim_pinch_grasp_candidate",
@@ -4628,6 +4682,10 @@ def analyze_scene(
                 "clock_hour": selected_clock,
                 "clock_angle_deg_cw_from_12": best.get("clock_angle_deg_cw_from_12"),
                 "clock_search_batch": best.get("search_batch"),
+                "clock_preferred": bool(_clock_is_preferred(best, config)),
+                "preferred_clock_hours": list(
+                    _clock_search_settings(config).get("preferred_clock_hours") or []
+                ),
                 "candidate_score": best.get("score"),
                 "tilt_deg": selected.get("tilt_deg"),
                 "box_wall_status": best.get("box_wall_status"),
@@ -4718,6 +4776,13 @@ def analyze_scene(
         "selected_clock_hour": selected_clock,
         "selected_clock_angle_deg_cw_from_12": selected_clock_angle,
         "selected_clock_search_batch": selected_clock_search_batch,
+        "selected_clock_preferred": bool(
+            selected_robot_candidate
+            and (selected_robot_candidate.get("target") or {}).get("clock_preferred")
+        ),
+        "preferred_clock_hours": list(
+            _clock_search_settings(config).get("preferred_clock_hours") or []
+        ),
         "selection_scope": (
             "M38.1_front_annulus_first_valid_target_early_exit_adaptive_8_plus_4_clock_search"
             if scene_pose_strategy == "m38_1_front_annulus" and first_valid else
