@@ -458,7 +458,7 @@ robot_pose_transform:
   arm: left
 
   frames:
-    base: base_link
+    base: robot_default_base
     # M38.6 uses camera_color_optical_frame while M39.1 stores color_camera.
     # They are two names for the same aligned Orbbec RGB optical frame here; no
     # extra transform is inserted between them.
@@ -468,15 +468,14 @@ robot_pose_transform:
     flange: left_link7
 
   handeye:
-    calibration_file: handeye_left_20260808_094336.json
-    sha256: 1c2e3f41b5f8e02fb235417208e17de6706290697bb9e114bb05222ec2b798e6
+    calibration_file: handeye_left_20260810_190310_robot_default_base.json
+    sha256: ead9e66c424e5989091126e44fb7a963bcd3c4190e7cd53fbff9a6b8f0014bc5
     required_calibration_type: eye_to_hand
     required_source_frame: color_camera
-    required_target_frame: base_link
-    # This exact left-hand calibration selected ANDREFF even though PARK was the
-    # preferred method in the calibration configuration. Use the selected result.
-    required_selected_method: ANDREFF
-    allowed_quality_status: [PASS, PROVISIONAL_PASS]
+    required_target_frame: robot_default_base
+    # M39.1.1 left-arm pedestal/default-base calibration: 24 stable samples, PARK.
+    required_selected_method: PARK
+    allowed_quality_status: [PASS]
 
   visual_grasp_to_hand_tcp:
     enabled: true

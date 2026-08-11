@@ -32,6 +32,14 @@ if [[ -n "${LISTEN_PORT}" ]]; then
 fi
 
 cd "${REPO_ROOT}"
+
+echo "[M39.2] resolved config: ${CONFIG_PATH}"
+echo "[M39.2] preflight robot-pose transform verification..."
+"${PYTHON_BIN}" \
+  production/foam_ring_grasp/scripts/verify_m39_2_robot_pose_transform.py \
+  --config "${CONFIG_PATH}"
+
+echo "[M39.2] starting online service with verified config"
 exec "${PYTHON_BIN}" -m \
   production.foam_ring_grasp.tasks.foam_ring_grasp_vision.service \
   "${ARGS[@]}" \

@@ -16,7 +16,7 @@ from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.robot_pose_transfor
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG = REPO_ROOT / "production" / "foam_ring_grasp" / "config" / "line.yaml"
-CALIB = REPO_ROOT / "production" / "foam_ring_grasp" / "config" / "handeye_left_20260808_094336.json"
+CALIB = REPO_ROOT / "production" / "foam_ring_grasp" / "config" / "handeye_left_20260810_190310_robot_default_base.json"
 
 
 def _candidate() -> dict:
@@ -36,18 +36,18 @@ def _candidate() -> dict:
     }
 
 
-def test_left_calibration_is_locked_to_andreff() -> None:
+def test_left_calibration_is_locked_to_24sample_park_robot_default_base() -> None:
     raw = load_yaml(CONFIG)
     transformer = RobotPoseTransformer.from_mapping(raw, CONFIG)
     status = transformer.status()
     assert status["arm"] == "left"
     assert status["handeye"]["robot_arm"] == "left"
-    assert status["handeye"]["selected_method"] == "ANDREFF"
-    assert status["handeye"]["quality_status"] == "PROVISIONAL_PASS"
-    assert status["handeye"]["sample_count_used"] == 19
+    assert status["handeye"]["selected_method"] == "PARK"
+    assert status["handeye"]["quality_status"] == "PASS"
+    assert status["handeye"]["sample_count_used"] == 24
     np.testing.assert_allclose(
         transformer.T_base_camera_mm[:3, 3],
-        [433.1318504876939, 215.7196130694405, 232.12873127751587],
+        [427.395220, 200.122131, 1192.767193],
         atol=1e-9,
     )
 

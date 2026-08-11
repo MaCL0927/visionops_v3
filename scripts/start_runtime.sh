@@ -12,7 +12,7 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
   exit 1
 fi
 
-MODEL_DIR="${1:-${MODEL_DIR:-/opt/visionops_v3/models/test_rknn_model}}"
+MODEL_DIR="${1:-${MODEL_DIR:-/opt/visionops_v3/models/rk3576-252_ring_seg_20260807_133245}}"
 RUNTIME_BIN="${VISIONOPS_RUNTIME_BIN:-./build-rknn/edge/runtime_cpp/visionops_runtime_mock}"
 DEVICE_ID="${VISIONOPS_DEVICE_ID:-lb3576-001}"
 PORT="${VISIONOPS_RUNTIME_PORT:-28081}"

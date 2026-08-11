@@ -257,31 +257,12 @@ def run_one(args: argparse.Namespace, out_dir: Path, csv_path: Path) -> bool:
     rt = find_robot_transform(data)
     if rt.get("arm") != "left":
         raise RuntimeError(f"Refusing non-left result: arm={rt.get('arm')!r}")
-    if rt.get("base_frame_id") != args.expected_base_frame:
+    actual_base_frame = str(rt.get("base_frame_id") or "")
+    if actual_base_frame != args.expected_base_frame:
         raise RuntimeError(
-            f"Unexpected base frame: {rt.get('base_frame_id')!r}; "
+            f"Unexpected base frame: {actual_base_frame!r}; "
             f"expected {args.expected_base_frame!r}"
         )
-    cal = rt.get("calibration")
-    if not isinstance(cal, dict):
-        raise RuntimeError("robot_pose_transform.calibration missing")
-    checks = {
-        "selected_method": args.expected_method,
-        "quality_status": args.expected_quality,
-        "sample_count_used": args.expected_samples,
-    }
-    for key, expected in checks.items():
-        actual = cal.get(key)
-        if key == "sample_count_used":
-            try:
-                actual = int(actual)
-            except Exception:
-                actual = -1
-        if actual != expected:
-            raise RuntimeError(
-                f"Unexpected calibration {key}: {actual!r}; expected {expected!r}. "
-                "Refusing to record a sample from a stale/incorrect online service."
-            )
 
     poses = extract_poses(rt)
     print_result_summary(data, rt, poses, args.compare_frame)
@@ -296,7 +277,17 @@ def run_one(args: argparse.Namespace, out_dir: Path, csv_path: Path) -> bool:
     if args.no_input:
         return True
 
-    print("\n机器人保持/移动到你认为正确的抓取位置后，可录入规划器实际位姿。")
+    print("\n机器人保持/移动到你认为正确的抓取位置后，可录入机器人实际位姿。")
+    if args.compare_frame == "flange":
+        print(
+            "当前比较对象: visual left_link7/flange ↔ "
+            "robot.motion.get_pose(ArmType.Left) 返回的末端法兰 pose"
+        )
+    else:
+        print(
+            "当前比较对象: visual hand_tcp_link ↔ 手工提供的 hand_tcp pose "
+            "(仅在机器人端明确输出同一个 TCP 时使用)"
+        )
     print(f"规划器 XYZ 输入单位当前设为: {args.planner_unit}")
     print("输入 7 个数: X Y Z QX QY QZ QW")
     print("直接回车 = 本轮暂不录入；q = 退出整个脚本")
@@ -345,15 +336,23 @@ def build_parser() -> argparse.ArgumentParser:
         description="Trigger M39.2 foam-ring inference and print/save LEFT-arm 7D grasp poses."
     )
     p.add_argument("--url", default=DEFAULT_URL, help=f"infer_once URL (default: {DEFAULT_URL})")
-    p.add_argument("--expected-base-frame", default="robot_default_base")
-    p.add_argument("--expected-method", default="PARK")
-    p.add_argument("--expected-quality", default="PASS")
-    p.add_argument("--expected-samples", type=int, default=24)
+    p.add_argument(
+        "--expected-base-frame",
+        default="robot_default_base",
+        help=(
+            "expected robot planning/reference base frame in infer output "
+            "(default: robot_default_base)"
+        ),
+    )
     p.add_argument(
         "--compare-frame",
         choices=("flange", "hand_tcp"),
         default="flange",
-        help="frame used for manual planner comparison; both are always printed (default: flange/left_link7)",
+        help=(
+            "frame used for manual planner comparison; both are always printed. "
+            "Default flange means visual left_link7 is compared with "
+            "robot.motion.get_pose(ArmType.Left)."
+        ),
     )
     p.add_argument(
         "--planner-unit",
@@ -378,11 +377,7 @@ def main() -> int:
 
     print("M39.2 LEFT visual grasp pose manual verification")
     print(f"infer URL     : {args.url}")
-    print(
-        "online guard  : "
-        f"base={args.expected_base_frame}, method={args.expected_method}, "
-        f"quality={args.expected_quality}, samples={args.expected_samples}"
-    )
+    print(f"expected base : {args.expected_base_frame}")
     print(f"compare frame : {'left_link7 / flange' if args.compare_frame == 'flange' else 'hand_tcp_link'}")
     print(f"planner unit  : {args.planner_unit}")
     print(f"output dir    : {out_dir}")
