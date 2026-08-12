@@ -15,8 +15,8 @@ where:
   * T_base_sdk_flange_actual is the LEFT flange pose manually copied from
     robot.motion.get_pose(ArmType.Left), expressed in robot_default_base.
 
-For calibration collection, use only one visual clock direction (default 2) so
-clock-dependent grasp-frame effects are not mixed into the fixed tool transform.
+For M39.2.7 calibration/validation, use clock=3 with the canonical camera-axis
+orientation policy so per-frame ring tilt does not contaminate the fixed tool transform.
 After 8-12 samples, the script writes a fitted transform JSON. A later run may
 load that JSON with --trial-transform to report the corrected SDK-flange pose
 and validation residual without changing production code.
@@ -44,6 +44,7 @@ DEFAULT_EXPECTED_METHOD = "PARK"
 DEFAULT_EXPECTED_QUALITY = "PASS"
 DEFAULT_EXPECTED_SAMPLES = 24
 DEFAULT_CLOCK_HOUR = 3
+DEFAULT_EXPECTED_ORIENTATION_POLICY = "canonical_clock_camera_axes"
 
 
 def post_json(url: str, payload: Dict[str, Any], timeout_s: float) -> Dict[str, Any]:
@@ -97,6 +98,17 @@ def selected_clock_hour(data: Mapping[str, Any]) -> Optional[int]:
         return int(value)
     except Exception:
         return None
+
+
+def selected_orientation_policy(data: Mapping[str, Any]) -> Optional[str]:
+    candidate = data.get("candidate")
+    if not isinstance(candidate, Mapping):
+        return None
+    frame = candidate.get("grasp_frame_camera")
+    if not isinstance(frame, Mapping):
+        return None
+    value = frame.get("orientation_policy")
+    return str(value) if value is not None else None
 
 
 def validate_online_contract(
@@ -508,6 +520,7 @@ def run_one(args: argparse.Namespace, out_dir: Path, records_path: Path, csv_pat
         expected_samples=args.expected_samples,
     )
     clock = selected_clock_hour(data)
+    orientation_policy = selected_orientation_policy(data)
     branch = data.get("selected_grasp_branch") or rt.get("grasp_branch")
     hand_pose = extract_hand_tcp_grasp(rt)
     legacy_flange = extract_legacy_flange_grasp(rt)
@@ -515,6 +528,7 @@ def run_one(args: argparse.Namespace, out_dir: Path, records_path: Path, csv_pat
     print("\n" + "=" * 92)
     print(f"request_id       : {request_id}")
     print(f"clock            : {clock} (required calibration clock={args.clock_hour})")
+    print(f"orientation      : {orientation_policy} (required={args.expected_orientation_policy})")
     print(f"branch           : {branch}")
     print(f"base             : {rt.get('base_frame_id')}")
     cal = rt.get("calibration") or {}
@@ -534,6 +548,12 @@ def run_one(args: argparse.Namespace, out_dir: Path, records_path: Path, csv_pat
             "Do not enter robot pose; trigger again."
         )
         return False
+    if args.expected_orientation_policy and orientation_policy != args.expected_orientation_policy:
+        raise RuntimeError(
+            "Unexpected grasp orientation policy: "
+            f"{orientation_policy!r}; expected {args.expected_orientation_policy!r}. "
+            "Start the service with line_clock3_calibration.yaml for M39.2.7."
+        )
 
     T_base_hand = pose7_to_T(hand_pose)
     trial_T = load_trial_transform(args.trial_transform)
@@ -654,6 +674,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--expected-method", default=DEFAULT_EXPECTED_METHOD)
     p.add_argument("--expected-quality", default=DEFAULT_EXPECTED_QUALITY)
     p.add_argument("--expected-samples", type=int, default=DEFAULT_EXPECTED_SAMPLES)
+    p.add_argument("--expected-orientation-policy", default=DEFAULT_EXPECTED_ORIENTATION_POLICY,
+                   help="required candidate grasp-frame orientation policy; empty string disables this check")
     p.add_argument("--min-fit-samples", type=int, default=8)
     p.add_argument("--trial-transform", default=None,
                    help="optional prior fit JSON; prints corrected SDK flange prediction for independent validation")
@@ -679,6 +701,7 @@ def main() -> int:
     print("M39.2.4 SDK flange alignment TEST (LEFT arm)")
     print(f"infer URL       : {args.url}")
     print(f"calibration lock: clock={args.clock_hour}")
+    print(f"orientation lock: {args.expected_orientation_policy or 'disabled'}")
     print(
         "online contract : "
         f"base={args.expected_base_frame}, method={args.expected_method}, "

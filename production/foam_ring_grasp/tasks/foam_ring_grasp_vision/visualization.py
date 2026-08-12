@@ -122,21 +122,32 @@ def draw_overlay(
         cv2.circle(output, center, 5, ring_color, -1, cv2.LINE_AA)
         pose_source = str((item.get("pose") or {}).get("normal_source") or "depth_plane")
         source_tag = (
-            "A"
-            if pose_source == "m38_1_front_annulus_depth_plane"
+            "S"
+            if pose_source == "m39_2_7_box_floor_stabilized"
             else (
-                "B"
-                if pose_source == "m38_2_partial_mouth_local_outer_cylinder"
-                else ("E" if pose_source == "ellipse_stabilized" else "D")
+                "A"
+                if pose_source == "m38_1_front_annulus_depth_plane"
+                else (
+                    "B"
+                    if pose_source == "m38_2_partial_mouth_local_outer_cylinder"
+                    else ("E" if pose_source == "ellipse_stabilized" else "D")
+                )
             )
         )
         best = (item.get("grasp") or {}).get("best_clock_candidate") or {}
         best_hour = best.get("clock_hour")
-        label = "R%d %s z=%.0f tilt=%.1f[%s] best=%s" % (
+        raw_tilt = float(item.get("raw_tilt_deg", item.get("tilt_deg") or 0.0) or 0.0)
+        stable_tilt = float(item.get("tilt_deg") or 0.0)
+        tilt_text = (
+            f"{raw_tilt:.1f}->{stable_tilt:.1f}"
+            if abs(raw_tilt - stable_tilt) >= 0.15
+            else f"{stable_tilt:.1f}"
+        )
+        label = "R%d %s z=%.0f tilt=%s[%s] best=%s" % (
             int(item.get("ring_instance_id", -1)),
             "SELECT" if selected else ("OK" if eligible else "REJECT"),
             float((item.get("ring_center_camera_mm") or [0, 0, 0])[2]),
-            float(item.get("tilt_deg") or 0.0),
+            tilt_text,
             source_tag,
             str(best_hour) if best_hour is not None else "-",
         )
@@ -600,12 +611,16 @@ def render_paired_axis_overlay(
             cv2.circle(output, near_uv, endpoint_radius_px, (255, 255, 255), 1, cv2.LINE_AA)
 
         source_tag = (
-            "A"
-            if row["normal_source"] == "m38_1_front_annulus_depth_plane"
+            "S"
+            if row["normal_source"] == "m39_2_7_box_floor_stabilized"
             else (
-                "B"
-                if row["normal_source"] == "m38_2_partial_mouth_local_outer_cylinder"
-                else ("E" if row["normal_source"] == "ellipse_stabilized" else "D")
+                "A"
+                if row["normal_source"] == "m38_1_front_annulus_depth_plane"
+                else (
+                    "B"
+                    if row["normal_source"] == "m38_2_partial_mouth_local_outer_cylinder"
+                    else ("E" if row["normal_source"] == "ellipse_stabilized" else "D")
+                )
             )
         )
         sign_tag = " SIGN?" if depth_order_status == "inconsistent_axis_sign" else ""

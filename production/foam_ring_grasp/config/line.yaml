@@ -447,6 +447,32 @@ quality:
   minimum_mouth_area_px: 80
   minimum_ring_area_px: 300
 
+# M39.2.7 production flat-ring normal stabilization.  Branch-A raw annulus
+# normals showed 0.9~8.5 deg location-dependent drift for rings that were
+# physically flat.  The calibrated shallow-box floor is a stable reference:
+# box +Z points into the box, so -box +Z is the ring normal toward the camera.
+# Only the near-flat neighborhood is snapped/blended; >=12 deg disagreement
+# remains fully measured so genuinely tilted/side rings are preserved.
+flat_ring_normal_stabilization:
+  enabled: true
+  reference: calibrated_box_floor
+  require_reference: true
+  pose_strategies: [m38_1_front_annulus]
+  snap_max_reference_disagreement_deg: 9.0
+  preserve_measured_at_reference_disagreement_deg: 12.0
+  # 2-D ellipse aspect ratio is viewpoint-sensitive for this thick cylinder;
+  # keep it diagnostic only. Raw-vs-box 3-D normal disagreement is authoritative.
+  maximum_ellipse_tilt_for_stabilization_deg: 90.0
+  minimum_plane_inlier_ratio: 0.40
+  maximum_plane_residual_p95_mm: 7.0
+  reanchor_inlier_threshold_mm: 7.0
+
+# Production grasp-frame orientation follows the stabilized/measured 3-D ring
+# plane. Canonical orientation is reserved for the manual clock-3 calibration
+# config below and is never forced globally.
+grasp_frame_orientation:
+  mode: measured
+
 robot_interface:
   # Optical-frame convention normally used by the aligned color image:
   # +X right, +Y down, +Z forward.
@@ -501,10 +527,12 @@ robot_pose_transform:
   hand_tcp_to_flange:
     enabled: true
     T_hand_tcp_flange_rows:
-      - [1.0, 0.0, 0.0, -130.5]
-      - [0.0, 1.0, 0.0,    0.0]
-      - [0.0, 0.0, 1.0,   60.0]
-      - [0.0, 0.0, 0.0,    1.0]
+      # M39.2.7: robust clock-3 canonical fit, 10 samples after excluding #10/#11.
+      # Transform direction remains T_hand_tcp_sdk_flange; compose on the right.
+      - [ 0.995921716, -0.087619482,  0.021511897, -164.567832]
+      - [-0.089118123, -0.992545706,  0.083132319,   -3.149675]
+      - [ 0.014067531, -0.084710381, -0.996306306,   35.546126]
+      - [ 0.000000000,  0.000000000,  0.000000000,    1.000000]
 
 online_rgbd:
   # M36.3 caches exact RGB/D2C-depth pairs before Runtime inference returns.

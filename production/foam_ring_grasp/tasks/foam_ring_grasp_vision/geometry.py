@@ -980,6 +980,20 @@ def _json_vector(vector: Optional[np.ndarray]) -> Optional[List[float]]:
     return [float(value) for value in np.asarray(vector).reshape(-1).tolist()]
 
 
+def _vector_angle_deg(first: np.ndarray, second: np.ndarray) -> float:
+    a = _normalize(first)
+    b = _normalize(second)
+    return math.degrees(math.acos(float(np.clip(np.dot(a, b), -1.0, 1.0))))
+
+
+def _rotation_delta_deg(first: np.ndarray, second: np.ndarray) -> float:
+    relative = np.asarray(first, dtype=np.float64).reshape(3, 3).T @ np.asarray(
+        second, dtype=np.float64
+    ).reshape(3, 3)
+    cosine = float(np.clip((float(np.trace(relative)) - 1.0) * 0.5, -1.0, 1.0))
+    return math.degrees(math.acos(cosine))
+
+
 def _json_uv(value: Optional[Tuple[float, float]]) -> Optional[List[float]]:
     if value is None:
         return None
@@ -1356,6 +1370,157 @@ def _resolve_box_model_3d(config: GeometryConfig) -> Optional[BoxModel3D]:
         return None
 
 
+def _resolve_box_reference_model_3d(config: GeometryConfig) -> Optional[BoxModel3D]:
+    """Load the calibrated box frame even when collision checking is disabled.
+
+    M39.2.7 clock-3 calibration intentionally disables box collision gates, but
+    still needs the calibrated box axes as a deterministic orientation reference.
+    The online/offline config loaders therefore populate ``calibrated_model``
+    whenever a reference consumer is enabled.
+    """
+    section = config.section("box_wall")
+    if str(section.get("model") or "") != "calibrated_3d_cuboid":
+        return None
+    payload = section.get("calibrated_model")
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return box_model_from_dict(payload, source_path=section.get("_resolved_calibration_file"))
+    except Exception:
+        return None
+
+
+def _box_reference_axes_camera(
+    config: GeometryConfig,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    model = _resolve_box_reference_model_3d(config)
+    if model is None:
+        return None
+    rotation = np.asarray(model.rotation_camera_from_box, dtype=np.float64).reshape(3, 3)
+    x_right = _normalize(rotation[:, 0])
+    y_down = _normalize(rotation[:, 1])
+    z_inside = _normalize(rotation[:, 2])
+    return x_right, y_down, z_inside
+
+
+def _stabilize_flat_ring_pose_plane(
+    pose_plane: PlaneModel,
+    support_points: np.ndarray,
+    ellipse: Mapping[str, Any],
+    intrinsics: Mapping[str, float],
+    config: GeometryConfig,
+    pose_strategy: str,
+) -> Tuple[PlaneModel, Dict[str, Any]]:
+    """Stabilize near-flat branch-A ring normals against the calibrated box floor.
+
+    The calibrated box +Z axis points from the opening into the shallow box, so
+    the physical floor/front-face normal toward the camera is ``-box_z_inside``.
+    M39.2.7 snaps only a near-flat neighborhood and uses a short blend band;
+    genuinely tilted rings outside the preserve threshold keep their measured
+    normal unchanged.  The plane offset is always re-anchored to the observed
+    ring front points, so only orientation is stabilized, not depth/XYZ.
+    """
+    section = config.section("flat_ring_normal_stabilization")
+    enabled = bool(section.get("enabled", False))
+    allowed = section.get("pose_strategies") or ["m38_1_front_annulus"]
+    allowed_set = {str(value) for value in allowed} if isinstance(allowed, Sequence) and not isinstance(allowed, (str, bytes)) else {str(allowed)}
+    raw_normal = _normalize(np.asarray(pose_plane.normal, dtype=np.float64))
+    camera_axis = np.asarray([0.0, 0.0, 1.0], dtype=np.float64)
+    raw_tilt = math.degrees(math.acos(float(np.clip(abs(np.dot(raw_normal, camera_axis)), 0.0, 1.0))))
+    diagnostics: Dict[str, Any] = {
+        "enabled": enabled,
+        "applied": False,
+        "mode": "disabled" if not enabled else "not_applicable",
+        "reference": str(section.get("reference") or "calibrated_box_floor"),
+        "raw_normal_toward_camera": _json_vector(raw_normal),
+        "raw_tilt_deg": float(raw_tilt),
+        "output_normal_toward_camera": _json_vector(raw_normal),
+        "output_tilt_deg": float(raw_tilt),
+        "reference_weight": 0.0,
+    }
+    if not enabled or pose_strategy not in allowed_set:
+        return pose_plane, diagnostics
+
+    axes = _box_reference_axes_camera(config)
+    if axes is None:
+        diagnostics.update({"mode": "reference_unavailable", "reason": "calibrated_box_model_unavailable"})
+        if bool(section.get("require_reference", False)):
+            raise ValueError("M39.2.7 flat-ring stabilization requires calibrated box reference")
+        return pose_plane, diagnostics
+
+    _x_right, _y_down, z_inside = axes
+    reference_normal = -z_inside
+    if float(np.dot(reference_normal, pose_plane.centroid)) > 0.0:
+        reference_normal = -reference_normal
+    disagreement = _vector_angle_deg(raw_normal, reference_normal)
+    reference_tilt = math.degrees(
+        math.acos(float(np.clip(abs(np.dot(reference_normal, camera_axis)), 0.0, 1.0)))
+    )
+    ellipse_tilt, _ = _ellipse_normal_candidates(ellipse, intrinsics)
+    snap_max = max(0.0, _safe_float(section.get("snap_max_reference_disagreement_deg"), 9.0))
+    preserve_at = max(snap_max, _safe_float(section.get("preserve_measured_at_reference_disagreement_deg"), 12.0))
+    maximum_ellipse = _safe_float(section.get("maximum_ellipse_tilt_for_stabilization_deg"), 90.0)
+    minimum_inlier = _safe_float(section.get("minimum_plane_inlier_ratio"), 0.40)
+    maximum_residual = _safe_float(section.get("maximum_plane_residual_p95_mm"), 7.0)
+
+    diagnostics.update({
+        "reference_normal_toward_camera": _json_vector(reference_normal),
+        "reference_tilt_deg": float(reference_tilt),
+        "raw_vs_reference_deg": float(disagreement),
+        "ellipse_tilt_deg": float(ellipse_tilt),
+        "snap_max_reference_disagreement_deg": float(snap_max),
+        "preserve_measured_at_reference_disagreement_deg": float(preserve_at),
+    })
+
+    if ellipse_tilt > maximum_ellipse:
+        diagnostics.update({"mode": "preserve_measured", "reason": "ellipse_indicates_real_tilt"})
+        return pose_plane, diagnostics
+    if pose_plane.inlier_ratio < minimum_inlier or pose_plane.residual_p95_mm > maximum_residual:
+        diagnostics.update({"mode": "preserve_measured", "reason": "front_plane_quality_below_stabilization_gate"})
+        return pose_plane, diagnostics
+    if disagreement >= preserve_at:
+        diagnostics.update({"mode": "preserve_measured", "reason": "reference_disagreement_indicates_real_tilt"})
+        return pose_plane, diagnostics
+
+    if disagreement <= snap_max or preserve_at <= snap_max + 1e-9:
+        reference_weight = 1.0
+        mode = "snap_to_box_floor"
+    else:
+        reference_weight = float(np.clip((preserve_at - disagreement) / (preserve_at - snap_max), 0.0, 1.0))
+        mode = "blend_to_box_floor"
+    stabilized_normal = _normalize(reference_weight * reference_normal + (1.0 - reference_weight) * raw_normal)
+    if float(np.dot(stabilized_normal, pose_plane.centroid)) > 0.0:
+        stabilized_normal = -stabilized_normal
+    points = np.asarray(support_points, dtype=np.float64).reshape(-1, 3)
+    threshold = _safe_float(section.get("reanchor_inlier_threshold_mm"), 7.0)
+    if len(points) >= 3:
+        stabilized_plane = _fixed_normal_plane(points, stabilized_normal, threshold)
+    else:
+        stabilized_plane = PlaneModel(
+            normal=stabilized_normal,
+            offset=float(-np.dot(stabilized_normal, pose_plane.centroid)),
+            centroid=pose_plane.centroid.copy(),
+            inlier_mask=pose_plane.inlier_mask.copy(),
+            inlier_ratio=float(pose_plane.inlier_ratio),
+            residual_median_mm=float(pose_plane.residual_median_mm),
+            residual_p95_mm=float(pose_plane.residual_p95_mm),
+        )
+    output_tilt = math.degrees(
+        math.acos(float(np.clip(abs(np.dot(stabilized_plane.normal, camera_axis)), 0.0, 1.0)))
+    )
+    diagnostics.update({
+        "applied": True,
+        "mode": mode,
+        "reason": "near_flat_ring_uses_calibrated_box_floor_reference",
+        "reference_weight": float(reference_weight),
+        "output_normal_toward_camera": _json_vector(stabilized_plane.normal),
+        "output_tilt_deg": float(output_tilt),
+        "reanchored_offset": float(stabilized_plane.offset),
+        "reanchored_residual_p95_mm": float(stabilized_plane.residual_p95_mm),
+    })
+    return stabilized_plane, diagnostics
+
+
 def _check_box_wall_3d(
     model: BoxModel3D,
     inner_pre_center: np.ndarray,
@@ -1536,9 +1701,73 @@ def _robot_grasp_frame(
     config: GeometryConfig,
 ) -> Dict[str, Any]:
     origin = np.asarray(candidate["grasp_center_camera_mm"], dtype=np.float64)
-    closing = np.asarray(candidate["closing_axis_camera"], dtype=np.float64)
-    approach = np.asarray(candidate["approach_vector_camera"], dtype=np.float64)
+    measured_closing = np.asarray(candidate["closing_axis_camera"], dtype=np.float64)
+    measured_approach = np.asarray(candidate["approach_vector_camera"], dtype=np.float64)
+    mx, my, mz, measured_rotation, measured_quaternion = _rotation_matrix_and_quaternion(
+        measured_closing, measured_approach
+    )
+
+    closing = measured_closing
+    approach = measured_approach
+    orientation_cfg = config.section("grasp_frame_orientation")
+    orientation_mode = str(orientation_cfg.get("mode") or "measured").strip().lower()
+    orientation_policy = "measured_ring_plane"
+    orientation_diagnostics: Dict[str, Any] = {
+        "configured_mode": orientation_mode,
+        "applied": False,
+        "measured_x_closing_axis_camera": _json_vector(mx),
+        "measured_y_lateral_axis_camera": _json_vector(my),
+        "measured_z_approach_axis_camera": _json_vector(mz),
+        "measured_quaternion_xyzw": _json_vector(measured_quaternion),
+    }
+
+    if orientation_mode in {"canonical_clock_camera_axes", "canonical_clock_box_axes"}:
+        hour = _safe_int(candidate.get("clock_hour"), -1)
+        allowed_raw = orientation_cfg.get("clock_hours") or [3]
+        allowed_hours = {
+            (12 if _safe_int(value, -1) == 0 else _safe_int(value, -1))
+            for value in allowed_raw
+        } if isinstance(allowed_raw, Sequence) and not isinstance(allowed_raw, (str, bytes)) else {3}
+        if hour in allowed_hours:
+            if orientation_mode == "canonical_clock_camera_axes":
+                x_right = np.asarray([1.0, 0.0, 0.0], dtype=np.float64)
+                y_down = np.asarray([0.0, 1.0, 0.0], dtype=np.float64)
+                z_inside = np.asarray([0.0, 0.0, 1.0], dtype=np.float64)
+                reference_source = "camera_optical_axes"
+            else:
+                axes = _box_reference_axes_camera(config)
+                if axes is None:
+                    if bool(orientation_cfg.get("require_box_reference", True)):
+                        raise ValueError("M39.2.7 canonical clock orientation requires calibrated box model")
+                    orientation_diagnostics["reason"] = "box_reference_unavailable_fallback_measured"
+                    axes = None
+                if axes is None:
+                    x_right = y_down = z_inside = None
+                    reference_source = "unavailable"
+                else:
+                    x_right, y_down, z_inside = axes
+                    reference_source = "calibrated_box_axes"
+            if x_right is not None and y_down is not None and z_inside is not None:
+                image_angle_deg = float(candidate.get("image_angle_deg_from_positive_x", (hour - 3) * 30.0))
+                angle = math.radians(image_angle_deg)
+                closing = math.cos(angle) * x_right + math.sin(angle) * y_down
+                approach = z_inside
+                orientation_policy = orientation_mode
+                orientation_diagnostics.update({
+                    "applied": True,
+                    "clock_hour": int(hour),
+                    "image_angle_deg_from_positive_x": float(image_angle_deg),
+                    "reference_source": reference_source,
+                    "reference_x_right_camera": _json_vector(x_right),
+                    "reference_y_down_camera": _json_vector(y_down),
+                    "reference_z_approach_camera": _json_vector(z_inside),
+                })
+
     x_axis, y_axis, z_axis, rotation, quaternion = _rotation_matrix_and_quaternion(closing, approach)
+    orientation_diagnostics["output_vs_measured_rotation_deg"] = float(
+        _rotation_delta_deg(measured_rotation, rotation)
+    )
+    orientation_diagnostics["output_quaternion_xyzw"] = _json_vector(quaternion)
     transform = np.eye(4, dtype=np.float64)
     transform[:3, :3] = rotation
     transform[:3, 3] = origin
@@ -1554,6 +1783,8 @@ def _robot_grasp_frame(
         "rotation_matrix_rows": [[float(value) for value in row] for row in rotation.tolist()],
         "quaternion_xyzw": _json_vector(quaternion),
         "T_camera_grasp_rows": [[float(value) for value in row] for row in transform.tolist()],
+        "orientation_policy": orientation_policy,
+        "orientation_diagnostics": orientation_diagnostics,
         "inner_finger_side": "negative_x",
         "outer_finger_side": "positive_x",
     }
@@ -3797,6 +4028,29 @@ def analyze_ring_pair(
             else:
                 warnings.append("m36_pose_conflict_warning_only")
 
+    raw_pose_plane = pose_plane
+    raw_pose_normal = np.asarray(raw_pose_plane.normal, dtype=np.float64).copy()
+    flat_normal_diagnostics: Dict[str, Any] = {
+        "enabled": False,
+        "applied": False,
+        "mode": "not_run",
+    }
+    if pose_strategy == "m38_1_front_annulus":
+        pose_plane, flat_normal_diagnostics = _stabilize_flat_ring_pose_plane(
+            pose_plane,
+            points,
+            ellipse,
+            intrinsics,
+            config,
+            pose_strategy,
+        )
+        pose_diagnostics["flat_ring_normal_stabilization"] = dict(flat_normal_diagnostics)
+        if bool(flat_normal_diagnostics.get("applied")):
+            pose_diagnostics["normal_source_before_flat_stabilization"] = str(
+                pose_diagnostics.get("normal_source") or "m38_1_front_annulus_depth_plane"
+            )
+            pose_diagnostics["normal_source"] = "m39_2_7_box_floor_stabilized"
+
     center_uv = tuple(ellipse["center_uv"])
     center_camera = (
         precomputed_center_camera.copy()
@@ -3955,6 +4209,11 @@ def analyze_ring_pair(
         "ring_axis_toward_camera": _json_vector(normal),
         "approach_vector_camera": _json_vector(approach),
         "tilt_deg": float(tilt_deg),
+        "raw_ring_axis_toward_camera": _json_vector(raw_pose_normal),
+        "raw_tilt_deg": float(
+            flat_normal_diagnostics.get("raw_tilt_deg", tilt_deg)
+        ),
+        "flat_ring_normal_stabilization": dict(flat_normal_diagnostics),
         "neighbor_3d_point_clouds": neighbor_cloud_summary,
         "mouth_major_mm": mouth_major_mm,
         "mouth_minor_mm": mouth_minor_mm,

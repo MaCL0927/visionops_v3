@@ -5,7 +5,7 @@
 # box/full-gripper hard collision gates so a human can manually align the flange.
 
 schema_version: "6.5"
-task: foam_ring_rim_pinch_m39_2_left_robot_pose_transform
+task: foam_ring_rim_pinch_m39_2_7_clock3_canonical_calibration
 
 classes:
   foam_ring: foam_ring
@@ -453,6 +453,21 @@ quality:
   minimum_mouth_area_px: 80
   minimum_ring_area_px: 300
 
+# M39.2.7 CALIBRATION ONLY: keep visual XYZ from the measured geometry and do
+# not alter the pose plane.  Only the emitted grasp-frame orientation is made
+# deterministic below.
+flat_ring_normal_stabilization:
+  enabled: false
+  reference: calibrated_box_floor
+
+# M39.2.7 clock-3 canonical orientation.  This intentionally uses the camera
+# optical axes used by the 10-sample tool-TF fit: clock=3 is exact camera +X
+# and approach is exact camera +Z. It removes per-frame 0~9 deg ring-normal
+# noise from manual SDK-flange calibration while preserving grasp-center XYZ.
+grasp_frame_orientation:
+  mode: canonical_clock_camera_axes
+  clock_hours: [3]
+
 robot_interface:
   # Optical-frame convention normally used by the aligned color image:
   # +X right, +Y down, +Z forward.
@@ -507,10 +522,12 @@ robot_pose_transform:
   hand_tcp_to_flange:
     enabled: true
     T_hand_tcp_flange_rows:
-      - [1.0, 0.0, 0.0, -130.5]
-      - [0.0, 1.0, 0.0,    0.0]
-      - [0.0, 0.0, 1.0,   60.0]
-      - [0.0, 0.0, 0.0,    1.0]
+      # M39.2.7: robust clock-3 canonical fit, 10 samples after excluding #10/#11.
+      # Transform direction remains T_hand_tcp_sdk_flange; compose on the right.
+      - [ 0.995921716, -0.087619482,  0.021511897, -164.567832]
+      - [-0.089118123, -0.992545706,  0.083132319,   -3.149675]
+      - [ 0.014067531, -0.084710381, -0.996306306,   35.546126]
+      - [ 0.000000000,  0.000000000,  0.000000000,    1.000000]
 
 online_rgbd:
   # M36.3 caches exact RGB/D2C-depth pairs before Runtime inference returns.

@@ -500,6 +500,18 @@ class FoamRingOnlineService:
         if not isinstance(runtime_timing, Mapping):
             runtime_timing = {}
         candidate = payload.get("candidate") if isinstance(payload.get("candidate"), Mapping) else None
+        selected_instance = None
+        selected_ring_id = scene.get("selected_ring_instance_id")
+        if selected_ring_id is not None:
+            for item in scene.get("instances") or []:
+                if isinstance(item, Mapping) and item.get("ring_instance_id") == selected_ring_id:
+                    selected_instance = item
+                    break
+        candidate_frame = (
+            candidate.get("grasp_frame_camera")
+            if isinstance(candidate, Mapping) and isinstance(candidate.get("grasp_frame_camera"), Mapping)
+            else {}
+        )
         end_to_end_ms = (
             time.monotonic() - job.submitted_monotonic
         ) * 1000.0
@@ -538,6 +550,15 @@ class FoamRingOnlineService:
                 "selected_clock_search_batch": scene.get("selected_clock_search_batch"),
                 "selected_clock_preferred": scene.get("selected_clock_preferred"),
                 "preferred_clock_hours": scene.get("preferred_clock_hours"),
+                "selected_raw_tilt_deg": (selected_instance or {}).get("raw_tilt_deg"),
+                "selected_tilt_deg": (selected_instance or {}).get("tilt_deg"),
+                "selected_flat_ring_normal_stabilization": deepcopy(
+                    (selected_instance or {}).get("flat_ring_normal_stabilization") or {}
+                ),
+                "selected_grasp_orientation_policy": candidate_frame.get("orientation_policy"),
+                "selected_grasp_orientation_diagnostics": deepcopy(
+                    candidate_frame.get("orientation_diagnostics") or {}
+                ),
                 "geometry_mode": geometry_optimization.get("mode"),
                 "fully_analyzed_pair_count": geometry_optimization.get("fully_analyzed_pair_count"),
                 "full_candidate_evaluated_count": geometry_optimization.get("full_candidate_evaluated_count"),

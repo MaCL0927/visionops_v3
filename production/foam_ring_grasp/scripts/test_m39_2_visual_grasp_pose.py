@@ -205,8 +205,19 @@ def print_result_summary(data: Dict[str, Any], rt: Dict[str, Any], poses: Dict[s
     selected_clock = scene_summary.get("selected_clock_hour", data.get("selected_clock_hour"))
     selected_preferred = scene_summary.get("selected_clock_preferred", data.get("selected_clock_preferred"))
     preferred_hours = scene_summary.get("preferred_clock_hours", data.get("preferred_clock_hours"))
+    candidate = data.get("candidate") if isinstance(data.get("candidate"), dict) else {}
+    grasp_frame = candidate.get("grasp_frame_camera") if isinstance(candidate.get("grasp_frame_camera"), dict) else {}
+    orientation_policy = grasp_frame.get("orientation_policy")
+    selected_tilt = scene_summary.get("selected_tilt_deg")
+    selected_raw_tilt = scene_summary.get("selected_raw_tilt_deg")
     print(f"branch     : {branch}")
     print(f"clock      : {selected_clock}  preferred={selected_preferred}  preferred_hours={preferred_hours}")
+    print(f"orientation: {orientation_policy}")
+    if selected_tilt is not None:
+        if selected_raw_tilt is not None:
+            print(f"tilt       : raw={selected_raw_tilt} -> output={selected_tilt}")
+        else:
+            print(f"tilt       : {selected_tilt}")
     print("=" * 88)
 
     if "hand_tcp" in poses:
