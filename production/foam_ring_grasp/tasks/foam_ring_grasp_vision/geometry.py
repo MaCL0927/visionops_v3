@@ -2236,12 +2236,69 @@ def _clock_candidate(
                 warnings.append("outer_boundary_used_filled_envelope")
         if outer_info is None:
             return fail_early("outer_rim_boundary_unavailable")
-        if bool(outer_info.get("ambiguous")):
-            reasons.append("outer_rim_boundary_ambiguous")
         outer_uv = outer_info["uv"]
         outer_camera = ray_plane_intersection(outer_uv, intrinsics, pose_plane)
         if outer_camera is None:
             return fail_early("outer_boundary_ray_plane_failed")
+
+    # M39.2.6: the raw 2-D ring mask can include the cylindrical side surface
+    # when the same ring is viewed away from the optical axis.  This makes a
+    # physically constant local wall appear wider/narrower as the ring moves
+    # left/right.  An opt-in nominal 3-D fallback repairs only ambiguous or
+    # implausible outer boundaries; downstream collision checks remain active.
+    raw_outer_boundary_ambiguous = bool(outer_info.get("ambiguous"))
+    raw_outer_boundary_uv = _json_uv(outer_uv)
+    raw_outer_boundary_camera_mm = _json_vector(outer_camera)
+    raw_radial_vector = outer_camera - inner_camera
+    raw_wall_thickness = float(np.linalg.norm(raw_radial_vector))
+    if raw_wall_thickness <= 1e-6:
+        return fail_early("invalid_wall_thickness")
+
+    min_wall = _safe_float(object_cfg.get("minimum_wall_thickness_mm"), 8.0)
+    max_wall = _safe_float(object_cfg.get("maximum_wall_thickness_mm"), 45.0)
+    fallback_cfg = object_cfg.get("nominal_wall_fallback")
+    fallback_cfg = fallback_cfg if isinstance(fallback_cfg, Mapping) else {}
+    fallback_hours_raw = fallback_cfg.get("clock_hours")
+    fallback_hours = set()
+    if isinstance(fallback_hours_raw, Sequence) and not isinstance(fallback_hours_raw, (str, bytes)):
+        for value in fallback_hours_raw:
+            hour = _safe_int(value, -1)
+            if hour == 0:
+                hour = 12
+            if 1 <= hour <= 12:
+                fallback_hours.add(hour)
+    clock_hour = _safe_int(clock.get("clock_hour"), -1)
+    if clock_hour == 0:
+        clock_hour = 12
+    fallback_allowed_hour = (not fallback_hours) or (clock_hour in fallback_hours)
+    trigger_ambiguous = bool(fallback_cfg.get("trigger_on_ambiguous", True))
+    trigger_out_of_range = bool(fallback_cfg.get("trigger_on_out_of_range", True))
+    raw_out_of_range = not (min_wall <= raw_wall_thickness <= max_wall)
+    fallback_reason = None
+    if raw_outer_boundary_ambiguous and trigger_ambiguous:
+        fallback_reason = "outer_boundary_ambiguous"
+    elif raw_out_of_range and trigger_out_of_range:
+        fallback_reason = "wall_thickness_out_of_range"
+
+    nominal_wall_fallback_applied = False
+    if bool(fallback_cfg.get("enabled", False)) and fallback_allowed_hour and fallback_reason is not None:
+        nominal_wall = _safe_float(
+            fallback_cfg.get("nominal_wall_thickness_mm"),
+            _safe_float(object_cfg.get("nominal_wall_thickness_mm"), 14.0),
+        )
+        radial_from_center = np.asarray(inner_camera, dtype=np.float64) - np.asarray(center_camera, dtype=np.float64)
+        if float(np.linalg.norm(radial_from_center)) > 1e-6 and min_wall <= nominal_wall <= max_wall:
+            nominal_outer_camera = np.asarray(inner_camera, dtype=np.float64) + _normalize(radial_from_center) * nominal_wall
+            nominal_outer_uv = project_point(nominal_outer_camera, intrinsics)
+            if nominal_outer_uv is not None:
+                outer_camera = nominal_outer_camera
+                outer_uv = nominal_outer_uv
+                outer_boundary_source = "nominal_wall_fallback"
+                nominal_wall_fallback_applied = True
+                warnings.append("outer_boundary_nominal_wall_fallback")
+
+    if raw_outer_boundary_ambiguous and not nominal_wall_fallback_applied:
+        reasons.append("outer_rim_boundary_ambiguous")
 
     radial_vector = outer_camera - inner_camera
     wall_thickness = float(np.linalg.norm(radial_vector))
@@ -2253,8 +2310,6 @@ def _clock_candidate(
     tangent = _normalize(np.cross(approach, closing_axis))
     closing_axis = _normalize(np.cross(tangent, approach))
 
-    min_wall = _safe_float(object_cfg.get("minimum_wall_thickness_mm"), 8.0)
-    max_wall = _safe_float(object_cfg.get("maximum_wall_thickness_mm"), 45.0)
     if not (min_wall <= wall_thickness <= max_wall):
         reasons.append("wall_thickness_out_of_range")
 
@@ -2488,8 +2543,14 @@ def _clock_candidate(
             "local_front_obstacle": front_obstacle,
             "inner_finger_sweep_polygon_uv": inner_polygon.reshape(-1, 2).astype(float).tolist() if inner_polygon is not None else None,
             "outer_finger_sweep_polygon_uv": outer_polygon.reshape(-1, 2).astype(float).tolist() if outer_polygon is not None else None,
-            "outer_boundary_ambiguous": bool(outer_info.get("ambiguous")),
+            "outer_boundary_ambiguous": bool(raw_outer_boundary_ambiguous and not nominal_wall_fallback_applied),
             "outer_boundary_source": outer_boundary_source,
+            "raw_outer_boundary_ambiguous": bool(raw_outer_boundary_ambiguous),
+            "raw_outer_boundary_uv": raw_outer_boundary_uv,
+            "raw_outer_boundary_camera_mm": raw_outer_boundary_camera_mm,
+            "raw_wall_thickness_mm": float(raw_wall_thickness),
+            "nominal_wall_fallback_applied": bool(nominal_wall_fallback_applied),
+            "nominal_wall_fallback_reason": fallback_reason if nominal_wall_fallback_applied else None,
         }
         result["grasp_frame_camera"] = _robot_grasp_frame(result, config)
         timing_ms["total_ms"] = _elapsed_ms(candidate_started)
@@ -2965,8 +3026,14 @@ def _clock_candidate(
         "local_front_obstacle": front_obstacle,
         "inner_finger_sweep_polygon_uv": inner_polygon.reshape(-1, 2).astype(float).tolist() if inner_polygon is not None else None,
         "outer_finger_sweep_polygon_uv": outer_polygon.reshape(-1, 2).astype(float).tolist() if outer_polygon is not None else None,
-        "outer_boundary_ambiguous": bool(outer_info.get("ambiguous")),
+        "outer_boundary_ambiguous": bool(raw_outer_boundary_ambiguous and not nominal_wall_fallback_applied),
         "outer_boundary_source": outer_boundary_source,
+        "raw_outer_boundary_ambiguous": bool(raw_outer_boundary_ambiguous),
+        "raw_outer_boundary_uv": raw_outer_boundary_uv,
+        "raw_outer_boundary_camera_mm": raw_outer_boundary_camera_mm,
+        "raw_wall_thickness_mm": float(raw_wall_thickness),
+        "nominal_wall_fallback_applied": bool(nominal_wall_fallback_applied),
+        "nominal_wall_fallback_reason": fallback_reason if nominal_wall_fallback_applied else None,
     }
     result["grasp_frame_camera"] = _robot_grasp_frame(result, config)
     timing_ms["total_ms"] = _elapsed_ms(candidate_started)

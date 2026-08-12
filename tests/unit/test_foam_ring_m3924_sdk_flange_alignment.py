@@ -63,3 +63,10 @@ def test_fit_transform_recovers_common_tool_transform() -> None:
     np.testing.assert_allclose(fit["translation_mm"], [-170.0, -31.0, 18.0], atol=1e-9)
     assert fit["sample_count"] == 3
     assert fit["fit_residuals"]["rotation_max_deg"] == pytest.approx(0.0, abs=1e-6)
+
+
+
+def test_m3926_sdk_flange_alignment_default_clock_is_3() -> None:
+    m = _load_module()
+    args = m.build_parser().parse_args([])
+    assert args.clock_hour == 3

@@ -15,7 +15,7 @@ where:
   * T_base_sdk_flange_actual is the LEFT flange pose manually copied from
     robot.motion.get_pose(ArmType.Left), expressed in robot_default_base.
 
-For calibration collection, use only one visual clock direction (default 1) so
+For calibration collection, use only one visual clock direction (default 2) so
 clock-dependent grasp-frame effects are not mixed into the fixed tool transform.
 After 8-12 samples, the script writes a fitted transform JSON. A later run may
 load that JSON with --trial-transform to report the corrected SDK-flange pose
@@ -43,7 +43,7 @@ DEFAULT_EXPECTED_BASE = "robot_default_base"
 DEFAULT_EXPECTED_METHOD = "PARK"
 DEFAULT_EXPECTED_QUALITY = "PASS"
 DEFAULT_EXPECTED_SAMPLES = 24
-DEFAULT_CLOCK_HOUR = 1
+DEFAULT_CLOCK_HOUR = 3
 
 
 def post_json(url: str, payload: Dict[str, Any], timeout_s: float) -> Dict[str, Any]:
@@ -648,7 +648,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--url", default=DEFAULT_URL)
     p.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
     p.add_argument("--clock-hour", type=int, default=DEFAULT_CLOCK_HOUR,
-                   help="accept only this M38.6 clock direction for calibration (default: 1)")
+                   help="accept only this M38.6 clock direction for calibration (default: 3 for M39.2.6 manual 90-degree alignment)")
     p.add_argument("--planner-unit", choices=("m", "mm"), default="m")
     p.add_argument("--expected-base-frame", default=DEFAULT_EXPECTED_BASE)
     p.add_argument("--expected-method", default=DEFAULT_EXPECTED_METHOD)

@@ -1,3 +1,9 @@
+# M39.2.6 CLOCK-3 MANUAL ALIGNMENT TEST CONFIG
+# TEST ONLY / NOT FOR AUTONOMOUS ROBOT EXECUTION.
+# Derived from line.yaml. It forces clock=3, enables nominal-wall fallback,
+# slightly relaxes the clean front-plane angular support gate, and disables
+# box/full-gripper hard collision gates so a human can manually align the flange.
+
 schema_version: "6.5"
 task: foam_ring_rim_pinch_m39_2_left_robot_pose_transform
 
@@ -215,7 +221,7 @@ gripper_geometry_3d:
 # M35.1-compatible final closed-pose check. M35.2 retains this fast final
 # validation and adds the complete motion from pregrasp until the wall is pinched.
 full_gripper_static_collision:
-  enabled: true
+  enabled: false
   static_final_pose_only: true
 
   obb_surface_resolution: 4
@@ -298,10 +304,10 @@ full_gripper_motion_collision:
   score_saturation_mm: 40.0
 
 box_wall:
-  # M34_new.4 uses a calibrated 3-D cuboid in camera optical coordinates.
-  # The front opening is not a wall; side/top/bottom/rear planes become active
-  # only after a swept finger volume enters the box-local Z >= 0 region.
-  enabled: true
+  # M39.2.6 CLOCK-3 CALIBRATION ONLY: box collision is intentionally disabled
+  # so the service can emit a visual 3-o'clock pose for manual flange alignment.
+  # Never use this file for autonomous robot execution.
+  enabled: false
   model: calibrated_3d_cuboid
   calibration_file: box_model.json
   # M38.6 rejects confirmed intersections, while a missing/mismatched model is
@@ -435,11 +441,11 @@ pair_preselection:
 # existing fallback batch when the primary directions cannot provide a target.
 clock_search:
   mode: adaptive_reachability_priority
-  preferred_clock_hours: [2, 3]
+  preferred_clock_hours: [3]
   prefer_preferred_clock: true
   promote_preferred_to_primary: true
-  primary_clock_hours: [12, 2, 3, 5, 6, 8, 9, 11]
-  fallback_to_remaining: true
+  primary_clock_hours: [3]
+  fallback_to_remaining: false
 
 quality:
   minimum_depth_valid_ratio: 0.32
@@ -498,13 +504,18 @@ robot_pose_transform:
       - [1.0,  0.0, 0.0, 0.0]
       - [0.0,  0.0, 0.0, 1.0]
 
+  # M39.2.7 TRIAL ONLY.
+  # Clock-3 canonical-orientation fit from 10 samples after excluding #10/#11.
+  # Translation uses component-wise median, matching the M39.2.4 robust-fit rule.
+  # This maps SDK LEFT flange coordinates into hand_tcp_link coordinates:
+  # T_base_sdk_flange = T_base_hand_tcp @ T_hand_tcp_sdk_flange.
   hand_tcp_to_flange:
     enabled: true
     T_hand_tcp_flange_rows:
-      - [1.0, 0.0, 0.0, -130.5]
-      - [0.0, 1.0, 0.0,    0.0]
-      - [0.0, 0.0, 1.0,   60.0]
-      - [0.0, 0.0, 0.0,    1.0]
+      - [ 0.995921716, -0.087619482,  0.021511897, -164.567832]
+      - [-0.089118123, -0.992545706,  0.083132319,   -3.149675]
+      - [ 0.014067531, -0.084710381, -0.996306306,   35.546126]
+      - [ 0.000000000,  0.000000000,  0.000000000,    1.000000]
 
 online_rgbd:
   # M36.3 caches exact RGB/D2C-depth pairs before Runtime inference returns.
@@ -635,7 +646,7 @@ m38_branch_a:
   front_depth_layer_minimum_fraction: 0.15
   front_depth_layer_minimum_near_points: 80
   minimum_front_layer_angular_coverage_deg: 135.0
-  minimum_front_layer_inlier_angular_coverage_deg: 135.0
+  minimum_front_layer_inlier_angular_coverage_deg: 112.5
 
   # A real front annulus must be observable around a sufficiently wide angular
   # span and must support one compact 3-D plane. Failure proceeds to M38.3 and
