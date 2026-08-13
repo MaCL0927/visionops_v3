@@ -1,11 +1,11 @@
-# M39.2.6 CLOCK-3 MANUAL ALIGNMENT TEST CONFIG
+# M39.2.9 CLOCK-3 MANUAL ALIGNMENT TEST CONFIG
 # TEST ONLY / NOT FOR AUTONOMOUS ROBOT EXECUTION.
 # Derived from line.yaml. It forces clock=3, enables nominal-wall fallback,
 # slightly relaxes the clean front-plane angular support gate, and disables
 # box/full-gripper hard collision gates so a human can manually align the flange.
 
-schema_version: "6.5"
-task: foam_ring_rim_pinch_m39_2_7_clock3_canonical_calibration
+schema_version: "6.6"
+task: foam_ring_rim_pinch_m39_2_9_clock3_canonical_calibration
 
 classes:
   foam_ring: foam_ring
@@ -453,17 +453,65 @@ quality:
   minimum_mouth_area_px: 80
   minimum_ring_area_px: 300
 
-# M39.2.7 CALIBRATION ONLY: keep visual XYZ from the measured geometry and do
-# not alter the pose plane.  Only the emitted grasp-frame orientation is made
-# deterministic below.
+# M39.2.9 Branch-A floor-constrained 2.5-D front-surface model.
+# The calibrated box floor owns the grasp normal. Raw RGB-D depth is used only
+# to separate the camera-near ring front from the deeper wall/floor layer and to
+# estimate the observed front-surface height. Measured RANSAC normal remains
+# diagnostic only and can never rotate the production grasp frame.
+branch_a_front_surface:
+  enabled: true
+  mode: floor_constrained
+  reference: calibrated_box_floor
+  require_reference: true
+
+  depth_layer:
+    kmeans_iterations: 24
+    minimum_center_gap_mm: 24.0
+    minimum_layer_fraction: 0.08
+    minimum_near_points: 80
+
+  height_estimation:
+    sector_count: 16
+    minimum_sector_points: 5
+    minimum_good_sectors: 4
+    preferred_good_sectors: 6
+    minimum_height_outlier_threshold_mm: 5.0
+    maximum_height_outlier_threshold_mm: 20.0
+    mad_scale: 3.0
+    point_fallback_enabled: true
+    minimum_point_fallback_count: 60
+    point_trim_low_percentile: 10
+    point_trim_high_percentile: 90
+    plane_inlier_threshold_mm: 8.0
+
+  measured_plane_diagnostic:
+    enabled: true
+    warning_disagreement_deg: 10.0
+    severe_disagreement_deg: 20.0
+
+# M39.2.8 measured-vs-floor competition is retained only for backward
+# compatibility/replay. It is disabled in M39.2.9 production.
+annulus_plane_selection:
+  enabled: false
+  reference: calibrated_box_floor
+  sector_count: 16
+  inlier_threshold_mm: 5.0
+  minimum_occupied_sectors: 6
+  minimum_good_sector_coverage_deg: 135.0
+  minimum_sector_inlier_ratio: 0.55
+  maximum_sector_residual_p90_mm: 6.0
+  measured_required_score_advantage_mm: 1.0
+  measured_required_score_ratio: 0.82
+  floor_parallel_rescue_enabled: true
+
+# Legacy M39.2.7 normal-only stabilization is intentionally disabled.
+# M39.2.9 directly constructs the final floor-constrained plane before contact/orientation construction.
 flat_ring_normal_stabilization:
   enabled: false
   reference: calibrated_box_floor
 
-# M39.2.7 clock-3 canonical orientation.  This intentionally uses the camera
-# optical axes used by the 10-sample tool-TF fit: clock=3 is exact camera +X
-# and approach is exact camera +Z. It removes per-frame 0~9 deg ring-normal
-# noise from manual SDK-flange calibration while preserving grasp-center XYZ.
+# Clock-3 manual calibration keeps the M39.2.9 final grasp-center XYZ, while
+# emitting the same canonical camera-axis orientation used by the fixed tool-TF fit.
 grasp_frame_orientation:
   mode: canonical_clock_camera_axes
   clock_hours: [3]

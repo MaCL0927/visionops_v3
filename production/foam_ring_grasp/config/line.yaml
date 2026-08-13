@@ -1,5 +1,5 @@
-schema_version: "6.5"
-task: foam_ring_rim_pinch_m39_2_left_robot_pose_transform
+schema_version: "6.6"
+task: foam_ring_rim_pinch_m39_2_9_floor_constrained_front_surface
 
 classes:
   foam_ring: foam_ring
@@ -447,29 +447,65 @@ quality:
   minimum_mouth_area_px: 80
   minimum_ring_area_px: 300
 
-# M39.2.7 production flat-ring normal stabilization.  Branch-A raw annulus
-# normals showed 0.9~8.5 deg location-dependent drift for rings that were
-# physically flat.  The calibrated shallow-box floor is a stable reference:
-# box +Z points into the box, so -box +Z is the ring normal toward the camera.
-# Only the near-flat neighborhood is snapped/blended; >=12 deg disagreement
-# remains fully measured so genuinely tilted/side rings are preserved.
-flat_ring_normal_stabilization:
+# M39.2.9 Branch-A floor-constrained 2.5-D front-surface model.
+# The calibrated box floor owns the grasp normal. Raw RGB-D depth is used only
+# to separate the camera-near ring front from the deeper wall/floor layer and to
+# estimate the observed front-surface height. Measured RANSAC normal remains
+# diagnostic only and can never rotate the production grasp frame.
+branch_a_front_surface:
   enabled: true
+  mode: floor_constrained
   reference: calibrated_box_floor
   require_reference: true
-  pose_strategies: [m38_1_front_annulus]
-  snap_max_reference_disagreement_deg: 9.0
-  preserve_measured_at_reference_disagreement_deg: 12.0
-  # 2-D ellipse aspect ratio is viewpoint-sensitive for this thick cylinder;
-  # keep it diagnostic only. Raw-vs-box 3-D normal disagreement is authoritative.
-  maximum_ellipse_tilt_for_stabilization_deg: 90.0
-  minimum_plane_inlier_ratio: 0.40
-  maximum_plane_residual_p95_mm: 7.0
-  reanchor_inlier_threshold_mm: 7.0
 
-# Production grasp-frame orientation follows the stabilized/measured 3-D ring
-# plane. Canonical orientation is reserved for the manual clock-3 calibration
-# config below and is never forced globally.
+  depth_layer:
+    kmeans_iterations: 24
+    minimum_center_gap_mm: 24.0
+    minimum_layer_fraction: 0.08
+    minimum_near_points: 80
+
+  height_estimation:
+    sector_count: 16
+    minimum_sector_points: 5
+    minimum_good_sectors: 4
+    preferred_good_sectors: 6
+    minimum_height_outlier_threshold_mm: 5.0
+    maximum_height_outlier_threshold_mm: 20.0
+    mad_scale: 3.0
+    point_fallback_enabled: true
+    minimum_point_fallback_count: 60
+    point_trim_low_percentile: 10
+    point_trim_high_percentile: 90
+    plane_inlier_threshold_mm: 8.0
+
+  measured_plane_diagnostic:
+    enabled: true
+    warning_disagreement_deg: 10.0
+    severe_disagreement_deg: 20.0
+
+# M39.2.8 measured-vs-floor competition is retained only for backward
+# compatibility/replay. It is disabled in M39.2.9 production.
+annulus_plane_selection:
+  enabled: false
+  reference: calibrated_box_floor
+  sector_count: 16
+  inlier_threshold_mm: 5.0
+  minimum_occupied_sectors: 6
+  minimum_good_sector_coverage_deg: 135.0
+  minimum_sector_inlier_ratio: 0.55
+  maximum_sector_residual_p90_mm: 6.0
+  measured_required_score_advantage_mm: 1.0
+  measured_required_score_ratio: 0.82
+  floor_parallel_rescue_enabled: true
+
+# Legacy M39.2.7 normal-only stabilization is intentionally disabled.
+# M39.2.9 directly constructs the final floor-constrained plane before contact/orientation construction.
+flat_ring_normal_stabilization:
+  enabled: false
+  reference: calibrated_box_floor
+
+# Production grasp-frame orientation follows the single M39.2.9 final floor-constrained plane.
+# Canonical orientation remains reserved for the clock-3 manual calibration config.
 grasp_frame_orientation:
   mode: measured
 

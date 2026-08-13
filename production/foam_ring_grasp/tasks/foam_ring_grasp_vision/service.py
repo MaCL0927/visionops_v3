@@ -552,6 +552,12 @@ class FoamRingOnlineService:
                 "preferred_clock_hours": scene.get("preferred_clock_hours"),
                 "selected_raw_tilt_deg": (selected_instance or {}).get("raw_tilt_deg"),
                 "selected_tilt_deg": (selected_instance or {}).get("tilt_deg"),
+                "selected_annulus_plane_selection": deepcopy(
+                    ((selected_instance or {}).get("m38_branch_a") or {}).get("annulus_plane_selection") or {}
+                ),
+                "selected_branch_a_front_surface": deepcopy(
+                    ((selected_instance or {}).get("m38_branch_a") or {}).get("front_surface") or {}
+                ),
                 "selected_flat_ring_normal_stabilization": deepcopy(
                     (selected_instance or {}).get("flat_ring_normal_stabilization") or {}
                 ),

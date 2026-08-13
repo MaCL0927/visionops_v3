@@ -64,9 +64,15 @@ def _load_box_calibration(raw_config: Dict[str, Any], config_path: Path) -> None
     if not isinstance(section, dict):
         return
     reference_cfg = raw_config.get("flat_ring_normal_stabilization") or {}
+    annulus_plane_cfg = raw_config.get("annulus_plane_selection") or {}
+    front_surface_cfg = raw_config.get("branch_a_front_surface") or {}
     orientation_cfg = raw_config.get("grasp_frame_orientation") or {}
     reference_needed = bool(
         isinstance(reference_cfg, dict) and reference_cfg.get("enabled", False)
+    ) or bool(
+        isinstance(annulus_plane_cfg, dict) and annulus_plane_cfg.get("enabled", False)
+    ) or bool(
+        isinstance(front_surface_cfg, dict) and front_surface_cfg.get("enabled", False)
     ) or bool(
         isinstance(orientation_cfg, dict)
         and str(orientation_cfg.get("mode") or "").strip().lower() == "canonical_clock_box_axes"

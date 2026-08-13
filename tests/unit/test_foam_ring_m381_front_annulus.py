@@ -186,7 +186,7 @@ def _synthetic_scene(*, flat_mouth: bool = False):
 def test_m381_production_configuration_enables_branch_a_with_m384_legacy_disabled() -> None:
     raw = load_yaml(LINE_CONFIG)
     hybrid = HybridGraspConfig.from_mapping(raw)
-    assert raw["schema_version"] == "6.5"
+    assert raw["schema_version"] == "6.6"
     assert hybrid.m38_branch_a_enabled is True
     assert hybrid.m38_branch_a_fallback_to_m36 is False
     assert hybrid.legacy_m36_enabled is False
@@ -206,8 +206,38 @@ def test_m381_clear_opening_uses_direct_3d_annulus_plane() -> None:
     assert item["plane"]["inlier_ratio"] == pytest.approx(1.0)
     normal = np.asarray(item["ring_axis_toward_camera"], dtype=np.float64)
     assert normal == pytest.approx(np.asarray([0.0, 0.0, -1.0]), abs=1e-6)
-    assert item["pose"]["normal_source"] == "m38_1_front_annulus_depth_plane"
+    assert item["pose"]["normal_source"] == "m39_2_8_sector_balanced_measured_annulus_plane"
 
+
+
+def test_m3928_final_plane_reconstructs_boundaries_contacts_and_orientation() -> None:
+    instances, depth, intrinsics = _synthetic_scene()
+    scene = analyze_scene(instances, depth, intrinsics, _geometry_config())
+    item = scene["instances"][0]
+    best = item["grasp"]["best_clock_candidate"]
+    assert best is not None
+
+    normal = np.asarray(item["pose"]["normal_toward_camera"], dtype=np.float64)
+    offset = float(item["pose"]["offset"])
+    approach = np.asarray(best["approach_vector_camera"], dtype=np.float64)
+    closing = np.asarray(best["closing_axis_camera"], dtype=np.float64)
+    np.testing.assert_allclose(approach, -normal, atol=1e-9)
+    assert abs(float(np.dot(closing, normal))) < 1e-9
+
+    for key in ("inner_boundary_camera_mm", "outer_boundary_camera_mm", "rim_plane_midpoint_camera_mm"):
+        point = np.asarray(best[key], dtype=np.float64)
+        assert abs(float(np.dot(normal, point) + offset)) < 1e-6
+
+    insert_depth = float(best["rim_insert_depth_mm"])
+    for key in ("inner_contact_camera_mm", "outer_contact_camera_mm"):
+        point = np.asarray(best[key], dtype=np.float64)
+        signed = float(np.dot(normal, point) + offset)
+        assert signed == pytest.approx(-insert_depth, abs=1e-6)
+
+    frame = best["grasp_frame_camera"]
+    np.testing.assert_allclose(frame["origin_camera_mm"], best["grasp_center_camera_mm"], atol=1e-9)
+    np.testing.assert_allclose(frame["x_closing_axis_camera"], closing, atol=1e-9)
+    np.testing.assert_allclose(frame["z_approach_axis_camera"], approach, atol=1e-9)
 
 def test_m3922_strong_two_layer_annulus_keeps_camera_near_front_face() -> None:
     height, width = 260, 360

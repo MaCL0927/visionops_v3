@@ -3345,6 +3345,347 @@ def _m38a_angular_coverage_deg(
     return 360.0 * float(len(occupied)) / float(sectors), len(occupied), occupied
 
 
+
+def _m3928_sector_indexes(
+    pixels_xy: np.ndarray,
+    center_uv: Tuple[float, float],
+    sector_count: int,
+) -> np.ndarray:
+    """Return deterministic angular-sector indexes around the ring opening."""
+    if pixels_xy.size == 0:
+        return np.empty((0,), dtype=np.int32)
+    sectors = max(8, int(sector_count))
+    dx = pixels_xy[:, 0].astype(np.float64) - float(center_uv[0])
+    dy = pixels_xy[:, 1].astype(np.float64) - float(center_uv[1])
+    angles = (np.arctan2(dy, dx) + 2.0 * math.pi) % (2.0 * math.pi)
+    indexes = np.floor(angles * float(sectors) / (2.0 * math.pi)).astype(np.int32)
+    return np.clip(indexes, 0, sectors - 1)
+
+
+def _m3928_sector_representatives(
+    points: np.ndarray,
+    pixels: np.ndarray,
+    center_uv: Tuple[float, float],
+    sector_count: int,
+) -> Tuple[np.ndarray, List[int], Dict[int, int]]:
+    """Collapse each occupied annulus sector to one robust 3-D representative.
+
+    One representative per angular sector gives every visible portion of the
+    annulus equal influence.  A locally dense crescent can therefore no longer
+    dominate the plane normal merely because it contributes many more depth
+    pixels than the opposite side of the ring.
+    """
+    if len(points) == 0 or len(points) != len(pixels):
+        return np.empty((0, 3), dtype=np.float64), [], {}
+    indexes = _m3928_sector_indexes(pixels, center_uv, sector_count)
+    rows: List[np.ndarray] = []
+    occupied: List[int] = []
+    counts: Dict[int, int] = {}
+    for sector in sorted(int(v) for v in np.unique(indexes)):
+        mask = indexes == sector
+        sector_points = np.asarray(points[mask], dtype=np.float64)
+        if len(sector_points) == 0:
+            continue
+        # Component-wise median is deliberately used instead of a mean so a
+        # D2C tail inside one sector cannot pull the representative in depth.
+        rows.append(np.median(sector_points, axis=0))
+        occupied.append(int(sector))
+        counts[int(sector)] = int(len(sector_points))
+    if not rows:
+        return np.empty((0, 3), dtype=np.float64), [], counts
+    return np.vstack(rows).astype(np.float64), occupied, counts
+
+
+def _m3928_plane_from_normal_and_sectors(
+    points: np.ndarray,
+    pixels: np.ndarray,
+    center_uv: Tuple[float, float],
+    sector_count: int,
+    normal: np.ndarray,
+    threshold_mm: float,
+) -> Tuple[Optional[PlaneModel], Dict[str, Any]]:
+    """Re-anchor a plane offset with equal angular-sector weighting."""
+    representatives, occupied, counts = _m3928_sector_representatives(
+        points, pixels, center_uv, sector_count
+    )
+    diagnostics: Dict[str, Any] = {
+        "occupied_sector_count": int(len(occupied)),
+        "occupied_sectors": list(occupied),
+        "sector_point_counts": {str(k): int(v) for k, v in counts.items()},
+        "representative_count": int(len(representatives)),
+    }
+    if len(representatives) < 3:
+        diagnostics["status"] = "insufficient_sector_representatives"
+        return None, diagnostics
+
+    normal = _normalize(np.asarray(normal, dtype=np.float64))
+    representative_centroid = np.median(representatives, axis=0)
+    if float(np.dot(normal, representative_centroid)) > 0.0:
+        normal = -normal
+
+    # Offset is the median of one offset per occupied sector, not the median of
+    # all raw depth pixels.  This is the key M39.2.8 XYZ-bias correction.
+    sector_offsets = -(representatives @ normal)
+    offset = float(np.median(sector_offsets))
+    full_residuals = np.abs(points @ normal + offset)
+    full_inliers = full_residuals <= float(threshold_mm)
+    if int(np.count_nonzero(full_inliers)) < 3:
+        full_inliers = np.ones(len(points), dtype=bool)
+    inlier_points = points[full_inliers]
+
+    # Use an equal-sector centroid for diagnostics/orientation sign as well.
+    rep_signed = representatives @ normal + offset
+    projected_representatives = representatives - rep_signed[:, None] * normal[None, :]
+    centroid = projected_representatives.mean(axis=0)
+    inlier_residuals = full_residuals[full_inliers]
+    plane = PlaneModel(
+        normal=normal,
+        offset=offset,
+        centroid=centroid,
+        inlier_mask=full_inliers,
+        inlier_ratio=float(np.count_nonzero(full_inliers)) / float(max(1, len(points))),
+        residual_median_mm=(
+            float(np.median(inlier_residuals)) if len(inlier_residuals) else float("inf")
+        ),
+        residual_p95_mm=(
+            float(np.percentile(inlier_residuals, 95)) if len(inlier_residuals) else float("inf")
+        ),
+    )
+
+    indexes = _m3928_sector_indexes(pixels, center_uv, sector_count)
+    sector_medians: List[float] = []
+    good_sectors: List[int] = []
+    for sector in occupied:
+        residual = full_residuals[indexes == sector]
+        if len(residual) == 0:
+            continue
+        value = float(np.median(residual))
+        sector_medians.append(value)
+        if value <= float(threshold_mm):
+            good_sectors.append(int(sector))
+    sector_medians_arr = np.asarray(sector_medians, dtype=np.float64)
+    sector_inlier_ratio = float(len(good_sectors)) / float(max(1, len(occupied)))
+    good_coverage_deg = 360.0 * float(len(good_sectors)) / float(max(8, int(sector_count)))
+    sector_median = (
+        float(np.median(sector_medians_arr)) if len(sector_medians_arr) else float("inf")
+    )
+    sector_p90 = (
+        float(np.percentile(sector_medians_arr, 90)) if len(sector_medians_arr) else float("inf")
+    )
+    # Equal-sector competition score: lower is better. Coverage is a penalty,
+    # not a point-count vote, so a dense local crescent cannot win by density.
+    score = float(
+        sector_p90
+        + 0.35 * sector_median
+        + float(threshold_mm) * 1.5 * (1.0 - sector_inlier_ratio)
+    )
+    diagnostics.update({
+        "status": "ok",
+        "normal_toward_camera": _json_vector(plane.normal),
+        "offset": float(plane.offset),
+        "point_inlier_ratio": float(plane.inlier_ratio),
+        "point_residual_median_mm": float(plane.residual_median_mm),
+        "point_residual_p95_mm": float(plane.residual_p95_mm),
+        "sector_residual_median_mm": float(sector_median),
+        "sector_residual_p90_mm": float(sector_p90),
+        "sector_inlier_ratio": float(sector_inlier_ratio),
+        "good_sector_coverage_deg": float(good_coverage_deg),
+        "good_sectors": list(good_sectors),
+        "competition_score": float(score),
+    })
+    return plane, diagnostics
+
+
+def _m3928_sector_balanced_measured_plane(
+    points: np.ndarray,
+    pixels: np.ndarray,
+    center_uv: Tuple[float, float],
+    sector_count: int,
+    threshold_mm: float,
+    config: GeometryConfig,
+) -> Tuple[Optional[PlaneModel], Dict[str, Any]]:
+    """Fit the measured annulus normal from one representative per sector."""
+    representatives, occupied, counts = _m3928_sector_representatives(
+        points, pixels, center_uv, sector_count
+    )
+    diagnostics: Dict[str, Any] = {
+        "fit_source": "sector_balanced_annulus",
+        "occupied_sector_count": int(len(occupied)),
+        "occupied_sectors": list(occupied),
+        "sector_point_counts": {str(k): int(v) for k, v in counts.items()},
+        "representative_count": int(len(representatives)),
+    }
+    if len(representatives) < 3:
+        diagnostics["status"] = "insufficient_sector_representatives"
+        return None, diagnostics
+    representative_plane = fit_plane_ransac(representatives, config)
+    if representative_plane is None:
+        diagnostics["status"] = "sector_representative_plane_fit_failed"
+        return None, diagnostics
+    plane, metrics = _m3928_plane_from_normal_and_sectors(
+        points,
+        pixels,
+        center_uv,
+        sector_count,
+        representative_plane.normal,
+        threshold_mm,
+    )
+    diagnostics.update(metrics)
+    diagnostics["representative_plane_normal_toward_camera"] = _json_vector(
+        representative_plane.normal
+    )
+    return plane, diagnostics
+
+
+def _m3928_hypothesis_acceptable(
+    diagnostics: Mapping[str, Any],
+    section: Mapping[str, Any],
+) -> bool:
+    if str(diagnostics.get("status") or "") != "ok":
+        return False
+    return bool(
+        _safe_int(diagnostics.get("occupied_sector_count"), 0)
+        >= _safe_int(section.get("minimum_occupied_sectors"), 6)
+        and _safe_float(diagnostics.get("good_sector_coverage_deg"), 0.0)
+        >= _safe_float(section.get("minimum_good_sector_coverage_deg"), 135.0)
+        and _safe_float(diagnostics.get("sector_inlier_ratio"), 0.0)
+        >= _safe_float(section.get("minimum_sector_inlier_ratio"), 0.55)
+        and _safe_float(diagnostics.get("sector_residual_p90_mm"), float("inf"))
+        <= _safe_float(section.get("maximum_sector_residual_p90_mm"), 6.0)
+    )
+
+
+def _m3928_select_annulus_plane(
+    points: np.ndarray,
+    pixels: np.ndarray,
+    center_uv: Tuple[float, float],
+    config: GeometryConfig,
+) -> Tuple[Optional[PlaneModel], Dict[str, Any]]:
+    """Compete measured and floor-parallel annulus-plane hypotheses.
+
+    M39.2.8 deliberately removes the M39.2.7 ``>12 deg => real tilt`` rule.
+    A measured tilt is retained only when it explains the sector-balanced 3-D
+    annulus materially better than a floor-parallel plane.  If measured fitting
+    fails but the floor hypothesis is supported, the floor plane rescues the
+    pair and downstream collision/safety checks still run normally.
+    """
+    section = config.section("annulus_plane_selection")
+    enabled = bool(section.get("enabled", True))
+    sector_count = max(8, _safe_int(section.get("sector_count"), 16))
+    plane_cfg = config.section("plane")
+    threshold_mm = _safe_float(
+        section.get("inlier_threshold_mm"),
+        _safe_float(plane_cfg.get("inlier_threshold_mm"), 5.0),
+    )
+    diagnostics: Dict[str, Any] = {
+        "enabled": enabled,
+        "policy": "m39_2_8_sector_balanced_dual_hypothesis",
+        "sector_count": int(sector_count),
+        "inlier_threshold_mm": float(threshold_mm),
+        "selected_hypothesis": None,
+        "floor_parallel_rescue_applied": False,
+    }
+    if len(points) < 3 or len(points) != len(pixels):
+        diagnostics["reason"] = "insufficient_annulus_points"
+        return None, diagnostics
+    if not enabled:
+        legacy = fit_plane_ransac(points, config)
+        diagnostics.update({
+            "policy": "legacy_raw_point_ransac",
+            "selected_hypothesis": "legacy_measured",
+            "reason": "annulus_plane_selection_disabled",
+        })
+        return legacy, diagnostics
+
+    measured_plane, measured_diag = _m3928_sector_balanced_measured_plane(
+        points, pixels, center_uv, sector_count, threshold_mm, config
+    )
+    diagnostics["measured"] = dict(measured_diag)
+
+    floor_plane: Optional[PlaneModel] = None
+    floor_diag: Dict[str, Any] = {"status": "reference_unavailable"}
+    axes = _box_reference_axes_camera(config)
+    if axes is not None:
+        _x_right, _y_down, z_inside = axes
+        floor_normal = -np.asarray(z_inside, dtype=np.float64)
+        floor_plane, floor_diag = _m3928_plane_from_normal_and_sectors(
+            points, pixels, center_uv, sector_count, floor_normal, threshold_mm
+        )
+        floor_diag["fit_source"] = "calibrated_box_floor_parallel_reanchored_to_annulus"
+    diagnostics["floor_parallel"] = dict(floor_diag)
+
+    measured_ok = bool(measured_plane is not None and _m3928_hypothesis_acceptable(measured_diag, section))
+    floor_ok = bool(floor_plane is not None and _m3928_hypothesis_acceptable(floor_diag, section))
+    diagnostics["measured_acceptable"] = measured_ok
+    diagnostics["floor_parallel_acceptable"] = floor_ok
+
+    disagreement = None
+    if measured_plane is not None and floor_plane is not None:
+        disagreement = _vector_angle_deg(measured_plane.normal, floor_plane.normal)
+        diagnostics["measured_vs_floor_normal_deg"] = float(disagreement)
+
+    selected: Optional[PlaneModel]
+    selected_name: Optional[str]
+    reason: str
+    rescue = False
+    if measured_ok and floor_ok:
+        measured_score = _safe_float(measured_diag.get("competition_score"), float("inf"))
+        floor_score = _safe_float(floor_diag.get("competition_score"), float("inf"))
+        advantage_mm = floor_score - measured_score
+        ratio = measured_score / max(floor_score, 1e-9)
+        required_advantage = _safe_float(section.get("measured_required_score_advantage_mm"), 1.0)
+        required_ratio = _safe_float(section.get("measured_required_score_ratio"), 0.82)
+        diagnostics.update({
+            "measured_score_advantage_mm": float(advantage_mm),
+            "measured_to_floor_score_ratio": float(ratio),
+            "measured_required_score_advantage_mm": float(required_advantage),
+            "measured_required_score_ratio": float(required_ratio),
+        })
+        if advantage_mm >= required_advantage and ratio <= required_ratio:
+            selected = measured_plane
+            selected_name = "measured"
+            reason = "measured_materially_better_than_floor_parallel"
+        else:
+            selected = floor_plane
+            selected_name = "floor_parallel"
+            reason = "floor_parallel_wins_or_is_statistically_indistinguishable"
+    elif measured_ok:
+        selected = measured_plane
+        selected_name = "measured"
+        reason = "floor_parallel_not_supported_by_annulus"
+    elif floor_ok and bool(section.get("floor_parallel_rescue_enabled", True)):
+        selected = floor_plane
+        selected_name = "floor_parallel"
+        reason = "floor_parallel_rescue_after_measured_failure"
+        rescue = True
+    elif floor_ok:
+        selected = floor_plane
+        selected_name = "floor_parallel"
+        reason = "floor_parallel_only_acceptable_hypothesis"
+    elif measured_plane is not None:
+        selected = measured_plane
+        selected_name = "measured"
+        reason = "no_hypothesis_passed_quality_gate_keep_measured_for_rejection_diagnostics"
+    else:
+        selected = floor_plane
+        selected_name = "floor_parallel" if floor_plane is not None else None
+        reason = "no_hypothesis_passed_quality_gate"
+
+    diagnostics.update({
+        "selected_hypothesis": selected_name,
+        "selection_reason": reason,
+        "floor_parallel_rescue_applied": bool(rescue),
+        "selected_acceptable": bool(
+            (selected_name == "measured" and measured_ok)
+            or (selected_name == "floor_parallel" and floor_ok)
+        ),
+    })
+    if selected is not None:
+        diagnostics["selected_normal_toward_camera"] = _json_vector(selected.normal)
+        diagnostics["selected_offset"] = float(selected.offset)
+    return selected, diagnostics
+
+
 def _m3922_select_front_depth_layer(
     points: np.ndarray,
     pixels: np.ndarray,
@@ -3461,6 +3802,344 @@ def _m3922_select_front_depth_layer(
         }
     )
     return selected_points, selected_pixels, diagnostics
+
+
+def _m3929_1d_two_cluster_split(
+    values: np.ndarray,
+    *,
+    iterations: int = 24,
+) -> Tuple[np.ndarray, float, float]:
+    """Deterministic 1-D two-cluster split used by the Branch-A depth layer model.
+
+    The M39.2.2 largest-gap rule is intentionally retained elsewhere for legacy
+    configurations.  M39.2.9 uses a two-center model instead because the real
+    Orbbec annulus depth often contains a short transition tail between the ring
+    front and the box-floor/inner-wall layer.  That tail can erase one large
+    sorted gap even when the two physical depth populations remain obvious.
+    """
+    data = np.asarray(values, dtype=np.float64).reshape(-1)
+    if len(data) < 2:
+        return np.zeros(len(data), dtype=np.int32), float("nan"), float("nan")
+    lo = float(np.percentile(data, 20.0))
+    hi = float(np.percentile(data, 80.0))
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi - lo < 1e-9:
+        center = float(np.median(data)) if len(data) else float("nan")
+        return np.zeros(len(data), dtype=np.int32), center, center
+    centers = np.asarray([lo, hi], dtype=np.float64)
+    labels = np.zeros(len(data), dtype=np.int32)
+    for _ in range(max(1, int(iterations))):
+        distances = np.abs(data[:, None] - centers[None, :])
+        new_labels = np.argmin(distances, axis=1).astype(np.int32)
+        new_centers = centers.copy()
+        for index in (0, 1):
+            group = data[new_labels == index]
+            if len(group):
+                # A median center is more resistant to D2C tails than a mean.
+                new_centers[index] = float(np.median(group))
+        if np.array_equal(new_labels, labels) and np.allclose(new_centers, centers, atol=1e-6):
+            labels = new_labels
+            centers = new_centers
+            break
+        labels = new_labels
+        centers = new_centers
+    if centers[0] > centers[1]:
+        labels = 1 - labels
+        centers = centers[::-1]
+    return labels, float(centers[0]), float(centers[1])
+
+
+def _m3929_select_front_depth_layer(
+    points: np.ndarray,
+    pixels: np.ndarray,
+    config: GeometryConfig,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """Select the camera-near Branch-A layer along the calibrated box normal.
+
+    M39.2.9 treats the calibrated box ``+Z_inside`` axis as known geometry.
+    Therefore depth-layer separation is one-dimensional: smaller coordinate
+    along ``+Z_inside`` is closer to the camera/opening.  This is more robust
+    than asking a noisy annulus cloud to estimate a free 3-D plane normal.
+    """
+    section = config.section("branch_a_front_surface")
+    layer_cfg = section.get("depth_layer") or {}
+    raw_count = int(len(points))
+    diagnostics: Dict[str, Any] = {
+        "enabled": bool(section.get("enabled", False)),
+        "policy": "m39_2_9_box_normal_1d_two_cluster_front_layer",
+        "raw_point_count": raw_count,
+        "selected_point_count": raw_count,
+        "applied": False,
+        "reason": "not_evaluated",
+    }
+    axes = _box_reference_axes_camera(config)
+    if not diagnostics["enabled"]:
+        diagnostics["reason"] = "m39_2_9_front_surface_disabled"
+        return points, pixels, diagnostics
+    if axes is None:
+        diagnostics["reason"] = "calibrated_box_reference_unavailable"
+        return points, pixels, diagnostics
+    if raw_count < 3 or raw_count != int(len(pixels)):
+        diagnostics["reason"] = "insufficient_or_mismatched_points"
+        return points, pixels, diagnostics
+
+    _x_right, _y_down, z_inside = axes
+    z_inside = _normalize(np.asarray(z_inside, dtype=np.float64))
+    depth_inside = np.asarray(points, dtype=np.float64) @ z_inside
+    labels, near_center, far_center = _m3929_1d_two_cluster_split(
+        depth_inside,
+        iterations=max(4, _safe_int(layer_cfg.get("kmeans_iterations"), 24)),
+    )
+    near_mask = labels == 0
+    near_count = int(np.count_nonzero(near_mask))
+    far_count = int(raw_count - near_count)
+    near_fraction = float(near_count) / float(max(1, raw_count))
+    far_fraction = float(far_count) / float(max(1, raw_count))
+    center_gap = float(far_center - near_center) if np.isfinite(far_center - near_center) else 0.0
+    minimum_gap = max(1.0, _safe_float(layer_cfg.get("minimum_center_gap_mm"), 24.0))
+    minimum_fraction = float(
+        np.clip(_safe_float(layer_cfg.get("minimum_layer_fraction"), 0.08), 0.01, 0.45)
+    )
+    minimum_near_points = max(20, _safe_int(layer_cfg.get("minimum_near_points"), 80))
+    diagnostics.update({
+        "axis": "calibrated_box_z_inside",
+        "near_center_mm": float(near_center),
+        "far_center_mm": float(far_center),
+        "center_gap_mm": float(center_gap),
+        "near_point_count": near_count,
+        "far_point_count": far_count,
+        "near_fraction": float(near_fraction),
+        "far_fraction": float(far_fraction),
+        "minimum_center_gap_mm": float(minimum_gap),
+        "minimum_layer_fraction": float(minimum_fraction),
+        "minimum_near_points": int(minimum_near_points),
+    })
+
+    split_supported = bool(
+        center_gap >= minimum_gap
+        and near_count >= minimum_near_points
+        and near_fraction >= minimum_fraction
+        and far_fraction >= minimum_fraction
+    )
+    if not split_supported:
+        diagnostics["reason"] = "two_layer_split_not_strong_enough_keep_all_points"
+        return points, pixels, diagnostics
+
+    selected_points = points[near_mask]
+    selected_pixels = pixels[near_mask]
+    diagnostics.update({
+        "applied": True,
+        "selected_point_count": int(len(selected_points)),
+        "selected_inside_depth_min_mm": float(np.min(depth_inside[near_mask])),
+        "selected_inside_depth_max_mm": float(np.max(depth_inside[near_mask])),
+        "reason": "supported_near_far_layers_use_camera_near_cluster",
+    })
+    return selected_points, selected_pixels, diagnostics
+
+
+def _m3929_floor_constrained_front_surface(
+    points: np.ndarray,
+    pixels: np.ndarray,
+    center_uv: Tuple[float, float],
+    config: GeometryConfig,
+) -> Tuple[Optional[PlaneModel], Dict[str, Any]]:
+    """Build the Branch-A final plane from floor normal + observed ring height.
+
+    Normal is a calibrated physical prior, not an estimated annulus variable.
+    Raw depth contributes only the one remaining degree of freedom: front-face
+    offset/height.  Angular sectors are used as robust equal-weight height
+    samples; bad sectors are removed by MAD and never become a hard plane-normal
+    quality gate.
+    """
+    section = config.section("branch_a_front_surface")
+    height_cfg = section.get("height_estimation") or {}
+    diag_cfg = section.get("measured_plane_diagnostic") or {}
+    diagnostics: Dict[str, Any] = {
+        "enabled": bool(section.get("enabled", False)),
+        "mode": str(section.get("mode") or "floor_constrained"),
+        "policy": "m39_2_9_floor_normal_plus_observed_front_height",
+        "normal_source": "calibrated_box_floor",
+        "height_source": None,
+        "status": "not_evaluated",
+    }
+    if not diagnostics["enabled"]:
+        diagnostics["status"] = "disabled"
+        return None, diagnostics
+    if len(points) < 3 or len(points) != len(pixels):
+        diagnostics["status"] = "insufficient_front_layer_points"
+        return None, diagnostics
+    axes = _box_reference_axes_camera(config)
+    if axes is None:
+        diagnostics["status"] = "calibrated_box_reference_unavailable"
+        return None, diagnostics
+
+    _x_right, _y_down, z_inside = axes
+    normal = -_normalize(np.asarray(z_inside, dtype=np.float64))
+    # Plane normal must face the camera origin, matching fit_plane_ransac.
+    if float(np.dot(normal, np.median(points, axis=0))) > 0.0:
+        normal = -normal
+
+    sector_count = max(8, _safe_int(height_cfg.get("sector_count"), 16))
+    minimum_sector_points = max(1, _safe_int(height_cfg.get("minimum_sector_points"), 5))
+    minimum_good_sectors = max(3, _safe_int(height_cfg.get("minimum_good_sectors"), 4))
+    preferred_good_sectors = max(
+        minimum_good_sectors,
+        _safe_int(height_cfg.get("preferred_good_sectors"), 6),
+    )
+    minimum_outlier_mm = max(
+        0.5,
+        _safe_float(height_cfg.get("minimum_height_outlier_threshold_mm"), 5.0),
+    )
+    mad_scale = max(1.0, _safe_float(height_cfg.get("mad_scale"), 3.0))
+    maximum_outlier_mm = max(
+        minimum_outlier_mm,
+        _safe_float(height_cfg.get("maximum_height_outlier_threshold_mm"), 20.0),
+    )
+    indexes = _m3928_sector_indexes(pixels, center_uv, sector_count)
+    front_coordinates = np.asarray(points, dtype=np.float64) @ normal
+    sector_rows: List[Dict[str, Any]] = []
+    sector_values: List[float] = []
+    for sector in sorted(int(value) for value in np.unique(indexes)):
+        mask = indexes == sector
+        count = int(np.count_nonzero(mask))
+        if count < minimum_sector_points:
+            continue
+        value = float(np.median(front_coordinates[mask]))
+        sector_values.append(value)
+        sector_rows.append({"sector": int(sector), "point_count": count, "front_coordinate_mm": value})
+
+    sector_arr = np.asarray(sector_values, dtype=np.float64)
+    robust_center = float(np.median(sector_arr)) if len(sector_arr) else float("nan")
+    mad = (
+        float(np.median(np.abs(sector_arr - robust_center)))
+        if len(sector_arr)
+        else float("nan")
+    )
+    robust_sigma = 1.4826 * mad if np.isfinite(mad) else float("nan")
+    outlier_threshold = min(
+        maximum_outlier_mm,
+        max(
+            minimum_outlier_mm,
+            mad_scale * robust_sigma if np.isfinite(robust_sigma) else minimum_outlier_mm,
+        ),
+    )
+    good_mask = (
+        np.abs(sector_arr - robust_center) <= outlier_threshold
+        if len(sector_arr)
+        else np.zeros((0,), dtype=bool)
+    )
+    good_values = sector_arr[good_mask]
+    good_rows = [row for row, good in zip(sector_rows, good_mask.tolist()) if good]
+    rejected_rows = [row for row, good in zip(sector_rows, good_mask.tolist()) if not good]
+
+    front_coordinate: Optional[float] = None
+    height_source: Optional[str] = None
+    fallback_used = False
+    if len(good_values) >= minimum_good_sectors:
+        front_coordinate = float(np.median(good_values))
+        height_source = "sector_median_mad"
+    elif bool(height_cfg.get("point_fallback_enabled", True)):
+        low = float(np.clip(_safe_float(height_cfg.get("point_trim_low_percentile"), 10.0), 0.0, 49.0))
+        high = float(np.clip(_safe_float(height_cfg.get("point_trim_high_percentile"), 90.0), 51.0, 100.0))
+        lower = float(np.percentile(front_coordinates, low))
+        upper = float(np.percentile(front_coordinates, high))
+        trimmed = front_coordinates[(front_coordinates >= lower) & (front_coordinates <= upper)]
+        minimum_fallback_points = max(
+            20,
+            _safe_int(height_cfg.get("minimum_point_fallback_count"), 60),
+        )
+        if len(trimmed) >= minimum_fallback_points:
+            front_coordinate = float(np.median(trimmed))
+            height_source = "trimmed_point_median_fallback"
+            fallback_used = True
+
+    diagnostics.update({
+        "sector_count": int(sector_count),
+        "minimum_sector_points": int(minimum_sector_points),
+        "sector_height_sample_count": int(len(sector_arr)),
+        "good_sector_count": int(len(good_values)),
+        "preferred_good_sectors": int(preferred_good_sectors),
+        "minimum_good_sectors": int(minimum_good_sectors),
+        "sector_front_coordinate_median_mm": robust_center if np.isfinite(robust_center) else None,
+        "sector_front_coordinate_mad_mm": mad if np.isfinite(mad) else None,
+        "sector_height_outlier_threshold_mm": float(outlier_threshold),
+        "maximum_height_outlier_threshold_mm": float(maximum_outlier_mm),
+        "sector_samples": sector_rows,
+        "good_sectors": [int(row["sector"]) for row in good_rows],
+        "rejected_sectors": [int(row["sector"]) for row in rejected_rows],
+        "point_fallback_used": bool(fallback_used),
+    })
+    if front_coordinate is None:
+        diagnostics["status"] = "front_height_unreliable"
+        return None, diagnostics
+
+    offset = -float(front_coordinate)
+    residuals = np.abs(np.asarray(points, dtype=np.float64) @ normal + offset)
+    inlier_threshold = max(
+        1.0,
+        _safe_float(height_cfg.get("plane_inlier_threshold_mm"), 8.0),
+    )
+    inlier_mask = residuals <= inlier_threshold
+    if int(np.count_nonzero(inlier_mask)) < 3:
+        # Height was already robustly determined. Keep a valid PlaneModel for
+        # downstream ray intersections while recording that point support is weak.
+        inlier_mask = np.ones(len(points), dtype=bool)
+    projected = np.asarray(points, dtype=np.float64) - (
+        (np.asarray(points, dtype=np.float64) @ normal + offset)[:, None] * normal[None, :]
+    )
+    centroid = np.median(projected, axis=0)
+    inlier_residuals = residuals[inlier_mask]
+    plane = PlaneModel(
+        normal=normal,
+        offset=float(offset),
+        centroid=centroid,
+        inlier_mask=inlier_mask,
+        inlier_ratio=float(np.count_nonzero(inlier_mask)) / float(max(1, len(points))),
+        residual_median_mm=float(np.median(inlier_residuals)) if len(inlier_residuals) else float("inf"),
+        residual_p95_mm=float(np.percentile(inlier_residuals, 95)) if len(inlier_residuals) else float("inf"),
+    )
+
+    measured_diag: Dict[str, Any] = {"enabled": bool(diag_cfg.get("enabled", True)), "available": False}
+    if measured_diag["enabled"]:
+        measured = fit_plane_ransac(points, config)
+        if measured is not None:
+            disagreement = _vector_angle_deg(measured.normal, normal)
+            warn_at = max(0.0, _safe_float(diag_cfg.get("warning_disagreement_deg"), 10.0))
+            severe_at = max(warn_at, _safe_float(diag_cfg.get("severe_disagreement_deg"), 20.0))
+            status = (
+                "depth_normal_severely_unreliable"
+                if disagreement >= severe_at
+                else "depth_normal_unreliable"
+                if disagreement >= warn_at
+                else "depth_normal_consistent"
+            )
+            measured_diag.update({
+                "available": True,
+                "status": status,
+                "normal_toward_camera": _json_vector(measured.normal),
+                "measured_vs_floor_deg": float(disagreement),
+                "inlier_ratio": float(measured.inlier_ratio),
+                "residual_median_mm": float(measured.residual_median_mm),
+                "residual_p95_mm": float(measured.residual_p95_mm),
+                "warning_disagreement_deg": float(warn_at),
+                "severe_disagreement_deg": float(severe_at),
+            })
+        else:
+            measured_diag["status"] = "measured_plane_fit_failed"
+
+    diagnostics.update({
+        "status": "ok",
+        "height_source": height_source,
+        "front_coordinate_mm": float(front_coordinate),
+        "final_normal_toward_camera": _json_vector(plane.normal),
+        "final_offset": float(plane.offset),
+        "final_centroid_camera_mm": _json_vector(plane.centroid),
+        "point_inlier_ratio": float(plane.inlier_ratio),
+        "point_residual_median_mm": float(plane.residual_median_mm),
+        "point_residual_p95_mm": float(plane.residual_p95_mm),
+        "plane_inlier_threshold_mm": float(inlier_threshold),
+        "measured_plane_diagnostic": measured_diag,
+    })
+    return plane, diagnostics
 
 
 def _m38a_ellipse_boundary_quality(ellipse: Mapping[str, Any]) -> Dict[str, float]:
@@ -3596,11 +4275,19 @@ def _m38a_front_annulus_pose(
     )
     pixel_count = int(np.count_nonzero(annulus_mask))
     valid_ratio = float(len(raw_points)) / float(max(1, pixel_count))
-    points, pixels, front_layer = _m3922_select_front_depth_layer(
-        raw_points,
-        raw_pixels,
-        section,
-    )
+    m3929_enabled = bool(config.section("branch_a_front_surface").get("enabled", False))
+    if m3929_enabled:
+        points, pixels, front_layer = _m3929_select_front_depth_layer(
+            raw_points,
+            raw_pixels,
+            config,
+        )
+    else:
+        points, pixels, front_layer = _m3922_select_front_depth_layer(
+            raw_points,
+            raw_pixels,
+            section,
+        )
     front_layer_mask = np.zeros_like(annulus_mask, dtype=bool)
     if len(pixels):
         front_layer_mask[pixels[:, 1], pixels[:, 0]] = True
@@ -3635,14 +4322,59 @@ def _m38a_front_annulus_pose(
     if bool(front_layer.get("applied")) and coverage_deg < _safe_float(
         section.get("minimum_front_layer_angular_coverage_deg"), 135.0
     ):
-        reasons.append("m3922_front_layer_angular_coverage_too_small")
+        if m3929_enabled:
+            # M39.2.9 does not use front-layer angular coverage as a free-normal
+            # plane qualification gate. Height support is judged by robust
+            # sector medians inside _m3929_floor_constrained_front_surface.
+            warnings.append("m3929_front_layer_angular_coverage_below_preferred")
+        else:
+            reasons.append("m3922_front_layer_angular_coverage_too_small")
 
-    plane = fit_plane_ransac(points, config) if len(points) >= 3 else None
+    if m3929_enabled:
+        plane, front_surface = _m3929_floor_constrained_front_surface(
+            points,
+            pixels,
+            tuple(ellipse["center_uv"]),
+            config,
+        ) if len(points) >= 3 else (None, {
+            "enabled": True,
+            "policy": "m39_2_9_floor_normal_plus_observed_front_height",
+            "status": "insufficient_front_layer_points",
+        })
+        annulus_plane_selection: Dict[str, Any] = {
+            "enabled": False,
+            "policy": "superseded_by_m39_2_9_floor_constrained_front_surface",
+            "selected_hypothesis": "floor_constrained" if plane is not None else None,
+            "selected_acceptable": bool(plane is not None),
+            "selection_reason": "m39_2_9_front_surface" if plane is not None else "m39_2_9_front_surface_failed",
+            "floor_parallel_rescue_applied": False,
+        }
+    else:
+        plane, annulus_plane_selection = _m3928_select_annulus_plane(
+            points,
+            pixels,
+            tuple(ellipse["center_uv"]),
+            config,
+        ) if len(points) >= 3 else (None, {
+            "enabled": True,
+            "policy": "m39_2_8_sector_balanced_dual_hypothesis",
+            "selected_hypothesis": None,
+            "selected_acceptable": False,
+            "selection_reason": "insufficient_annulus_points",
+            "floor_parallel_rescue_applied": False,
+        })
+        front_surface = {}
     inlier_coverage_deg = 0.0
     inlier_occupied_count = 0
     inlier_occupied: List[int] = []
     if plane is None:
-        reasons.append("m38a_annulus_plane_fit_failed")
+        if m3929_enabled:
+            if str(front_surface.get("status") or "") == "calibrated_box_reference_unavailable":
+                reasons.append("m3929_calibrated_box_reference_unavailable")
+            else:
+                reasons.append("m3929_front_surface_depth_unreliable")
+        else:
+            reasons.append("m3928_annulus_plane_selection_failed")
     else:
         inlier_pixels = pixels[plane.inlier_mask]
         (
@@ -3654,27 +4386,45 @@ def _m38a_front_annulus_pose(
             tuple(ellipse["center_uv"]),
             sector_count,
         )
-        minimum_inlier_ratio = _safe_float(
-            section.get("minimum_plane_inlier_ratio"),
-            max(0.40, _safe_float(plane_cfg.get("minimum_inlier_ratio"), 0.34)),
-        )
-        if plane.inlier_ratio < minimum_inlier_ratio:
-            reasons.append("m38a_annulus_plane_inlier_ratio_too_low")
-        if plane.residual_p95_mm > _safe_float(
-            section.get("maximum_plane_residual_p95_mm"), 7.0
-        ):
-            reasons.append("m38a_annulus_plane_residual_too_high")
+        # M39.2.9 deliberately removes the M39.2.8 hypothesis hard gate.
+        # Sector statistics are now robust height evidence, not permission for
+        # an independently estimated plane normal to exist.
+        if (not m3929_enabled) and not bool(annulus_plane_selection.get("selected_acceptable", False)):
+            reasons.append("m3928_annulus_plane_hypothesis_quality_failed")
         minimum_inlier_coverage = (
             _safe_float(section.get("minimum_front_layer_inlier_angular_coverage_deg"), 135.0)
             if bool(front_layer.get("applied"))
             else _safe_float(section.get("minimum_inlier_angular_coverage_deg"), 150.0)
         )
         if inlier_coverage_deg < minimum_inlier_coverage:
-            reasons.append("m38a_annulus_inlier_angular_coverage_too_small")
+            if m3929_enabled:
+                warnings.append("m3929_front_surface_inlier_coverage_below_preferred")
+            else:
+                reasons.append("m38a_annulus_inlier_angular_coverage_too_small")
+        if (not m3929_enabled) and bool(annulus_plane_selection.get("floor_parallel_rescue_applied", False)):
+            warnings.append("m3928_floor_parallel_rescue_applied")
+
+        if m3929_enabled:
+            measured_diag = front_surface.get("measured_plane_diagnostic") or {}
+            measured_status = str(measured_diag.get("status") or "")
+            if measured_status == "depth_normal_unreliable":
+                warnings.append("m3929_measured_depth_normal_disagrees_with_floor_reference")
+            elif measured_status == "depth_normal_severely_unreliable":
+                warnings.append("m3929_measured_depth_normal_severely_disagrees_with_floor_reference")
 
     diagnostics: Dict[str, Any] = {
         "strategy": "m38_1_front_annulus",
-        "normal_source": "m38_1_front_annulus_depth_plane",
+        "normal_source": (
+            "m39_2_9_calibrated_box_floor"
+            if m3929_enabled and plane is not None
+            else "m39_2_8_floor_parallel_annulus_plane"
+            if annulus_plane_selection.get("selected_hypothesis") == "floor_parallel"
+            else "m39_2_8_sector_balanced_measured_annulus_plane"
+            if annulus_plane_selection.get("selected_hypothesis") == "measured"
+            else "m39_2_9_front_surface_unresolved"
+            if m3929_enabled
+            else "m39_2_8_annulus_plane_unresolved"
+        ),
         "opening_clear": bool(len(reasons) == 0 and plane is not None),
         "association_mode": association_mode,
         "mouth_containment": float(containment),
@@ -3698,6 +4448,8 @@ def _m38a_front_annulus_pose(
         "inlier_occupied_sector_count": int(inlier_occupied_count),
         "inlier_occupied_sectors": inlier_occupied,
         "front_depth_layer": front_layer,
+        "front_surface": front_surface,
+        "annulus_plane_selection": annulus_plane_selection,
         "depth_edge_threshold_mm": float(depth_edge_threshold),
         "normal_disagreement_deg": 0.0,
         "pose_conflict_signals": [],
@@ -4033,23 +4785,59 @@ def analyze_ring_pair(
     flat_normal_diagnostics: Dict[str, Any] = {
         "enabled": False,
         "applied": False,
-        "mode": "not_run",
+        "mode": (
+            "superseded_by_m39_2_9_floor_constrained_front_surface"
+            if bool(config.section("branch_a_front_surface").get("enabled", False))
+            else "superseded_by_m39_2_8_annulus_plane_selection"
+        ),
     }
     if pose_strategy == "m38_1_front_annulus":
-        pose_plane, flat_normal_diagnostics = _stabilize_flat_ring_pose_plane(
-            pose_plane,
-            points,
-            ellipse,
-            intrinsics,
-            config,
-            pose_strategy,
-        )
-        pose_diagnostics["flat_ring_normal_stabilization"] = dict(flat_normal_diagnostics)
-        if bool(flat_normal_diagnostics.get("applied")):
-            pose_diagnostics["normal_source_before_flat_stabilization"] = str(
-                pose_diagnostics.get("normal_source") or "m38_1_front_annulus_depth_plane"
+        m3929_enabled = bool(config.section("branch_a_front_surface").get("enabled", False))
+        # M39.2.9 keeps the old measured plane strictly as a diagnostic cue.
+        # The final production plane already contains the calibrated floor normal
+        # and the observed front height, so all downstream XYZ/orientation/collision
+        # geometry consumes the same constrained plane.
+        if m3929_enabled:
+            surface_diag = pose_diagnostics.get("front_surface") or {}
+            measured_diag = (
+                surface_diag.get("measured_plane_diagnostic") or {}
+                if isinstance(surface_diag, Mapping)
+                else {}
             )
-            pose_diagnostics["normal_source"] = "m39_2_7_box_floor_stabilized"
+            selection_diag: Mapping[str, Any] = {}
+        else:
+            selection_diag = pose_diagnostics.get("annulus_plane_selection") or {}
+            measured_diag = selection_diag.get("measured") or {} if isinstance(selection_diag, Mapping) else {}
+        measured_normal = measured_diag.get("normal_toward_camera") if isinstance(measured_diag, Mapping) else None
+        if measured_normal is not None:
+            try:
+                raw_pose_normal = _normalize(np.asarray(measured_normal, dtype=np.float64))
+            except (TypeError, ValueError):
+                raw_pose_normal = np.asarray(pose_plane.normal, dtype=np.float64).copy()
+        flat_normal_diagnostics = {
+            "enabled": False,
+            "applied": False,
+            "mode": (
+                "superseded_by_m39_2_9_floor_constrained_front_surface"
+                if m3929_enabled
+                else "superseded_by_m39_2_8_dual_hypothesis"
+            ),
+            "selected_hypothesis": (
+                "floor_constrained"
+                if m3929_enabled
+                else selection_diag.get("selected_hypothesis")
+                if isinstance(selection_diag, Mapping)
+                else None
+            ),
+            "floor_parallel_rescue_applied": bool(
+                False
+                if m3929_enabled
+                else selection_diag.get("floor_parallel_rescue_applied", False)
+                if isinstance(selection_diag, Mapping)
+                else False
+            ),
+        }
+        pose_diagnostics["flat_ring_normal_stabilization"] = dict(flat_normal_diagnostics)
 
     center_uv = tuple(ellipse["center_uv"])
     center_camera = (
@@ -4069,6 +4857,8 @@ def analyze_ring_pair(
     camera_axis = np.asarray([0.0, 0.0, 1.0], dtype=np.float64)
     tilt_cos = float(np.clip(abs(np.dot(pose_plane.normal, camera_axis)), 0.0, 1.0))
     tilt_deg = math.degrees(math.acos(tilt_cos))
+    raw_tilt_cos = float(np.clip(abs(np.dot(raw_pose_normal, camera_axis)), 0.0, 1.0))
+    raw_tilt_deg = math.degrees(math.acos(raw_tilt_cos))
     candidate_tilt_limit = _safe_float(gripper_cfg.get("geometry_candidate_max_tilt_deg"), 45.0)
     if tilt_deg > candidate_tilt_limit:
         reasons.append("tilt_exceeds_geometry_candidate_limit")
@@ -4210,9 +5000,7 @@ def analyze_ring_pair(
         "approach_vector_camera": _json_vector(approach),
         "tilt_deg": float(tilt_deg),
         "raw_ring_axis_toward_camera": _json_vector(raw_pose_normal),
-        "raw_tilt_deg": float(
-            flat_normal_diagnostics.get("raw_tilt_deg", tilt_deg)
-        ),
+        "raw_tilt_deg": float(raw_tilt_deg),
         "flat_ring_normal_stabilization": dict(flat_normal_diagnostics),
         "neighbor_3d_point_clouds": neighbor_cloud_summary,
         "mouth_major_mm": mouth_major_mm,

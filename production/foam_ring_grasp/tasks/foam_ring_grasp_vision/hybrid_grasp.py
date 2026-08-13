@@ -160,6 +160,16 @@ def _m384_terminal_reason(
         for item in m38b_fit_records
         for reason in item.get("rejection_reasons") or []
     )
+    front_surface_depth_failed = any(
+        any(
+            str(reason) in {
+                "m3929_front_surface_depth_unreliable",
+                "m3929_calibrated_box_reference_unavailable",
+            }
+            for reason in item.get("rejection_reasons") or []
+        )
+        for item in m38a_pair_results
+    )
 
     collision = _full_candidate_outcome(m38a_scene)
     second = _full_candidate_outcome(m38b_scene)
@@ -183,6 +193,14 @@ def _m384_terminal_reason(
             "开口观测不足，无法确认内夹爪入口",
             "REJECT: OPENING NOT CLEAR",
             "Collision check not reached",
+            collision,
+        )
+    if front_surface_depth_failed:
+        return (
+            "m38_c_front_surface_depth_unreliable",
+            "开口已检测到，但圆环前表面深度不足或箱体参考不可用",
+            "REJECT: FRONT DEPTH UNRELIABLE",
+            "Opening detected; front-surface depth/reference failed before collision check",
             collision,
         )
     if clear_opening_observed or partial_pose_observed:
