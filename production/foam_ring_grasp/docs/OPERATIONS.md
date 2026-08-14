@@ -1,18 +1,13 @@
-# Production Operations — M39.4.0.1
+# Production Operations — M39.4.1
 
-## 1. 整目录替换后预检
+## 1. 预检
 
 ```bash
 cd /opt/visionops_v3
 python3 production/foam_ring_grasp/scripts/verify_production.py
 ```
 
-预检会同时检查：
-
-- clock-3-only；
-- hand-eye / `robot_default_base` / `left_link7`；
-- M39.4.0.1 已启用；
-- M39.4.0.1 仍为 diagnostic-only，机器人路由关闭。
+预检会检查 clock-3-only、hand-eye、M39.4.0.1、M39.4.1 validation-only 契约。
 
 ## 2. 启动
 
@@ -21,98 +16,80 @@ bash production/foam_ring_grasp/scripts/start_rgb_runtime.sh
 bash production/foam_ring_grasp/scripts/start_online_service.sh
 ```
 
-`start_online_service.sh` 会在启动 19213 前再次执行生产预检。
-
-## 3. 现场验证
-
-建议继续使用同一个脚本：
+## 3. 一键验证
 
 ```bash
 python3 production/foam_ring_grasp/scripts/detect_move_validate.py --execute
 ```
 
-### 3.1 Visible-mouth
+Visible-mouth FLAT/TILTED 保持原机器人流程。
 
-保持已有行为：
-
-```text
-Enter → vision → FLAT/TILTED route check → LEFT_LINK7 check
-      → second Enter → robot grasp cycle
-```
-
-### 3.2 No-mouth pure-side
-
-M39.4.0.1 检出后终端会打印：
+侧躺分支打印：
 
 ```text
-M39.4.0.1 SIDE-LYING AXIS RECOVERY [VALIDATION ONLY]
-axis_reliable
+M39.4.1 CAMERA-FACING ARC + SIDE OPENING FRAME [VALIDATION ONLY]
 axis_image_angle_deg
-axis_camera_undirected
-axis_score_margin
-radial residual med/p90
-center_height_error_mm
-endpoint A/B uv
-entry_endpoint
-entry_selection_rule
-entry_wall_clearance_mm
-robot motion: DISABLED BY M39.4.0.1 CONTRACT
+arc residual med/p90
+arc inlier/raw ratio
+arc span
+opening support status / drop ratio
+opening center camera
+opening shift vs M39.4.0.1 nominal endpoint
+preview grasp center
+frame +X closing
+frame +Y lateral
+frame +Z insertion
+frame quaternion
+robot motion: DISABLED
 ```
-
-即使脚本带 `--execute`，该分支也会直接结束本轮，不执行机械臂运动。
 
 ## 4. Debug 文件
 
-`save_debug=true` 时目录：
+保存目录：
 
 ```text
-/opt/visionops_v3/data/foam_ring_online_geometry/<capture_timestamp_ms>/
+/opt/visionops_v3/data/foam_ring_online_geometry/<timestamp>/
 ```
 
-M39.4.0.1 新增：
+M39.4.1 新增：
 
 ```text
-m39_4_0_side_axis_recovery.json
+m39_4_1_side_opening_reconstruction.json
 ```
 
-同时 `online_geometry_overlay.jpg` 会画：
+`online_geometry_overlay.jpg` 会叠加：
 
-- 恢复的 opening axis；
-- A/B 两个理论端面中心；
-- 最终 entry endpoint；
-- axis angle / score margin；
+- M39.4.0.1 side axis；
+- reconstructed opening center；
+- preview grasp center；
+- `+X close`；
+- `+Z insert`；
+- arc span / opening support drop；
 - `robot=OFF`。
 
-常用查看：
+常用：
 
 ```bash
 LATEST=$(ls -dt /opt/visionops_v3/data/foam_ring_online_geometry/* | head -1)
-ls -lh "$LATEST"
-jq '.scene.m39_4_0_side_axis_recovery' "$LATEST/online_geometry_result.json"
+jq '.scene.m39_4_1_side_opening_reconstruction' "$LATEST/online_geometry_result.json"
 ```
 
-## 5. 当前 M39.4.0.1 质量门限
+## 5. 当前质量门槛
 
-主要门限位于 `line.yaml -> m39_4_0_side_axis_recovery`：
+`line.yaml -> m39_4_1_side_opening_reconstruction` 主要检查：
 
-- pseudo-mouth ellipse axis ratio（默认 `<=0.50` 回流侧躺分支）；
-- quick two-axis margin（只决定是否启动双轴完整拟合，不再直接拒绝）；
-- dual-seed full-geometry score margin；
-- fixed-radius radial median / p90；
-- radial inlier ratio；
-- center-height warning（只影响 `center_reliable`）；
-- vertical-axis threshold。
+- camera-facing arc clean support；
+- fixed-radius residual median / p90；
+- camera-facing arc angular span；
+- raw contamination 不得严重到失去目标圆柱证据；
+- selected-end axial support drop。
 
-出现 `axis_uncertain` 时优先检查 full-geometry margin 与 radial quality；`center_reliable=false` 本身不代表轴线错误。
+M39.4.0.1 的 `center_height_error_mm` 不参与 M39.4.1 PASS/FAIL。
 
-## 6. 暂不处理
+## 6. 当前明确不做
 
-以下情况继续拒绝：
-
-- 一头翘起；
-- 明显 Z 向倾斜；
-- 深度缺失/大面积污染；
-- 双轴完整拟合后 full-geometry 仍无法拉开差距；
-- 圆柱半径残差不符合已知 85 mm 外径。
-
-这些属于 M39.4 后续阶段，不在 M39.4.0.1 内增加复杂 fallback。
+- 侧躺机器人运动；
+- inner-finger 实际孔内包络验证；
+- outer-finger / 邻环 / 箱壁完整碰撞；
+- PREGRASP→ENTRY→GRASP swept-volume；
+- 一头翘起 / axis 有明显 Z 倾角的侧躺圆环。

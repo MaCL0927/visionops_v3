@@ -1,12 +1,13 @@
 # Foam ring production configuration
-# Current scope at M39.4.0.1:
+# Current scope at M39.4.1:
 #   - real ring_mouth visible: frozen FLAT + TILTED production grasp
-#   - no mouth or side-view pseudo mouth: side-axis recovery, validation only
-#   - side-lying robot motion remains disabled until M39.4.1
+#   - no mouth or side-view pseudo mouth: M39.4.0.1 side-axis recovery
+#   - reliable side axis: camera-facing arc + selected-end opening reconstruction
+#   - M39.4.1 remains validation-only; side-lying robot motion is disabled
 #   - grasp direction for visible-mouth production: 3 o'clock only
 # Historical stage-tuning configs stay outside production.
-schema_version: '6.8'
-task: foam_ring_grasp_m39_4_0_1_side_topology_axis_rescue
+schema_version: '6.9'
+task: foam_ring_grasp_m39_4_1_side_opening_frame
 classes:
   foam_ring: foam_ring
   ring_mouth: ring_mouth
@@ -470,6 +471,42 @@ m39_4_0_side_axis_recovery:
   minimum_radial_inlier_ratio: 0.85
   center_height_warning_mm: 20.0
   vertical_axis_threshold_deg_from_vertical: 20.0
+m39_4_1_side_opening_reconstruction:
+  enabled: true
+  mode: online_validation_only
+  robot_routing_enabled: false
+  ring_mask_erode_px: 1
+  neighbor_exclusion_dilate_px: 1
+  depth_edge_threshold_mm: 20.0
+  depth_edge_dilate_px: 1
+  minimum_surface_points: 180
+  central_axis_fraction: 0.60
+  front_envelope_axial_bins: 12
+  front_envelope_quantile: 0.20
+  front_envelope_band_mm: 12.0
+  minimum_arc_points: 120
+  arc_fit_huber_delta_mm: 4.0
+  arc_fit_iterations: 12
+  arc_refit_gate_mm: 8.0
+  minimum_arc_refit_points: 100
+  arc_inlier_threshold_mm: 5.0
+  maximum_arc_residual_median_mm: 3.0
+  maximum_arc_residual_p90_mm: 6.0
+  minimum_arc_inlier_count: 120
+  minimum_camera_facing_arc_points: 100
+  minimum_camera_facing_radial_component: 0.05
+  minimum_arc_inlier_ratio: 0.80
+  minimum_raw_arc_inlier_ratio: 0.65
+  minimum_arc_span_deg: 45.0
+  opening_shell_tolerance_mm: 6.0
+  opening_support_bin_mm: 2.0
+  opening_reference_inward_min_mm: 10.0
+  opening_reference_inward_max_mm: 28.0
+  opening_transition_window_mm: 14.0
+  maximum_opening_drop_ratio: 0.65
+  minimum_opening_reference_support: 8.0
+  preview_insertion_depth_mm: 18.0
+  frame_axis_draw_length_mm: 30.0
 grasp_frame_orientation:
   mode: measured
 robot_pose_transform:

@@ -86,12 +86,23 @@ def _visible_mouth_scope(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise RuntimeError("M39.4.0.1 side-view mouth axis-ratio gate is outside validated range")
     if float(side_axis.get("dual_seed_refine_quick_margin_below", 0.0)) <= 0.0:
         raise RuntimeError("M39.4.0.1 dual-seed rescue threshold must be positive")
+    side_opening = _mapping(
+        raw.get("m39_4_1_side_opening_reconstruction") or {},
+        "m39_4_1_side_opening_reconstruction",
+    )
+    if not bool(side_opening.get("enabled", False)):
+        raise RuntimeError("M39.4.1 side opening reconstruction must be enabled")
+    if bool(side_opening.get("robot_routing_enabled", True)):
+        raise RuntimeError("M39.4.1 must remain validation-only: robot_routing_enabled=false")
+    if str(side_opening.get("mode") or "") != "online_validation_only":
+        raise RuntimeError("M39.4.1 mode must be online_validation_only")
     return {
         "status": "ok",
         "visible_mouth_branch": "enabled",
-        "side_no_mouth": "M39.4.0.1_axis_recovery_validation_only",
+        "side_no_mouth": "M39.4.0.1_axis_recovery",
         "pseudo_mouth": "M39.4.0.1_geometry_reroute_to_side_axis",
-        "side_robot_motion": "disabled_until_M39.4.1",
+        "side_opening": "M39.4.1_camera_facing_arc_opening_frame_validation_only",
+        "side_robot_motion": "disabled",
     }
 
 

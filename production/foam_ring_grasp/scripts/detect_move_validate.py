@@ -522,6 +522,44 @@ def print_vision_summary(
 
 
 
+
+def print_m3941_side_opening_summary(data: Mapping[str, Any]) -> bool:
+    summary = data.get("scene_summary") if isinstance(data.get("scene_summary"), Mapping) else {}
+    m3941 = summary.get("m39_4_1_side_opening_reconstruction") if isinstance(summary, Mapping) else None
+    if not isinstance(m3941, Mapping) or not bool(m3941.get("executed", False)):
+        return False
+    fit = m3941.get("selected") if isinstance(m3941.get("selected"), Mapping) else m3941.get("diagnostic")
+    if not isinstance(fit, Mapping):
+        fit = {}
+    arc = fit.get("camera_facing_outer_arc") if isinstance(fit.get("camera_facing_outer_arc"), Mapping) else {}
+    support = fit.get("opening_support") if isinstance(fit.get("opening_support"), Mapping) else {}
+    frame = fit.get("side_grasp_frame_camera") if isinstance(fit.get("side_grasp_frame_camera"), Mapping) else {}
+    print("\n" + "=" * 78)
+    print("M39.4.1 CAMERA-FACING ARC + SIDE OPENING FRAME [VALIDATION ONLY]")
+    print("=" * 78)
+    print(f"request_id               : {data.get('request_id')}")
+    print(f"status                   : {m3941.get('status')}")
+    print(f"ring_instance_id         : {fit.get('ring_instance_id')}")
+    print(f"entry_endpoint           : {fit.get('entry_endpoint')}")
+    print(f"axis_image_angle_deg     : {fit.get('axis_image_angle_deg_0_180')}")
+    print(f"arc residual med/p90     : {arc.get('residual_median_mm')} / {arc.get('residual_p90_mm')} mm")
+    print(f"arc inlier/raw ratio     : {arc.get('arc_inlier_ratio')} / {arc.get('raw_arc_inlier_ratio')}")
+    print(f"arc span                 : {arc.get('arc_span_deg_p5_p95')} deg")
+    print(f"opening support status   : {support.get('status')}")
+    print(f"opening drop ratio       : {support.get('drop_ratio')}")
+    print(f"opening center camera    : {fit.get('opening_center_camera_mm')}")
+    print(f"opening shift vs nominal : {fit.get('opening_shift_vs_m39401_nominal_endpoint_mm')} mm")
+    print(f"preview grasp center     : {fit.get('preview_grasp_center_camera_mm')}")
+    print(f"frame +X closing         : {frame.get('x_closing_axis_camera')}")
+    print(f"frame +Y lateral         : {frame.get('y_lateral_axis_camera')}")
+    print(f"frame +Z insertion       : {frame.get('z_approach_axis_camera')}")
+    print(f"frame quaternion xyzw    : {frame.get('quaternion_xyzw')}")
+    print(f"rejection_reasons        : {fit.get('rejection_reasons')}")
+    print(f"warnings                 : {fit.get('warnings')}")
+    print("robot motion             : DISABLED BY M39.4.1 CONTRACT")
+    print("=" * 78)
+    return True
+
 def print_m3940_side_axis_summary(data: Mapping[str, Any]) -> bool:
     summary = data.get("scene_summary") if isinstance(data.get("scene_summary"), Mapping) else {}
     m3940 = summary.get("m39_4_0_side_axis_recovery") if isinstance(summary, Mapping) else None
@@ -578,6 +616,7 @@ def print_debug_artifacts(data: Mapping[str, Any]) -> None:
         ("ROUTING", "m39_3_4_1_tilted_production_routing"),
         ("MOUTH TOPO", "m39_4_0_1_mouth_topology_arbitration"),
         ("SIDE AXIS", "m39_4_0_side_axis_recovery"),
+        ("SIDE OPEN", "m39_4_1_side_opening_reconstruction"),
     ]
     rows = []
     for label, key in wanted:
@@ -669,7 +708,7 @@ def execute_cycle(robot: RobotClient, pre_pose: Sequence[float], grasp_pose: Seq
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="M39.4.0 side-axis diagnostic + visible-mouth LEFT robot motion validation")
+    parser = argparse.ArgumentParser(description="M39.4.1 side-opening frame validation + visible-mouth LEFT robot motion validation")
     parser.add_argument(
         "--execute",
         action="store_true",
@@ -705,7 +744,7 @@ def main() -> int:
 
     mode = "EXECUTE" if args.execute else "DRY-RUN"
     print("=" * 78)
-    print(f"M39.4.0.1 SIDE TOPOLOGY/AXIS + VISIBLE-MOUTH PRODUCTION VALIDATION [{mode}]")
+    print(f"M39.4.1 SIDE OPENING FRAME + VISIBLE-MOUTH PRODUCTION VALIDATION [{mode}]")
     print("Enter : trigger vision")
     print("After vision: " + ("safe result executes immediately (--single-enter)" if args.single_enter else "Enter to execute robot motion, 'c' to cancel"))
     print("q     : quit")
@@ -737,11 +776,17 @@ def main() -> int:
                 print("\n>>> TRIGGERING VISION...")
                 data = trigger_vision(vision_session, save_debug=not args.no_save_debug)
                 log_path = save_result(data)
-                if data.get("target_found") is not True and print_m3940_side_axis_summary(data):
-                    print(f"vision JSON saved         : {log_path}")
-                    print_debug_artifacts(data)
-                    print("M39.4.0.1 is diagnostic-only: this side-lying target will NOT move the robot.")
-                    continue
+                if data.get("target_found") is not True:
+                    if print_m3941_side_opening_summary(data):
+                        print(f"vision JSON saved         : {log_path}")
+                        print_debug_artifacts(data)
+                        print("M39.4.1 is validation-only: this side-lying target will NOT move the robot.")
+                        continue
+                    if print_m3940_side_axis_summary(data):
+                        print(f"vision JSON saved         : {log_path}")
+                        print_debug_artifacts(data)
+                        print("M39.4.0.1 is diagnostic-only: this side-lying target will NOT move the robot.")
+                        continue
                 route_info = validate_m39341_production_route(
                     data,
                     minimum_tilted_deg=float(args.min_tilted_deg),

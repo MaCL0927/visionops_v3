@@ -42,3 +42,11 @@
 - `line.yaml` 只新增一段 M39.4.0.1 参数，不重新引入历史大段配置。
 - `detect_move_validate.py` 统一承担 visible-mouth robot validation 与 M39.4.0.1 diagnostic 输出，不新增阶段性测试脚本。
 - 新分支严格 `robot_routing_enabled=false`，M39.4.1 前不生成侧躺机器人抓取点。
+
+## M39.4.1 增量
+
+- 新增 `tasks/foam_ring_grasp_vision/side_opening_reconstruction.py`，只负责 camera-facing outer arc、selected-end opening plane 与 Side Grasp Frame。
+- 不恢复任何已清理的历史 side-ring 脚本或大段配置。
+- `line.yaml` 仅新增紧凑的 `m39_4_1_side_opening_reconstruction` 参数段。
+- `detect_move_validate.py` 继续作为唯一现场验证脚本；M39.4.1 只打印几何结果，不允许机器人运动。
+- M39.4.0.1 的 floor-resting center 仅保留诊断含义，M39.4.1 不依赖箱底高度。

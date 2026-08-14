@@ -503,11 +503,18 @@ class FoamRingOnlineService:
         routing = scene.get("m39_3_4_1_tilted_production_routing") if isinstance(scene.get("m39_3_4_1_tilted_production_routing"), Mapping) else {}
         m39401_topology = scene.get("m39_4_0_1_mouth_topology_arbitration") if isinstance(scene.get("m39_4_0_1_mouth_topology_arbitration"), Mapping) else {}
         m3940 = scene.get("m39_4_0_side_axis_recovery") if isinstance(scene.get("m39_4_0_side_axis_recovery"), Mapping) else {}
+        m3941 = scene.get("m39_4_1_side_opening_reconstruction") if isinstance(scene.get("m39_4_1_side_opening_reconstruction"), Mapping) else {}
         routing_reject = bool(routing.get("terminal_reject", False))
         m3940_reject = bool(m3940.get("executed", False) and m3940.get("terminal_reject", True))
+        m3941_reject = bool(m3941.get("executed", False) and m3941.get("terminal_reject", True))
         branch_c_reject = bool(branch_c.get("fast_terminated", False))
-        terminal_reject = bool(m3940_reject or branch_c_reject or routing_reject)
-        if m3940_reject:
+        terminal_reject = bool(m3941_reject or m3940_reject or branch_c_reject or routing_reject)
+        if m3941_reject:
+            terminal_reject_reason = m3941.get("reason")
+            terminal_reject_message = m3941.get("display_reason_detail") or m3941.get("reason")
+            terminal_reject_display = m3941.get("display_reason_short")
+            operator_action = m3941.get("operator_action")
+        elif m3940_reject:
             terminal_reject_reason = m3940.get("reason")
             terminal_reject_message = m3940.get("display_reason_detail") or m3940.get("reason")
             terminal_reject_display = m3940.get("display_reason_short")
@@ -538,7 +545,9 @@ class FoamRingOnlineService:
             time.monotonic() - job.submitted_monotonic
         ) * 1000.0
         selected_branch = (
-            m3940.get("selected_grasp_branch")
+            m3941.get("selected_grasp_branch")
+            if bool(m3941.get("executed", False))
+            else m3940.get("selected_grasp_branch")
             if bool(m3940.get("executed", False))
             else hybrid.get("selected_branch") or scene.get("selected_grasp_branch") or "none"
         )
@@ -617,6 +626,9 @@ class FoamRingOnlineService:
                 ),
                 "m39_4_0_side_axis_recovery": deepcopy(
                     scene.get("m39_4_0_side_axis_recovery") or {}
+                ),
+                "m39_4_1_side_opening_reconstruction": deepcopy(
+                    scene.get("m39_4_1_side_opening_reconstruction") or {}
                 ),
                 "production_surface_state": (candidate or {}).get("production_surface_state") if isinstance(candidate, Mapping) else None,
                 "production_surface_route": deepcopy((candidate or {}).get("production_surface_route") or {}) if isinstance(candidate, Mapping) else {},

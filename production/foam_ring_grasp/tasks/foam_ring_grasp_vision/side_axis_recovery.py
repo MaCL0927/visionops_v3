@@ -2,7 +2,7 @@
 
 Scope is deliberately narrow and diagnostic-only:
 - no matched ``ring_mouth`` / no production grasp candidate;
-- the ring is assumed to lie on the calibrated box floor (axis in box XY);
+- the pure-side axis is constrained to calibrated box XY; the ring may be elevated/stacked;
 - recover an *undirected* cylinder axis from RGB silhouette + exact aligned depth;
 - reconstruct the two nominal opening centres and select the preferred entry end;
 - do NOT create a robot grasp candidate.  M39.4.1 will own insertion/collision routing.
@@ -683,6 +683,8 @@ def recover_pure_side_axis(
         "axis_reliable": bool(axis_reliable),
         "center_reliable": bool(center_reliable),
         "center_status": "RELIABLE" if center_reliable else "UNRELIABLE_WARNING_ONLY",
+        "floor_resting_consistent": bool(center_reliable),
+        "support_state_diagnostic": "FLOOR_RESTING_LIKE" if center_reliable else "ELEVATED_STACKED_OR_CENTER_UNCERTAIN",
         "axis_camera_undirected": _json_vector(axis),
         "axis_box_angle_deg": _axis_box_angle_deg(axis, box),
         "axis_image_angle_deg_0_180": float(image_angle),
