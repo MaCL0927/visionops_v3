@@ -33,13 +33,13 @@ fi
 
 cd "${REPO_ROOT}"
 
-echo "[M39.2] resolved config: ${CONFIG_PATH}"
-echo "[M39.2] preflight robot-pose transform verification..."
+echo "[foam_ring] resolved config: ${CONFIG_PATH}"
+echo "[foam_ring] production preflight..."
 "${PYTHON_BIN}" \
-  production/foam_ring_grasp/scripts/verify_m39_2_robot_pose_transform.py \
+  production/foam_ring_grasp/scripts/verify_production.py \
   --config "${CONFIG_PATH}"
 
-echo "[M39.2] starting online service with verified config"
+echo "[foam_ring] starting online service"
 exec "${PYTHON_BIN}" -m \
   production.foam_ring_grasp.tasks.foam_ring_grasp_vision.service \
   "${ARGS[@]}" \

@@ -380,7 +380,7 @@ class FoamRingOnlineService:
                     prepared,
                     save_debug=job.save_debug,
                     generate_overlay=bool(self.settings["latest_overlay_enabled"]),
-                    stage="M39.2_left_robot_pose_transform_persistent_trigger_service",
+                    stage="M39.3.1_online_tilt_diagnostic_persistent_trigger_service",
                     geometry_queue_wait_ms=geometry_wait_ms,
                 )
                 service_processing_ms = max(
@@ -500,6 +500,14 @@ class FoamRingOnlineService:
         if not isinstance(runtime_timing, Mapping):
             runtime_timing = {}
         candidate = payload.get("candidate") if isinstance(payload.get("candidate"), Mapping) else None
+        routing = scene.get("m39_3_4_1_tilted_production_routing") if isinstance(scene.get("m39_3_4_1_tilted_production_routing"), Mapping) else {}
+        routing_reject = bool(routing.get("terminal_reject", False))
+        branch_c_reject = bool(branch_c.get("fast_terminated", False))
+        terminal_reject = bool(branch_c_reject or routing_reject)
+        terminal_reject_reason = (routing.get("reason") if routing_reject else branch_c.get("decision"))
+        terminal_reject_message = (routing.get("reason") if routing_reject else branch_c.get("reason"))
+        terminal_reject_display = (routing.get("display_reason_short") if routing_reject else branch_c.get("display_reason_short"))
+        operator_action = (routing.get("operator_action") if routing_reject else branch_c.get("operator_action"))
         selected_instance = None
         selected_ring_id = scene.get("selected_ring_instance_id")
         if selected_ring_id is not None:
@@ -518,19 +526,19 @@ class FoamRingOnlineService:
         return {
             "schema_version": "1.0",
             "message_type": "foam_ring_trigger_result",
-            "stage": str(payload.get("stage") or "M39.2_left_robot_pose_transform_persistent_trigger_service"),
+            "stage": str(payload.get("stage") or "M39.3.1_online_tilt_diagnostic_persistent_trigger_service"),
             "status": "ok",
             "request_id": job.request_id,
             "idempotent_replay": False,
             "target_found": candidate is not None,
             "selected_grasp_branch": hybrid.get("selected_branch") or scene.get("selected_grasp_branch") or "none",
             "fallback_triggered": bool(hybrid.get("fallback_triggered", False)),
-            "terminal_reject": bool(branch_c.get("fast_terminated", False)),
-            "terminal_reject_reason": branch_c.get("decision"),
-            "terminal_reject_message": branch_c.get("reason"),
-            "terminal_reject_display": branch_c.get("display_reason_short"),
+            "terminal_reject": terminal_reject,
+            "terminal_reject_reason": terminal_reject_reason,
+            "terminal_reject_message": terminal_reject_message,
+            "terminal_reject_display": terminal_reject_display,
             "collision_check_performed": branch_c.get("collision_check_performed"),
-            "operator_action": branch_c.get("operator_action"),
+            "operator_action": operator_action,
             "robot_pose_transform_ready": bool(payload.get("robot_pose_transform_ready", False)),
             "robot_ready": False,
             "robot_ready_reason": payload.get("robot_ready_reason"),
@@ -558,6 +566,35 @@ class FoamRingOnlineService:
                 "selected_branch_a_front_surface": deepcopy(
                     ((selected_instance or {}).get("m38_branch_a") or {}).get("front_surface") or {}
                 ),
+                "selected_m39_3_1_tilt_evidence": deepcopy(
+                    ((selected_instance or {}).get("m38_branch_a") or {}).get("m39_3_1_tilt_evidence") or {}
+                ),
+                "m39_3_1_tilt_evidence_summary": deepcopy(
+                    scene.get("m39_3_1_tilt_evidence") or {}
+                ),
+                "selected_m39_3_2_ring_prior_surface": deepcopy(
+                    ((selected_instance or {}).get("m38_branch_a") or {}).get("m39_3_2_ring_prior_surface") or {}
+                ),
+                "m39_3_2_ring_prior_surface_summary": deepcopy(
+                    scene.get("m39_3_2_ring_prior_surface") or {}
+                ),
+                "selected_m39_3_3_conic_ring_surface": deepcopy(
+                    ((selected_instance or {}).get("m38_branch_a") or {}).get("m39_3_3_conic_ring_surface") or {}
+                ),
+                "m39_3_3_conic_ring_surface_summary": deepcopy(
+                    scene.get("m39_3_3_conic_ring_surface") or {}
+                ),
+                "selected_m39_3_4_analytic_conic_surface": deepcopy(
+                    ((selected_instance or {}).get("m38_branch_a") or {}).get("m39_3_4_analytic_conic_surface") or {}
+                ),
+                "m39_3_4_analytic_conic_surface_summary": deepcopy(
+                    scene.get("m39_3_4_analytic_conic_surface") or {}
+                ),
+                "m39_3_4_1_tilted_production_routing": deepcopy(
+                    scene.get("m39_3_4_1_tilted_production_routing") or {}
+                ),
+                "production_surface_state": (candidate or {}).get("production_surface_state") if isinstance(candidate, Mapping) else None,
+                "production_surface_route": deepcopy((candidate or {}).get("production_surface_route") or {}) if isinstance(candidate, Mapping) else {},
                 "selected_flat_ring_normal_stabilization": deepcopy(
                     (selected_instance or {}).get("flat_ring_normal_stabilization") or {}
                 ),
@@ -571,12 +608,12 @@ class FoamRingOnlineService:
                 "adaptive_fallback_used": geometry_optimization.get("adaptive_fallback_used"),
                 "early_exit_triggered": geometry_optimization.get("early_exit_triggered"),
                 "selected_grasp_branch": hybrid.get("selected_branch") or scene.get("selected_grasp_branch"),
-                "terminal_reject": bool(branch_c.get("fast_terminated", False)),
-                "terminal_reject_reason": branch_c.get("decision"),
-                "terminal_reject_message": branch_c.get("reason"),
-                "terminal_reject_display": branch_c.get("display_reason_short"),
+                "terminal_reject": terminal_reject,
+                "terminal_reject_reason": terminal_reject_reason,
+                "terminal_reject_message": terminal_reject_message,
+                "terminal_reject_display": terminal_reject_display,
                 "collision_check_performed": branch_c.get("collision_check_performed"),
-                "operator_action": branch_c.get("operator_action"),
+                "operator_action": operator_action,
                 "m38_5_candidate_found": hybrid.get("m38_5_candidate_found"),
                 "m38_5_selected_ring_instance_id": branch_d.get("selected_ring_instance_id"),
                 "m38_5_robot_ready": branch_d.get("robot_ready"),
@@ -604,6 +641,7 @@ class FoamRingOnlineService:
                 "polygon_to_mask_ms": timing.get("polygon_to_mask_ms"),
                 "geometry_ms": timing.get("geometry_ms"),
                 "robot_pose_transform_ms": timing.get("robot_pose_transform_ms"),
+                "m39_3_4_1_tilted_production_routing_ms": timing.get("m39_3_4_1_tilted_production_routing_ms"),
                 "association_prepass_ms": hybrid_timing.get("association_prepass_ms"),
                 "depth_preselection_ms": hybrid_timing.get("depth_preselection_ms"),
                 "depth_layer_build_ms": hybrid_timing.get("depth_layer_build_ms"),

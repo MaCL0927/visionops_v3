@@ -31,7 +31,10 @@ if str(REPO_ROOT) not in sys.path:
 from production.common.runtime_ipc import RuntimeIpcClient  # noqa: E402
 from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.geometry import (  # noqa: E402
     GeometryConfig,
+    _box_reference_axes_camera,
     analyze_scene,
+    depth_pixels_to_points,
+    fit_plane_ransac,
 )
 from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.hybrid_grasp import (  # noqa: E402
     HybridGraspConfig,
@@ -58,8 +61,18 @@ from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.visualization impor
     depth_colormap,
     draw_overlay,
 )
-from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.side_ring_offline_validate import (  # noqa: E402
+from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.side_ring_overlay import (  # noqa: E402
     draw_side_ring_fit_overlay,
+)
+from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.analytic_conic_surface import (  # noqa: E402
+    reconstruct_analytic_conic_surface,
+)
+from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.tilted_production_routing import (  # noqa: E402
+    apply_m39341_tilted_production_routing,
+)
+from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.tilt_evidence import (  # noqa: E402
+    analyze_tilt_evidence,
+    build_tilt_core_mask,
 )
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "line.yaml"
@@ -279,6 +292,287 @@ class PreparedOnlineGeometry:
     depth_geometry: np.ndarray
     intrinsics: Dict[str, float]
     capture_timestamp_ms: int
+
+
+def _m3931_error_evidence(reason: str) -> Dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "stage": "M39.3.1_online_tilt_evidence",
+        "mode": "online_diagnostic_only",
+        "production_routing_enabled": False,
+        "state": "ERROR",
+        "confidence": "none",
+        "classification_reason": str(reason),
+        "signals": ["diagnostic_unavailable"],
+    }
+
+
+def _attach_m3931_online_tilt_diagnostics(
+    scene: Dict[str, Any],
+    instances: list[Any],
+    depth_geometry: np.ndarray,
+    intrinsics: Mapping[str, float],
+    *,
+    raw_config: Mapping[str, Any],
+    geometry_config: GeometryConfig,
+) -> Dict[str, Any]:
+    """Attach M39.3.1 tilt evidence without changing production geometry.
+
+    This function is intentionally fail-open for the existing M39.2.9 grasp
+    route: every detector failure is serialized as diagnostic ERROR only.
+    It must never mutate ``eligible``, ``robot_candidate``, final plane, clock,
+    collision decisions, or LEFT_LINK7 output.
+    """
+    online_cfg = raw_config.get("m39_3_1_tilt_evidence") or {}
+    enabled = bool(isinstance(online_cfg, Mapping) and online_cfg.get("enabled", False))
+    summary: Dict[str, Any] = {
+        "enabled": enabled,
+        "mode": "online_diagnostic_only",
+        "production_routing_enabled": False,
+        "candidate_count": 0,
+        "state_counts": {"FLAT": 0, "TILTED": 0, "UNCERTAIN": 0, "ERROR": 0},
+        "selected_ring_instance_id": scene.get("selected_ring_instance_id"),
+        "selected": None,
+    }
+    if not enabled:
+        summary["status"] = "disabled"
+        scene["m39_3_1_tilt_evidence"] = summary
+        return summary
+
+    source_name = str(online_cfg.get("detector_config_source") or "m39_3_0_tilt_evidence")
+    detector_cfg = raw_config.get(source_name) or {}
+    if not isinstance(detector_cfg, Mapping):
+        detector_cfg = {}
+    axes = _box_reference_axes_camera(geometry_config)
+    if axes is None:
+        summary["status"] = "calibrated_box_reference_unavailable"
+        scene["m39_3_1_tilt_evidence"] = summary
+        return summary
+    box_x, box_y, z_inside = axes
+
+    by_id = {}
+    for instance in instances:
+        try:
+            by_id[int(instance.instance_id)] = instance
+        except Exception:
+            continue
+    depth_cfg = geometry_config.section("depth")
+    minimum_depth = float(depth_cfg.get("minimum_mm", 150.0))
+    maximum_depth = float(depth_cfg.get("maximum_mm", 3000.0))
+    core_cfg = detector_cfg.get("core_mask") or {}
+    selected_ring_id = scene.get("selected_ring_instance_id")
+    selected_target_only = bool(online_cfg.get("selected_target_only", False))
+    summary["selected_target_only"] = selected_target_only
+    fallback_taken = False
+
+    for item in scene.get("instances") or []:
+        if not isinstance(item, dict) or str(item.get("pose_strategy") or "") != "m38_1_front_annulus":
+            continue
+        if selected_target_only:
+            ring_value = item.get("ring_instance_id")
+            if selected_ring_id is not None:
+                try:
+                    if ring_value is None or int(ring_value) != int(selected_ring_id):
+                        continue
+                except Exception:
+                    continue
+            elif fallback_taken:
+                continue
+            else:
+                fallback_taken = True
+        branch = item.get("m38_branch_a")
+        if not isinstance(branch, dict):
+            branch = {}
+            item["m38_branch_a"] = branch
+        summary["candidate_count"] += 1
+        ring_id = item.get("ring_instance_id")
+        mouth_id = item.get("mouth_instance_id")
+        evidence: Dict[str, Any]
+        try:
+            debug = item.get("_debug") if isinstance(item.get("_debug"), Mapping) else {}
+            raw_annulus_mask = debug.get("m38_raw_annulus_mask")
+            if raw_annulus_mask is None:
+                raise ValueError("raw_annulus_mask_unavailable")
+            ring = by_id.get(int(ring_id)) if ring_id is not None else None
+            mouth = by_id.get(int(mouth_id)) if mouth_id is not None else None
+            if ring is None or mouth is None:
+                raise ValueError("ring_or_mouth_instance_unavailable")
+            center_raw = (item.get("mouth_ellipse") or {}).get("center_uv")
+            if not center_raw or len(center_raw) != 2:
+                raise ValueError("mouth_center_unavailable")
+            center_uv = (float(center_raw[0]), float(center_raw[1]))
+            raw_mask = np.asarray(raw_annulus_mask, dtype=bool)
+            core_mask = build_tilt_core_mask(
+                raw_mask,
+                np.asarray(ring.mask, dtype=bool),
+                np.asarray(mouth.mask, dtype=bool),
+                outer_boundary_margin_px=float(core_cfg.get("outer_boundary_margin_px", 3.0)),
+                inner_boundary_margin_px=float(core_cfg.get("inner_boundary_margin_px", 3.0)),
+            )
+            raw_points, _raw_pixels = depth_pixels_to_points(
+                depth_geometry,
+                raw_mask,
+                intrinsics,
+                minimum_depth,
+                maximum_depth,
+                stride=1,
+            )
+            core_points, core_pixels = depth_pixels_to_points(
+                depth_geometry,
+                core_mask,
+                intrinsics,
+                minimum_depth,
+                maximum_depth,
+                stride=1,
+            )
+            raw_plane = fit_plane_ransac(raw_points, geometry_config) if len(raw_points) >= 3 else None
+            evidence = analyze_tilt_evidence(
+                core_points,
+                core_pixels,
+                center_uv,
+                box_x_camera=box_x,
+                box_y_camera=box_y,
+                box_z_inside_camera=z_inside,
+                config=detector_cfg,
+                raw_plane_normal_toward_camera=(raw_plane.normal if raw_plane is not None else None),
+                raw_plane_inlier_ratio=(float(raw_plane.inlier_ratio) if raw_plane is not None else None),
+                raw_plane_residual_p95_mm=(float(raw_plane.residual_p95_mm) if raw_plane is not None else None),
+            )
+            evidence["stage"] = "M39.3.1_online_tilt_evidence"
+            evidence["mode"] = "online_diagnostic_only"
+            evidence["production_routing_enabled"] = False
+            evidence["ring_instance_id"] = ring_id
+            evidence["mouth_instance_id"] = mouth_id
+            evidence["production_final_tilt_deg"] = item.get("tilt_deg")
+            evidence["production_pose_strategy"] = item.get("pose_strategy")
+            evidence["production_normal_source"] = branch.get("normal_source")
+        except Exception as exc:  # diagnostic-only must never break M39.2.9
+            evidence = _m3931_error_evidence(f"{type(exc).__name__}: {exc}")
+            evidence["ring_instance_id"] = ring_id
+            evidence["mouth_instance_id"] = mouth_id
+            evidence["production_final_tilt_deg"] = item.get("tilt_deg")
+
+        branch["m39_3_1_tilt_evidence"] = evidence
+        state = str(evidence.get("state") or "ERROR").upper()
+        if state not in summary["state_counts"]:
+            state = "ERROR"
+        summary["state_counts"][state] += 1
+        if selected_ring_id is not None and ring_id == selected_ring_id:
+            summary["selected"] = _strip_debug(evidence)
+
+    if summary["selected"] is None:
+        for item in scene.get("instances") or []:
+            if not isinstance(item, Mapping):
+                continue
+            evidence = ((item.get("m38_branch_a") or {}).get("m39_3_1_tilt_evidence"))
+            if isinstance(evidence, Mapping):
+                summary["selected"] = _strip_debug(evidence)
+                break
+    summary["status"] = "ok"
+    scene["m39_3_1_tilt_evidence"] = summary
+    return summary
+
+
+def _m3934_error_evidence(message: str) -> Dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "stage": "M39.3.4_analytic_conic_pose_plus_dense_annulus_depth",
+        "mode": "online_diagnostic_only",
+        "production_routing_enabled": False,
+        "status": "ERROR",
+        "classification": "UNCERTAIN",
+        "reason": str(message),
+    }
+
+
+def _attach_m3934_analytic_conic_diagnostic(
+    scene: Dict[str, Any],
+    instances: list[Any],
+    depth_geometry: np.ndarray,
+    intrinsics: Mapping[str, float],
+    *,
+    raw_config: Mapping[str, Any],
+    geometry_config: GeometryConfig,
+) -> Dict[str, Any]:
+    """Run M39.3.4 only for the currently selected Branch-A target.
+
+    This is intentionally different from the older diagnostics which may scan
+    every front-ring instance.  The selected-target-only contract is part of
+    the M39.3.4 performance design.
+    """
+    cfg = raw_config.get("m39_3_4_analytic_conic_surface") or {}
+    enabled = bool(isinstance(cfg, Mapping) and cfg.get("enabled", False))
+    production_routing_enabled = bool(isinstance(cfg, Mapping) and cfg.get("production_routing_enabled", False))
+    summary: Dict[str, Any] = {
+        "enabled": enabled,
+        "mode": str(cfg.get("mode") or ("online_production_surface_source" if production_routing_enabled else "online_diagnostic_only")),
+        "production_routing_enabled": production_routing_enabled,
+        "selected_target_only": True,
+        "classification_counts": {"FLAT": 0, "TILTED": 0, "UNCERTAIN": 0, "ERROR": 0},
+        "selected_ring_instance_id": scene.get("selected_ring_instance_id"),
+        "selected": None,
+    }
+    if not enabled:
+        summary["status"] = "disabled"
+        scene["m39_3_4_analytic_conic_surface"] = summary
+        return summary
+    axes = _box_reference_axes_camera(geometry_config)
+    if axes is None:
+        summary["status"] = "calibrated_box_reference_unavailable"
+        scene["m39_3_4_analytic_conic_surface"] = summary
+        return summary
+    box_x, box_y, z_inside = axes
+    by_id: Dict[int, Any] = {}
+    for instance in instances:
+        try: by_id[int(instance.instance_id)] = instance
+        except Exception: continue
+    selected_ring_id = scene.get("selected_ring_instance_id")
+    targets = []
+    for item in scene.get("instances") or []:
+        if not isinstance(item, dict) or str(item.get("pose_strategy") or "") != "m38_1_front_annulus":
+            continue
+        if selected_ring_id is not None and item.get("ring_instance_id") is not None and int(item.get("ring_instance_id")) == int(selected_ring_id):
+            targets = [item]; break
+        targets.append(item)
+    if not targets:
+        summary["status"] = "no_branch_a_target"
+        scene["m39_3_4_analytic_conic_surface"] = summary
+        return summary
+    item = targets[0]
+    branch = item.get("m38_branch_a") if isinstance(item.get("m38_branch_a"), dict) else {}
+    item["m38_branch_a"] = branch
+    ring_id, mouth_id = item.get("ring_instance_id"), item.get("mouth_instance_id")
+    try:
+        ring = by_id.get(int(ring_id)) if ring_id is not None else None
+        mouth = by_id.get(int(mouth_id)) if mouth_id is not None else None
+        if ring is None or mouth is None: raise ValueError("ring_or_mouth_instance_unavailable")
+        center = (item.get("mouth_ellipse") or {}).get("center_uv")
+        if not center or len(center) != 2: raise ValueError("mouth_center_unavailable")
+        evidence = reconstruct_analytic_conic_surface(
+            depth_geometry, np.asarray(ring.mask, dtype=bool), np.asarray(mouth.mask, dtype=bool),
+            (float(center[0]), float(center[1])), intrinsics,
+            box_x_camera=box_x, box_y_camera=box_y, box_z_inside_camera=z_inside,
+            object_geometry=(raw_config.get("object_geometry") or {}), config=cfg,
+            prior_tilt_evidence=(branch.get("m39_3_1_tilt_evidence") if isinstance(branch.get("m39_3_1_tilt_evidence"), Mapping) else None),
+        )
+        evidence["ring_instance_id"] = ring_id
+        evidence["mouth_instance_id"] = mouth_id
+        evidence["production_final_tilt_deg"] = item.get("tilt_deg")
+        evidence["production_pose_strategy"] = item.get("pose_strategy")
+    except Exception as exc:
+        evidence = _m3934_error_evidence(f"{type(exc).__name__}: {exc}")
+        evidence["ring_instance_id"] = ring_id
+        evidence["mouth_instance_id"] = mouth_id
+        evidence["production_final_tilt_deg"] = item.get("tilt_deg")
+    branch["m39_3_4_analytic_conic_surface"] = evidence
+    state = str(evidence.get("classification") or "ERROR").upper()
+    if str(evidence.get("status") or "").upper() == "ERROR": state = "ERROR"
+    if state not in summary["classification_counts"]: state = "ERROR"
+    summary["classification_counts"][state] += 1
+    summary["selected"] = _strip_debug(evidence)
+    summary["status"] = "ok"
+    scene["m39_3_4_analytic_conic_surface"] = summary
+    return summary
 
 
 class OnlineGeometryProcessor:
@@ -658,6 +952,35 @@ class OnlineGeometryProcessor:
                 self.geometry_config,
             )
         timings["geometry_ms"] = _perf_ms(geometry_started)
+
+        tilt_started = time.perf_counter()
+        _attach_m3931_online_tilt_diagnostics(
+            scene,
+            list(prepared.adaptation.instances),
+            prepared.depth_geometry,
+            prepared.intrinsics,
+            raw_config=self.raw_config,
+            geometry_config=self.geometry_config,
+        )
+        timings["m39_3_1_tilt_diagnostic_ms"] = _perf_ms(tilt_started)
+
+        analytic_started = time.perf_counter()
+        _attach_m3934_analytic_conic_diagnostic(
+            scene, list(prepared.adaptation.instances), prepared.depth_geometry, prepared.intrinsics,
+            raw_config=self.raw_config, geometry_config=self.geometry_config,
+        )
+        timings["m39_3_4_analytic_conic_diagnostic_ms"] = _perf_ms(analytic_started)
+
+        routing_started = time.perf_counter()
+        apply_m39341_tilted_production_routing(
+            scene,
+            list(prepared.adaptation.instances),
+            prepared.depth_geometry,
+            prepared.intrinsics,
+            raw_config=self.raw_config,
+            geometry_config=self.geometry_config,
+        )
+        timings["m39_3_4_1_tilted_production_routing_ms"] = _perf_ms(routing_started)
         scene_clean = _strip_debug(scene)
         selected = scene_clean.get("robot_candidate") if isinstance(scene_clean, Mapping) else None
 
@@ -959,6 +1282,9 @@ class OnlineGeometryProcessor:
                 "m38_branch_c": self.raw_config.get("m38_branch_c") or {},
                 "hybrid_grasp": self.raw_config.get("hybrid_grasp") or {},
                 "side_ring_template": self.raw_config.get("side_ring_template") or {},
+                "m39_3_1_tilt_evidence": self.raw_config.get("m39_3_1_tilt_evidence") or {},
+                "m39_3_4_analytic_conic_surface": self.raw_config.get("m39_3_4_analytic_conic_surface") or {},
+                "m39_3_4_1_tilted_production_routing": self.raw_config.get("m39_3_4_1_tilted_production_routing") or {},
             },
             "timing_ms": {
                 key: round(float(value), 3) for key, value in timings.items()
@@ -970,6 +1296,21 @@ class OnlineGeometryProcessor:
             "cache_status": self.cache.status(),
         }
         if output_dir is not None and save_flags["geometry_result"]:
+            tilt_summary = scene_clean.get("m39_3_1_tilt_evidence") if isinstance(scene_clean, Mapping) else None
+            if isinstance(tilt_summary, Mapping):
+                tilt_path = output_dir / "m39_3_1_tilt_evidence.json"
+                write_json(tilt_path, dict(tilt_summary))
+                files["m39_3_1_tilt_evidence"] = str(tilt_path)
+            analytic_summary = scene_clean.get("m39_3_4_analytic_conic_surface") if isinstance(scene_clean, Mapping) else None
+            if isinstance(analytic_summary, Mapping):
+                analytic_path = output_dir / "m39_3_4_analytic_conic_surface.json"
+                write_json(analytic_path, dict(analytic_summary))
+                files["m39_3_4_analytic_conic_surface"] = str(analytic_path)
+            routing_summary = scene_clean.get("m39_3_4_1_tilted_production_routing") if isinstance(scene_clean, Mapping) else None
+            if isinstance(routing_summary, Mapping):
+                routing_path = output_dir / "m39_3_4_1_tilted_production_routing.json"
+                write_json(routing_path, dict(routing_summary))
+                files["m39_3_4_1_tilted_production_routing"] = str(routing_path)
             path = output_dir / "online_geometry_result.json"
             files["geometry_result"] = str(path)
             payload["files"] = files

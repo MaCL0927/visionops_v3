@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+import math
+
 import cv2  # type: ignore
 import numpy as np  # type: ignore
 
@@ -44,6 +46,227 @@ def _draw_polygon(image: np.ndarray, points, color, thickness: int = 1) -> None:
     polygon = np.rint(np.asarray(points, dtype=np.float64)).astype(np.int32).reshape(-1, 1, 2)
     cv2.polylines(image, [polygon], True, color, thickness, cv2.LINE_AA)
 
+
+def _draw_m3931_tilt_diagnostic(
+    output: np.ndarray,
+    center: Tuple[int, int],
+    evidence: Mapping[str, Any],
+) -> None:
+    """Draw compact M39.3.1 diagnostic-only evidence on the online overlay."""
+    state = str(evidence.get("state") or "ERROR").upper()
+    colors = {
+        "FLAT": (0, 220, 0),
+        "TILTED": (255, 0, 255),
+        "UNCERTAIN": (0, 165, 255),
+        "ERROR": (0, 0, 255),
+    }
+    color = colors.get(state, (180, 180, 180))
+    raw = evidence.get("raw_plane_cue") if isinstance(evidence.get("raw_plane_cue"), Mapping) else {}
+    gradient = evidence.get("sector_gradient") if isinstance(evidence.get("sector_gradient"), Mapping) else {}
+
+    def _fmt(value: Any, digits: int = 1) -> str:
+        try:
+            return f"{float(value):.{digits}f}"
+        except (TypeError, ValueError):
+            return "-"
+
+    line1 = f"M39.3.1 DIAG {state}"
+    line2 = (
+        f"raw={_fmt(raw.get('tilt_deg'))} sec={_fmt(gradient.get('sector_gradient_tilt_deg'))} "
+        f"p2p={_fmt(gradient.get('predicted_peak_to_peak_mm'))} PROD={_fmt(evidence.get('production_final_tilt_deg'))}"
+    )
+    text_x = min(max(6, center[0] + 34), max(6, output.shape[1] - 245))
+    text_y = min(max(34, center[1] + 22), output.shape[0] - 28)
+    cv2.rectangle(
+        output,
+        (text_x - 3, text_y - 15),
+        (min(output.shape[1] - 3, text_x + 238), min(output.shape[0] - 3, text_y + 20)),
+        (0, 0, 0),
+        -1,
+    )
+    cv2.putText(output, line1, (text_x, text_y - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.36, color, 1, cv2.LINE_AA)
+    cv2.putText(output, line2, (text_x, text_y + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.30, (255, 255, 255), 1, cv2.LINE_AA)
+
+    # Keep the live Web overlay readable: detailed sector heights remain in JSON;
+    # the image only marks sector representatives/inliers.
+    samples = gradient.get("sector_samples") if isinstance(gradient, Mapping) else []
+    for sample in samples or []:
+        if not isinstance(sample, Mapping):
+            continue
+        uv = _uv(sample.get("representative_uv"))
+        if uv is None:
+            continue
+        inlier = bool(sample.get("harmonic_inlier", False))
+        sample_color = color if inlier else (128, 128, 128)
+        cv2.circle(output, uv, 3 if inlier else 2, sample_color, -1, cv2.LINE_AA)
+
+    direction = gradient.get("gradient_direction_deg_image") if isinstance(gradient, Mapping) else None
+    if direction is not None and state in {"TILTED", "UNCERTAIN"}:
+        try:
+            radians = math.radians(float(direction))
+            length = 34
+            endpoint = (
+                int(round(center[0] + length * math.cos(radians))),
+                int(round(center[1] + length * math.sin(radians))),
+            )
+            cv2.arrowedLine(output, center, endpoint, color, 2, cv2.LINE_AA, tipLength=0.25)
+        except (TypeError, ValueError):
+            pass
+
+
+def _draw_m3932_ring_prior_diagnostic(
+    output: np.ndarray,
+    center: Tuple[int, int],
+    evidence: Mapping[str, Any],
+) -> None:
+    """Draw M39.3.2 mouth-anchored ring-prior surface evidence."""
+    classification = str(evidence.get("classification") or "UNCERTAIN").upper()
+    colors = {
+        "FLAT": (0, 220, 0),
+        "TILTED": (255, 0, 255),
+        "UNCERTAIN": (0, 165, 255),
+    }
+    color = colors.get(classification, (180, 180, 180))
+    surface = evidence.get("surface") if isinstance(evidence.get("surface"), Mapping) else {}
+    try:
+        tilt_text = f"{float(surface.get('tilt_deg')):.1f}"
+    except (TypeError, ValueError):
+        tilt_text = "-"
+    selected_count = surface.get("selected_sector_count", "-")
+    coverage = surface.get("angular_coverage_deg")
+    try:
+        coverage_text = f"{float(coverage):.0f}"
+    except (TypeError, ValueError):
+        coverage_text = "-"
+    label = f"M39.3.2 RINGPRIOR {classification} tilt={tilt_text} sec={selected_count} cov={coverage_text}"
+    text_x = min(max(6, center[0] + 34), max(6, output.shape[1] - 310))
+    text_y = min(max(64, center[1] + 58), output.shape[0] - 10)
+    cv2.rectangle(
+        output,
+        (text_x - 3, text_y - 14),
+        (min(output.shape[1] - 3, text_x + 304), min(output.shape[0] - 3, text_y + 4)),
+        (0, 0, 0),
+        -1,
+    )
+    cv2.putText(output, label, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.32, color, 1, cv2.LINE_AA)
+    for sample in surface.get("sector_samples") or []:
+        if not isinstance(sample, Mapping):
+            continue
+        candidate = sample.get("selected_candidate") if isinstance(sample.get("selected_candidate"), Mapping) else None
+        if candidate is None:
+            continue
+        uv = _uv(candidate.get("representative_uv"))
+        if uv is None:
+            continue
+        cv2.circle(output, uv, 4, color, -1, cv2.LINE_AA)
+        cv2.putText(
+            output,
+            str(int(sample.get("sector", -1))),
+            (uv[0] + 4, uv[1] - 3),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.28,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+
+
+def _draw_m3933_conic_ring_diagnostic(
+    output: np.ndarray,
+    center: Tuple[int, int],
+    evidence: Mapping[str, Any],
+) -> None:
+    """Draw M39.3.3 inverse-conic circle + predicted front outer rim evidence."""
+    classification = str(evidence.get("classification") or "UNCERTAIN").upper()
+    colors = {
+        "FLAT": (0, 220, 0),
+        "TILTED": (255, 0, 255),
+        "UNCERTAIN": (0, 165, 255),
+    }
+    color = colors.get(classification, (180, 180, 180))
+    surface = evidence.get("surface") if isinstance(evidence.get("surface"), Mapping) else {}
+    cv = surface.get("conic_validation") if isinstance(surface.get("conic_validation"), Mapping) else {}
+    try:
+        tilt_text = f"{float(surface.get('tilt_deg')):.1f}"
+    except (TypeError, ValueError):
+        tilt_text = "-"
+    try:
+        radius_text = f"{float(cv.get('inner_radius_mm')):.1f}"
+    except (TypeError, ValueError):
+        radius_text = "-"
+    selected_count = surface.get("selected_sector_count", "-")
+    label = f"M39.3.3 CONIC {classification} tilt={tilt_text} sec={selected_count} Rin={radius_text}"
+    text_x = min(max(6, center[0] + 34), max(6, output.shape[1] - 330))
+    text_y = min(max(84, center[1] + 78), output.shape[0] - 10)
+    cv2.rectangle(output, (text_x - 3, text_y - 14), (min(output.shape[1] - 3, text_x + 326), min(output.shape[0] - 3, text_y + 4)), (0, 0, 0), -1)
+    cv2.putText(output, label, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.31, color, 1, cv2.LINE_AA)
+
+    for key, curve_color in (("predicted_inner_rim_uv", (255, 255, 0)), ("predicted_outer_rim_uv", (255, 180, 0))):
+        pts = []
+        for uv in cv.get(key) or []:
+            p = _uv(uv)
+            if p is not None:
+                pts.append(p)
+        if len(pts) >= 3:
+            poly = np.asarray(pts, dtype=np.int32).reshape(-1, 1, 2)
+            cv2.polylines(output, [poly], True, curve_color, 1, cv2.LINE_AA)
+
+    for sample in surface.get("sector_samples") or []:
+        if not isinstance(sample, Mapping):
+            continue
+        candidate = sample.get("selected_candidate") if isinstance(sample.get("selected_candidate"), Mapping) else None
+        if candidate is None:
+            continue
+        uv = _uv(candidate.get("representative_uv"))
+        if uv is None:
+            continue
+        cv2.circle(output, uv, 4, color, -1, cv2.LINE_AA)
+        cv2.putText(output, str(int(sample.get("sector", -1))), (uv[0] + 4, uv[1] - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.28, color, 1, cv2.LINE_AA)
+
+
+
+def _draw_m3934_analytic_conic_diagnostic(
+    output: np.ndarray,
+    center: Tuple[int, int],
+    evidence: Mapping[str, Any],
+) -> None:
+    """Draw only the selected M39.3.4 analytic front-rim hypothesis.
+
+    M39.3.2/M39.3.3 overlays are disabled in production config. Keep this
+    intentionally compact so the front inner/outer rims remain readable.
+    """
+    classification = str(evidence.get("classification") or "UNCERTAIN").upper()
+    colors = {
+        "FLAT": (0, 220, 0),
+        "TILTED": (255, 0, 255),
+        "UNCERTAIN": (0, 165, 255),
+    }
+    color = colors.get(classification, (180, 180, 180))
+    surface = evidence.get("selected_candidate") if isinstance(evidence.get("selected_candidate"), Mapping) else {}
+    try:
+        tilt_text = f"{float(surface.get('tilt_deg')):.1f}"
+    except (TypeError, ValueError):
+        tilt_text = "-"
+    label_name = str(surface.get("candidate_label") or "-")
+    label = f"M39.3.4 {classification} {label_name} tilt={tilt_text}"
+    text_x = min(max(6, center[0] + 34), max(6, output.shape[1] - 300))
+    text_y = min(max(64, center[1] + 58), output.shape[0] - 10)
+    cv2.rectangle(output, (text_x - 3, text_y - 14),
+                  (min(output.shape[1] - 3, text_x + 296), min(output.shape[0] - 3, text_y + 4)),
+                  (0, 0, 0), -1)
+    cv2.putText(output, label, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.32, color, 1, cv2.LINE_AA)
+
+    # User-facing convention for this compact overlay: green inner rim, red outer rim.
+    for key, curve_color in (("predicted_inner_rim_uv", (0, 255, 0)),
+                             ("predicted_outer_rim_uv", (0, 0, 255))):
+        pts = []
+        for uv in surface.get(key) or []:
+            p = _uv(uv)
+            if p is not None:
+                pts.append(p)
+        if len(pts) >= 3:
+            poly = np.asarray(pts, dtype=np.int32).reshape(-1, 1, 2)
+            cv2.polylines(output, [poly], True, curve_color, 2, cv2.LINE_AA)
 
 def draw_overlay(
     rgb_bgr: np.ndarray,
@@ -152,6 +375,22 @@ def draw_overlay(
             str(best_hour) if best_hour is not None else "-",
         )
         cv2.putText(output, label, (center[0] + 7, center[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42, ring_color, 1, cv2.LINE_AA)
+
+        tilt_evidence = ((item.get("m38_branch_a") or {}).get("m39_3_1_tilt_evidence") or {})
+        if isinstance(tilt_evidence, Mapping) and tilt_evidence:
+            _draw_m3931_tilt_diagnostic(output, center, tilt_evidence)
+
+        ring_prior = ((item.get("m38_branch_a") or {}).get("m39_3_2_ring_prior_surface") or {})
+        if isinstance(ring_prior, Mapping) and ring_prior:
+            _draw_m3932_ring_prior_diagnostic(output, center, ring_prior)
+
+        conic_prior = ((item.get("m38_branch_a") or {}).get("m39_3_3_conic_ring_surface") or {})
+        if isinstance(conic_prior, Mapping) and conic_prior:
+            _draw_m3933_conic_ring_diagnostic(output, center, conic_prior)
+
+        analytic_prior = ((item.get("m38_branch_a") or {}).get("m39_3_4_analytic_conic_surface") or {})
+        if isinstance(analytic_prior, Mapping) and analytic_prior:
+            _draw_m3934_analytic_conic_diagnostic(output, center, analytic_prior)
 
         candidates = (item.get("grasp") or {}).get("clock_candidates") or []
         best_index = best.get("clock_index")
