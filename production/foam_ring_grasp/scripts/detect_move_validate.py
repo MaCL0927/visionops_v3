@@ -522,6 +522,48 @@ def print_vision_summary(
 
 
 
+def print_m3940_side_axis_summary(data: Mapping[str, Any]) -> bool:
+    summary = data.get("scene_summary") if isinstance(data.get("scene_summary"), Mapping) else {}
+    m3940 = summary.get("m39_4_0_side_axis_recovery") if isinstance(summary, Mapping) else None
+    if not isinstance(m3940, Mapping) or not bool(m3940.get("executed", False)):
+        return False
+    selected = m3940.get("selected") if isinstance(m3940.get("selected"), Mapping) else None
+    fits = m3940.get("fits") if isinstance(m3940.get("fits"), list) else []
+    diagnostic = selected if selected is not None else (fits[0] if fits and isinstance(fits[0], Mapping) else {})
+    print("\n" + "=" * 78)
+    print("M39.4.0.1 SIDE TOPOLOGY + AXIS RECOVERY [VALIDATION ONLY]")
+    print("=" * 78)
+    print(f"request_id               : {data.get('request_id')}")
+    topology = summary.get("m39_4_0_1_mouth_topology_arbitration") if isinstance(summary, Mapping) else {}
+    if isinstance(topology, Mapping):
+        print(f"mouth topology status    : {topology.get('status')}")
+        print(f"pseudo mouth ring ids    : {topology.get('pseudo_mouth_ring_ids')}")
+    print(f"status                   : {m3940.get('status')}")
+    print(f"selected_grasp_branch    : {data.get('selected_grasp_branch')}")
+    print(f"ring_instance_id         : {diagnostic.get('ring_instance_id')}")
+    print(f"axis_reliable            : {diagnostic.get('axis_reliable', diagnostic.get('reliable'))}")
+    print(f"center_reliable          : {diagnostic.get('center_reliable')}")
+    print(f"candidate_source         : {diagnostic.get('side_candidate_source')}")
+    print(f"pseudo_mouth_axis_ratio  : {diagnostic.get('pseudo_mouth_axis_ratio')}")
+    print(f"axis_image_angle_deg     : {diagnostic.get('axis_image_angle_deg_0_180')}")
+    print(f"axis_camera_undirected   : {diagnostic.get('axis_camera_undirected')}")
+    print(f"quick axis margin        : {diagnostic.get('axis_score_margin')}")
+    print(f"dual-seed rescue         : {diagnostic.get('dual_seed_refine_applied')}")
+    print(f"full geometry margin     : {diagnostic.get('full_geometry_score_margin')}")
+    refinement = diagnostic.get("selected_axis_refinement") if isinstance(diagnostic.get("selected_axis_refinement"), Mapping) else {}
+    print(f"radial residual med/p90  : {refinement.get('radial_residual_median_mm')} / {refinement.get('radial_residual_p90_mm')} mm")
+    print(f"center_height_error_mm   : {diagnostic.get('center_height_error_mm')}")
+    print(f"endpoint A uv            : {diagnostic.get('endpoint_a_uv')}")
+    print(f"endpoint B uv            : {diagnostic.get('endpoint_b_uv')}")
+    print(f"entry_endpoint           : {diagnostic.get('entry_endpoint')}")
+    print(f"entry_selection_rule     : {diagnostic.get('entry_selection_rule')}")
+    print(f"entry_wall_clearance_mm  : {diagnostic.get('entry_outward_wall_clearance_mm')}")
+    print(f"rejection_reasons        : {diagnostic.get('rejection_reasons')}")
+    print("robot motion             : DISABLED BY M39.4.0.1 CONTRACT")
+    print("=" * 78)
+    return True
+
+
 def print_debug_artifacts(data: Mapping[str, Any]) -> None:
     files = data.get("files") if isinstance(data.get("files"), Mapping) else {}
     if not files:
@@ -534,6 +576,8 @@ def print_debug_artifacts(data: Mapping[str, Any]) -> None:
         ("RESULT JSON", "geometry_result"),
         ("ANALYTIC", "m39_3_4_analytic_conic_surface"),
         ("ROUTING", "m39_3_4_1_tilted_production_routing"),
+        ("MOUTH TOPO", "m39_4_0_1_mouth_topology_arbitration"),
+        ("SIDE AXIS", "m39_4_0_side_axis_recovery"),
     ]
     rows = []
     for label, key in wanted:
@@ -625,7 +669,7 @@ def execute_cycle(robot: RobotClient, pre_pose: Sequence[float], grasp_pose: Seq
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="M39.3.4.1 tilted production routing + LEFT robot motion validation")
+    parser = argparse.ArgumentParser(description="M39.4.0 side-axis diagnostic + visible-mouth LEFT robot motion validation")
     parser.add_argument(
         "--execute",
         action="store_true",
@@ -661,7 +705,7 @@ def main() -> int:
 
     mode = "EXECUTE" if args.execute else "DRY-RUN"
     print("=" * 78)
-    print(f"M39.3.4.1 TILTED PRODUCTION ROUTING VALIDATION [{mode}]")
+    print(f"M39.4.0.1 SIDE TOPOLOGY/AXIS + VISIBLE-MOUTH PRODUCTION VALIDATION [{mode}]")
     print("Enter : trigger vision")
     print("After vision: " + ("safe result executes immediately (--single-enter)" if args.single_enter else "Enter to execute robot motion, 'c' to cancel"))
     print("q     : quit")
@@ -693,6 +737,11 @@ def main() -> int:
                 print("\n>>> TRIGGERING VISION...")
                 data = trigger_vision(vision_session, save_debug=not args.no_save_debug)
                 log_path = save_result(data)
+                if data.get("target_found") is not True and print_m3940_side_axis_summary(data):
+                    print(f"vision JSON saved         : {log_path}")
+                    print_debug_artifacts(data)
+                    print("M39.4.0.1 is diagnostic-only: this side-lying target will NOT move the robot.")
+                    continue
                 route_info = validate_m39341_production_route(
                     data,
                     minimum_tilted_deg=float(args.min_tilted_deg),

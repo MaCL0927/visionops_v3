@@ -74,6 +74,11 @@ from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.tilt_evidence impor
     analyze_tilt_evidence,
     build_tilt_core_mask,
 )
+from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.side_axis_recovery import (  # noqa: E402
+    apply_m39401_mouth_topology_arbitration,
+    attach_m3940_side_axis_recovery,
+    draw_m3940_side_axis_overlay,
+)
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "line.yaml"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "data" / "foam_ring_online_geometry"
@@ -368,6 +373,9 @@ def _attach_m3931_online_tilt_diagnostics(
     for item in scene.get("instances") or []:
         if not isinstance(item, dict) or str(item.get("pose_strategy") or "") != "m38_1_front_annulus":
             continue
+        topology = ((item.get("m38_branch_a") or {}).get("m39_4_0_1_mouth_topology"))
+        if isinstance(topology, Mapping) and not bool(topology.get("visible_mouth_production_allowed", True)):
+            continue
         if selected_target_only:
             ring_value = item.get("ring_instance_id")
             if selected_ring_id is not None:
@@ -530,6 +538,9 @@ def _attach_m3934_analytic_conic_diagnostic(
     targets = []
     for item in scene.get("instances") or []:
         if not isinstance(item, dict) or str(item.get("pose_strategy") or "") != "m38_1_front_annulus":
+            continue
+        topology = ((item.get("m38_branch_a") or {}).get("m39_4_0_1_mouth_topology"))
+        if isinstance(topology, Mapping) and not bool(topology.get("visible_mouth_production_allowed", True)):
             continue
         if selected_ring_id is not None and item.get("ring_instance_id") is not None and int(item.get("ring_instance_id")) == int(selected_ring_id):
             targets = [item]; break
@@ -953,6 +964,12 @@ class OnlineGeometryProcessor:
             )
         timings["geometry_ms"] = _perf_ms(geometry_started)
 
+        topology_started = time.perf_counter()
+        apply_m39401_mouth_topology_arbitration(
+            scene, list(prepared.adaptation.instances), self.raw_config
+        )
+        timings["m39_4_0_1_mouth_topology_arbitration_ms"] = _perf_ms(topology_started)
+
         tilt_started = time.perf_counter()
         _attach_m3931_online_tilt_diagnostics(
             scene,
@@ -981,6 +998,16 @@ class OnlineGeometryProcessor:
             geometry_config=self.geometry_config,
         )
         timings["m39_3_4_1_tilted_production_routing_ms"] = _perf_ms(routing_started)
+
+        side_axis_started = time.perf_counter()
+        attach_m3940_side_axis_recovery(
+            scene,
+            list(prepared.adaptation.instances),
+            prepared.depth_geometry,
+            prepared.intrinsics,
+            self.raw_config,
+        )
+        timings["m39_4_0_side_axis_recovery_ms"] = _perf_ms(side_axis_started)
         scene_clean = _strip_debug(scene)
         selected = scene_clean.get("robot_candidate") if isinstance(scene_clean, Mapping) else None
 
@@ -1087,6 +1114,9 @@ class OnlineGeometryProcessor:
                     prepared.intrinsics,
                     int(selected_side_id) if selected_side_id is not None else None,
                 )
+            m3940 = scene.get("m39_4_0_side_axis_recovery") if isinstance(scene, Mapping) else None
+            if isinstance(m3940, Mapping) and bool(m3940.get("executed", False)):
+                overlay = draw_m3940_side_axis_overlay(overlay, m3940)
             branch_label = str(
                 scene.get("selected_grasp_branch")
                 if isinstance(scene, Mapping)
@@ -1094,7 +1124,7 @@ class OnlineGeometryProcessor:
             )
             cv2.putText(
                 overlay,
-                "M38.6 hybrid branch: " + branch_label,
+                "production branch: " + branch_label,
                 (10, max(36, overlay.shape[0] - 12)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.45,
@@ -1108,9 +1138,15 @@ class OnlineGeometryProcessor:
                 and isinstance(scene.get("m38_4_branch_c"), Mapping)
                 else {}
             )
-            reject_text = str(branch_c.get("display_reason_short") or "")
-            reject_detail = str(branch_c.get("display_reason_detail") or "")
-            if bool(branch_c.get("fast_terminated")) and reject_text:
+            if isinstance(m3940, Mapping) and bool(m3940.get("executed", False)):
+                reject_text = str(m3940.get("display_reason_short") or "")
+                reject_detail = str(m3940.get("display_reason_detail") or "")
+                reject_active = True
+            else:
+                reject_text = str(branch_c.get("display_reason_short") or "")
+                reject_detail = str(branch_c.get("display_reason_detail") or "")
+                reject_active = bool(branch_c.get("fast_terminated"))
+            if reject_active and reject_text:
                 cv2.rectangle(overlay, (6, 6), (min(overlay.shape[1] - 6, 520), 58), (0, 0, 0), -1)
                 cv2.putText(
                     overlay,
@@ -1285,6 +1321,7 @@ class OnlineGeometryProcessor:
                 "m39_3_1_tilt_evidence": self.raw_config.get("m39_3_1_tilt_evidence") or {},
                 "m39_3_4_analytic_conic_surface": self.raw_config.get("m39_3_4_analytic_conic_surface") or {},
                 "m39_3_4_1_tilted_production_routing": self.raw_config.get("m39_3_4_1_tilted_production_routing") or {},
+                "m39_4_0_side_axis_recovery": self.raw_config.get("m39_4_0_side_axis_recovery") or {},
             },
             "timing_ms": {
                 key: round(float(value), 3) for key, value in timings.items()
@@ -1311,6 +1348,16 @@ class OnlineGeometryProcessor:
                 routing_path = output_dir / "m39_3_4_1_tilted_production_routing.json"
                 write_json(routing_path, dict(routing_summary))
                 files["m39_3_4_1_tilted_production_routing"] = str(routing_path)
+            topology_summary = scene_clean.get("m39_4_0_1_mouth_topology_arbitration") if isinstance(scene_clean, Mapping) else None
+            if isinstance(topology_summary, Mapping):
+                topology_path = output_dir / "m39_4_0_1_mouth_topology_arbitration.json"
+                write_json(topology_path, dict(topology_summary))
+                files["m39_4_0_1_mouth_topology_arbitration"] = str(topology_path)
+            side_axis_summary = scene_clean.get("m39_4_0_side_axis_recovery") if isinstance(scene_clean, Mapping) else None
+            if isinstance(side_axis_summary, Mapping):
+                side_axis_path = output_dir / "m39_4_0_side_axis_recovery.json"
+                write_json(side_axis_path, dict(side_axis_summary))
+                files["m39_4_0_side_axis_recovery"] = str(side_axis_path)
             path = output_dir / "online_geometry_result.json"
             files["geometry_result"] = str(path)
             payload["files"] = files

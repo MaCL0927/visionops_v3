@@ -1,12 +1,12 @@
 # Foam ring production configuration
-# Frozen scope before M39.4:
-#   - ring_mouth visible: FLAT + TILTED production grasp
-#   - ring_mouth hidden/side-lying: conservative reject, handled by future M39.4
-#   - grasp direction: 3 o'clock only; no fallback clocks
-#
-# Historical stage-tuning configs were intentionally removed. Keep this file production-only.
-schema_version: '6.6'
-task: foam_ring_grasp_visible_mouth_production_m39_3_4_1
+# Current scope at M39.4.0.1:
+#   - real ring_mouth visible: frozen FLAT + TILTED production grasp
+#   - no mouth or side-view pseudo mouth: side-axis recovery, validation only
+#   - side-lying robot motion remains disabled until M39.4.1
+#   - grasp direction for visible-mouth production: 3 o'clock only
+# Historical stage-tuning configs stay outside production.
+schema_version: '6.8'
+task: foam_ring_grasp_m39_4_0_1_side_topology_axis_rescue
 classes:
   foam_ring: foam_ring
   ring_mouth: ring_mouth
@@ -339,7 +339,7 @@ m38_branch_c:
   fast_terminate: true
   fallback_to_m36: false
   fallback_to_m37_6: false
-  operator_action: await_m39_4_side_ring
+  operator_action: route_to_m39_4_0_side_axis_recovery
 hybrid_grasp:
   enabled: true
   prefer_mouth_visible: true
@@ -437,6 +437,39 @@ m39_3_4_1_tilted_production_routing:
   minimum_routed_tilt_deg: 8.0
   maximum_routed_tilt_deg: 35.0
   maximum_approach_normal_error_deg: 2.0
+m39_4_0_side_axis_recovery:
+  enabled: true
+  mode: online_diagnostic_only
+  robot_routing_enabled: false
+  only_when_no_robot_candidate: true
+  maximum_rings_to_evaluate: 3
+  mouth_topology_gate:
+    enabled: true
+    side_view_axis_ratio_max: 0.50
+  ring_mask_erode_px: 2
+  neighbor_exclusion_dilate_px: 1
+  surface_depth_front_tolerance_mm: 18.0
+  surface_depth_back_tolerance_mm: 55.0
+  depth_edge_threshold_mm: 18.0
+  depth_edge_dilate_px: 1
+  surface_component_minimum_ratio: 0.10
+  minimum_side_points: 150
+  central_axis_fraction: 0.60
+  maximum_fit_points: 350
+  fixed_radius_iterations: 3
+  radial_inlier_threshold_mm: 7.0
+  local_refine_offsets_deg: [-2, 0, 2]
+  depth_gradient_weight: 10.0
+  silhouette_ratio_weight: 12.0
+  refine_offset_weight_per_deg: 0.08
+  gradient_stabilizer_mm_per_px: 0.5
+  dual_seed_refine_quick_margin_below: 1.20
+  minimum_full_geometry_score_margin: 0.80
+  maximum_radial_residual_median_mm: 4.0
+  maximum_radial_residual_p90_mm: 8.0
+  minimum_radial_inlier_ratio: 0.85
+  center_height_warning_mm: 20.0
+  vertical_axis_threshold_deg_from_vertical: 20.0
 grasp_frame_orientation:
   mode: measured
 robot_pose_transform:

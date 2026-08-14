@@ -71,10 +71,27 @@ def _visible_mouth_scope(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise RuntimeError("pre-M39.4 no-mouth conservative reject must remain enabled")
     if bool(hybrid.get("legacy_m36_enabled", True)) or bool(hybrid.get("side_ring_fallback_enabled", True)):
         raise RuntimeError("legacy M36/M37 fallback must remain disabled in production")
+    side_axis = _mapping(raw.get("m39_4_0_side_axis_recovery") or {}, "m39_4_0_side_axis_recovery")
+    if not bool(side_axis.get("enabled", False)):
+        raise RuntimeError("M39.4.0 side-axis recovery must be enabled")
+    if bool(side_axis.get("robot_routing_enabled", True)):
+        raise RuntimeError("M39.4.0 must remain diagnostic-only: robot_routing_enabled=false")
+    if str(side_axis.get("mode") or "") != "online_diagnostic_only":
+        raise RuntimeError("M39.4.0.1 mode must be online_diagnostic_only")
+    topology = _mapping(side_axis.get("mouth_topology_gate") or {}, "m39_4_0_side_axis_recovery.mouth_topology_gate")
+    if not bool(topology.get("enabled", False)):
+        raise RuntimeError("M39.4.0.1 mouth topology gate must be enabled")
+    ratio = float(topology.get("side_view_axis_ratio_max", 0.0))
+    if not (0.30 <= ratio <= 0.60):
+        raise RuntimeError("M39.4.0.1 side-view mouth axis-ratio gate is outside validated range")
+    if float(side_axis.get("dual_seed_refine_quick_margin_below", 0.0)) <= 0.0:
+        raise RuntimeError("M39.4.0.1 dual-seed rescue threshold must be positive")
     return {
         "status": "ok",
         "visible_mouth_branch": "enabled",
-        "side_no_mouth": "reject_until_M39.4",
+        "side_no_mouth": "M39.4.0.1_axis_recovery_validation_only",
+        "pseudo_mouth": "M39.4.0.1_geometry_reroute_to_side_axis",
+        "side_robot_motion": "disabled_until_M39.4.1",
     }
 
 

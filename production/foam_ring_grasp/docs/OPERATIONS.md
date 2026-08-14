@@ -1,131 +1,118 @@
-# Production Operations
+# Production Operations — M39.4.0.1
 
-## 1. 整目录替换
-
-建议先停止当前泡沫圆环服务，再替换目录：
-
-```bash
-cd /opt/visionops_v3
-pkill -f 'production.foam_ring_grasp.tasks.foam_ring_grasp_vision.service' || true
-rm -rf production/foam_ring_grasp
-# 将新的 foam_ring_grasp/ 放入 production/
-```
-
-不要把旧目录中的 `line.yaml`、历史脚本或 docs 再复制回来。
-
-## 2. 首次预检
+## 1. 整目录替换后预检
 
 ```bash
 cd /opt/visionops_v3
 python3 production/foam_ring_grasp/scripts/verify_production.py
 ```
 
-如果服务已经启动，可额外检查 19213：
+预检会同时检查：
 
-```bash
-python3 production/foam_ring_grasp/scripts/verify_production.py --service
-```
+- clock-3-only；
+- hand-eye / `robot_default_base` / `left_link7`；
+- M39.4.0.1 已启用；
+- M39.4.0.1 仍为 diagnostic-only，机器人路由关闭。
 
-## 3. 启动顺序
-
-### 3.1 RGB Runtime
+## 2. 启动
 
 ```bash
 bash production/foam_ring_grasp/scripts/start_rgb_runtime.sh
-```
-
-默认端口：`28081`。
-
-### 3.2 Foam-ring online service
-
-```bash
 bash production/foam_ring_grasp/scripts/start_online_service.sh
 ```
 
-脚本启动前会自动执行 `verify_production.py`。任何生产配置/手眼契约异常都会阻止服务启动。
+`start_online_service.sh` 会在启动 19213 前再次执行生产预检。
 
-默认服务端口：`19213`。
+## 3. 现场验证
 
-## 4. 检测与机器人移动
-
-### 4.1 Dry-run
-
-```bash
-python3 production/foam_ring_grasp/scripts/detect_move_validate.py
-```
-
-只触发视觉、检查 surface route、保存结果；不连接机器人。
-
-### 4.2 正式执行
+建议继续使用同一个脚本：
 
 ```bash
 python3 production/foam_ring_grasp/scripts/detect_move_validate.py --execute
 ```
 
-流程：
+### 3.1 Visible-mouth
+
+保持已有行为：
 
 ```text
-Enter trigger
-→ visual route validation
-→ LEFT_LINK7 pose validation
-→ second Enter
-→ OPEN
-→ PREGRASP
-→ GRASP
-→ CLOSE
-→ PREGRASP
-→ INITIAL
-→ OPEN
+Enter → vision → FLAT/TILTED route check → LEFT_LINK7 check
+      → second Enter → robot grasp cycle
 ```
 
-### 4.3 Single-enter
+### 3.2 No-mouth pure-side
 
-```bash
-python3 production/foam_ring_grasp/scripts/detect_move_validate.py --execute --single-enter
+M39.4.0.1 检出后终端会打印：
+
+```text
+M39.4.0.1 SIDE-LYING AXIS RECOVERY [VALIDATION ONLY]
+axis_reliable
+axis_image_angle_deg
+axis_camera_undirected
+axis_score_margin
+radial residual med/p90
+center_height_error_mm
+endpoint A/B uv
+entry_endpoint
+entry_selection_rule
+entry_wall_clearance_mm
+robot motion: DISABLED BY M39.4.0.1 CONTRACT
 ```
 
-只应在多轮 FLAT/TILTED 验证后使用。
+即使脚本带 `--execute`，该分支也会直接结束本轮，不执行机械臂运动。
 
-## 5. 调试数据
+## 4. Debug 文件
 
-视觉服务收到 `save_debug=true` 时默认保存到：
+`save_debug=true` 时目录：
 
 ```text
 /opt/visionops_v3/data/foam_ring_online_geometry/<capture_timestamp_ms>/
 ```
 
-常用文件：
+M39.4.0.1 新增：
 
 ```text
-exact_rgb.png
-exact_depth.png
-depth_colormap.jpg
-online_geometry_overlay.jpg
-runtime_inference_result.json
-online_geometry_result.json
-m39_3_1_tilt_evidence.json
-m39_3_4_analytic_conic_surface.json
-m39_3_4_1_tilted_production_routing.json
+m39_4_0_side_axis_recovery.json
 ```
 
-`detect_move_validate.py` 会直接在终端打印这些关键文件路径，并在当前工作目录保存完整响应：
+同时 `online_geometry_overlay.jpg` 会画：
 
-```text
-foam_ring_robot_validation_logs/<request_id>.json
+- 恢复的 opening axis；
+- A/B 两个理论端面中心；
+- 最终 entry endpoint；
+- axis angle / score margin；
+- `robot=OFF`。
+
+常用查看：
+
+```bash
+LATEST=$(ls -dt /opt/visionops_v3/data/foam_ring_online_geometry/* | head -1)
+ls -lh "$LATEST"
+jq '.scene.m39_4_0_side_axis_recovery' "$LATEST/online_geometry_result.json"
 ```
 
-## 6. 当前拒绝策略
+## 5. 当前 M39.4.0.1 质量门限
 
-下列情况不运动机器人：
+主要门限位于 `line.yaml -> m39_4_0_side_axis_recovery`：
 
-- 无可靠 `ring_mouth` 匹配；
-- surface classification = `UNCERTAIN`；
-- TILTED 但未走 `M39.3.4.1_TILTED`；
-- TILTED approach 与 `-analytic normal` 不一致；
-- 3 点钟抓取不通过几何/碰撞检查；
-- robot pose transform 未 ready；
-- base/flange frame 不匹配；
-- pregrasp/grasp 距离或四元数异常；
-- 机器人起始位置偏离 READY/INITIAL 超限。
+- pseudo-mouth ellipse axis ratio（默认 `<=0.50` 回流侧躺分支）；
+- quick two-axis margin（只决定是否启动双轴完整拟合，不再直接拒绝）；
+- dual-seed full-geometry score margin；
+- fixed-radius radial median / p90；
+- radial inlier ratio；
+- center-height warning（只影响 `center_reliable`）；
+- vertical-axis threshold。
 
-无 mouth 的侧躺圆环属于下一阶段 M39.4，不允许由旧 M38/M37 fallback 自动处理。
+出现 `axis_uncertain` 时优先检查 full-geometry margin 与 radial quality；`center_reliable=false` 本身不代表轴线错误。
+
+## 6. 暂不处理
+
+以下情况继续拒绝：
+
+- 一头翘起；
+- 明显 Z 向倾斜；
+- 深度缺失/大面积污染；
+- 双轴完整拟合后 full-geometry 仍无法拉开差距；
+- 圆柱半径残差不符合已知 85 mm 外径。
+
+这些属于 M39.4 后续阶段，不在 M39.4.0.1 内增加复杂 fallback。
