@@ -1,52 +1,58 @@
-# M39.3.4.1 Production Cleanup Manifest
+# Clean Production Baseline Manifest — 2026-08-17
 
-## 删除的历史资产
+本次以用户上传的当前可抓取版本为唯一基线，只整理 production 目录，不修改已经现场验证的抓取算法、hand-eye、box model 或 `line.yaml` 参数。
 
-- 根目录阶段性说明 `M35.3_*`。
-- `docs/` 下 M38.x、M39.2.x、M39.3.0~3.3 阶段说明和 replay JSON。
-- `scripts/` 下所有 `replay_*`、`test_m39_*`、timing summary、共享内存诊断等阶段性测试脚本。
-- `config/line_clock3_calibration.yaml`。
-- `config/line.yaml.bak_*`。
-- 旧 `handeye_left_20260808_*` 以及 chest-base backup。
-- `config/box_model_overlay.jpg`。
-- task 中不被在线 service 引用的 `offline_validate.py`、`online_validate.py`、`box_calibration.py` 和 `tools/`。
-- M39.3.2 ring-prior 在线诊断调用和独立 M39.3.3 在线诊断调用。
+## 保留
 
-## 保留/整合
+- 当前唯一 `config/line.yaml`（schema 7.2）。
+- 当前 production workspace local hand-eye：`config/handeye_calibration.json`。
+- 当前有效 `config/box_model.json`。
+- Runtime / online service 两个启动脚本。
+- `verify_production.py`。
+- 唯一现场机器人验证/抓取脚本 `detect_move_validate.py`。
+- 8 点箱体重标定工具 `fit_box_model_8point.py`。
+- 当前 M39.3 visible-mouth FLAT/TILTED 在线链。
+- 当前 M39.4.0.1 / M39.4.1 / M39.4.2.2 pure-side 在线链。
+- 当前仍被 active import graph 复用的 M38/M37 几何模块，即使文件名带历史 milestone，也不删除。
 
-- 当前唯一 `line.yaml`。
-- 当前有效 hand-eye 文件，改为稳定名 `handeye_left_20260810_190310_robot_default_base.json`。
-- `box_model.json`。
-- 28081 Runtime / 19213 service 启动脚本。
-- 一个统一生产预检脚本 `verify_production.py`。
-- 一个统一视觉+机器人验证脚本 `detect_move_validate.py`。
-- 历史 docs 合并为 README + Architecture + Operations。
-- `side_ring_offline_validate.py` 的运行时 overlay 部分提取为 `side_ring_overlay.py`。
+## 删除
 
-## 配置收束
+### 标定中间/历史文件
 
-- `line.yaml`: 1461 行 → 约 550 行。
-- FLAT clock: 3 only。
-- TILTED clock: 3 only。
-- fallback clock: disabled。
-- M38 branch B: disabled。
-- M38 branch D: disabled。
-- M37 side fallback: disabled。
-- no-mouth: branch C conservative reject until M39.4。
-- M39.3.2 / M39.3.3 historical online diagnostics: removed。
+- `config/box_model.json.bak_20260817_032157`
+- `config/box_model_8point_candidate.json`
+- `config/box_model_8point_candidate_overlay.jpg`
+- `config/box_model_8point_candidate_points.json`
+- `config/handeye_left_20260810_190310_robot_default_base.json`
 
-## M39.4.0.1 增量
+其中 `box_model_8point_candidate.json` 与当前 `box_model.json` SHA256 完全相同，已经完成安装，不再重复保留。
 
-- 新增 `tasks/foam_ring_grasp_vision/side_axis_recovery.py`，作为唯一 no-mouth pure-side 在线几何模块。
-- 不恢复历史 M37/M38 side production fallback；旧模块继续保持 disabled/maintenance-only。
-- `line.yaml` 只新增一段 M39.4.0.1 参数，不重新引入历史大段配置。
-- `detect_move_validate.py` 统一承担 visible-mouth robot validation 与 M39.4.0.1 diagnostic 输出，不新增阶段性测试脚本。
-- 新分支严格 `robot_routing_enabled=false`，M39.4.1 前不生成侧躺机器人抓取点。
+### 已退出生产链的历史验证模块
 
-## M39.4.1 增量
+- `tasks/foam_ring_grasp_vision/offline_validate.py`（M35.4 CLI）
+- `tasks/foam_ring_grasp_vision/online_validate.py`（历史 one-shot validator）
+- `tasks/foam_ring_grasp_vision/ring_prior_surface.py`（M39.3.2 独立诊断实现，当前无调用）
+- `tasks/foam_ring_grasp_vision/side_ring_offline_validate.py`（M37 offline validator）
 
-- 新增 `tasks/foam_ring_grasp_vision/side_opening_reconstruction.py`，只负责 camera-facing outer arc、selected-end opening plane 与 Side Grasp Frame。
-- 不恢复任何已清理的历史 side-ring 脚本或大段配置。
-- `line.yaml` 仅新增紧凑的 `m39_4_1_side_opening_reconstruction` 参数段。
-- `detect_move_validate.py` 继续作为唯一现场验证脚本；M39.4.1 只打印几何结果，不允许机器人运动。
-- M39.4.0.1 的 floor-resting center 仅保留诊断含义，M39.4.1 不依赖箱底高度。
+这些文件均不在当前 service / online processor / robot script 的 active import graph 中。
+
+## 文档同步
+
+旧文档仍残留 90/35/18 mm、entry-only/no-close 等历史描述。本次统一到当前真实配置：
+
+```text
+side PREGRASP outside ENTRY = 20 mm
+side GRASP inside ENTRY     = 39 mm
+PREGRASP → GRASP            = 59 mm
+ENTRY                       = diagnostic only
+robot cycle                 = full GRASP + CLOSE
+```
+
+## 整理结果
+
+```text
+before: 49 files, ~1.7 MB
+after : 40 files, ~1.5 MB
+```
+
+后续开发应继续以这 40 文件干净基线增量修改，不把 candidate、backup、replay、阶段性 test script 或历史 milestone 文档重新放回 production 包。

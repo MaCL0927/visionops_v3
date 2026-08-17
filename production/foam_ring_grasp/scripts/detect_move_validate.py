@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Foam-ring production validation (M39.3.4.1 visible-mouth baseline):
-Enter -> vision trigger -> M39.3.4.1 surface-route verification -> [optional confirm]
--> open left gripper -> LEFT_LINK7 pregrasp -> LEFT_LINK7 grasp -> close left gripper
--> retract -> initial/ready pose -> open left gripper.
+Foam-ring production validation for two frozen branches:
+- visible-mouth FLAT/TILTED: existing M39.3.4.1 production grasp;
+- side-lying: M39.4.2.2 short-PREGRASP direct side rim-pinch production grasp.
 
-The script refuses motion when a TILTED/UNCERTAIN result silently falls back to
-the old floor-parallel route. Use --single-enter only after repeated dry-run and
-confirmed tilted-pose validation.
+Side-lying motion uses its own ready pose and mandatory collision-avoidance
+waypoint before PREGRASP. ENTRY is retained only as a visual/geometric reference;
+the robot moves directly PREGRASP -> GRASP. After CLOSE it moves directly from
+GRASP to the collision-avoidance waypoint before returning to SIDE_INITIAL.  Side motion always retains a second operator Enter;
+--single-enter applies only to the mature visible-mouth branch.
 
 IMPORTANT FRAME CONTRACT
 ------------------------
@@ -20,6 +21,8 @@ also changed to SDK base_link.
 
 Default mode is DRY RUN. Start with --execute only after dry-run output is sane.
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -57,8 +60,9 @@ GRIPPER_CLOSE_SETTLE_S = 1.0
 EXPECTED_BASE_FRAME = "robot_default_base"
 EXPECTED_FLANGE_FRAME = "left_link7"
 
-# User-provided initial LEFT_LINK7 pose in SDK default / robot_default_base.
-INITIAL_POSE_MM = [
+# Branch-specific LEFT_LINK7 ready poses in SDK default / robot_default_base.
+# Visible-mouth FLAT/TILTED keeps the previously validated ready pose.
+VISIBLE_INITIAL_POSE_MM = [
     438.5426645162859,
     505.62191497575617,
     882.1935751476652,
@@ -66,6 +70,29 @@ INITIAL_POSE_MM = [
     0.48014826760863427,
     -0.5025941271032957,
     0.5124789643550238
+]
+
+# M39.4 side-lying branch uses the field-provided ready pose below.
+SIDE_INITIAL_POSE_MM = [
+    415.5408865584812,
+    611.0484969003413,
+    774.353022981596,
+    -0.684075236879074,
+    0.7291619332140463,
+    0.005389005927504927,
+    0.018300384026211324
+]
+
+# Field-provided collision-avoidance waypoint.  Every side-lying production
+# cycle must pass through this pose before PREGRASP and again after retreat.
+SIDE_COLLISION_AVOIDANCE_POSE_MM = [
+    397.3401910460248,
+    324.9133103213571,
+    764.5796470546751,
+    -0.6840744498275672,
+    0.729162751670706,
+    0.00538940002121367,
+    0.018297077267340554
 ]
 
 # Conservative first-test motion parameters. Adjust only after validation.
@@ -96,6 +123,14 @@ EXPECTED_FLAT_ROUTE = "M39.2.9_FLAT"
 DEFAULT_MIN_TILTED_ROUTE_DEG = 8.0
 DEFAULT_MAX_TILTED_ROUTE_DEG = 35.0
 MAX_PREGRASP_GRASP_ROTATION_DELTA_DEG = 1.0
+SIDE_ENTRY_VEL = 3
+SIDE_ENTRY_ACC = 15
+SIDE_GRASP_VEL = 2
+SIDE_GRASP_ACC = 10
+SIDE_TRANSIT_VEL = 8
+SIDE_TRANSIT_ACC = 25
+MAX_SIDE_PREGRASP_TO_ENTRY_MM = 160.0
+MAX_SIDE_ENTRY_TO_GRASP_MM = 40.0
 
 
 def _finite(values: Sequence[float]) -> bool:
@@ -389,7 +424,7 @@ def extract_left_link7_targets(data: Mapping[str, Any]) -> Tuple[List[float], Li
             f"pregrasp->grasp distance abnormal: {approach_mm:.1f} mm "
             f"(allowed {MIN_PREGRASP_TO_GRASP_MM:.1f}..{MAX_PREGRASP_TO_GRASP_MM:.1f})"
         )
-    home_to_pre = _distance_mm(INITIAL_POSE_MM, pre_pose)
+    home_to_pre = _distance_mm(VISIBLE_INITIAL_POSE_MM, pre_pose)
     if home_to_pre > MAX_INITIAL_TO_PREGRASP_MM:
         raise RuntimeError(
             f"initial->pregrasp distance abnormal: {home_to_pre:.1f} mm > "
@@ -397,6 +432,77 @@ def extract_left_link7_targets(data: Mapping[str, Any]) -> Tuple[List[float], Li
         )
     return pre_pose, grasp_pose
 
+
+
+def extract_m3942_left_link7_targets(data: Mapping[str, Any]) -> Tuple[List[float], List[float], List[float]]:
+    summary = data.get("scene_summary") if isinstance(data.get("scene_summary"), Mapping) else {}
+    m3942 = summary.get("m39_4_2_side_entry_validation") if isinstance(summary, Mapping) else None
+    if not isinstance(m3942, Mapping) or not bool(m3942.get("executed", False)):
+        raise RuntimeError("M39.4.2 side entry summary missing")
+    if not bool(m3942.get("production_grasp_ready", False)):
+        raise RuntimeError(
+            "M39.4.2.2 side grasp is not production-ready: "
+            f"{m3942.get('display_reason_short') or m3942.get('reason')}"
+        )
+    if str(data.get("selected_grasp_branch") or "") != "m39_4_2_2_side_grasp_production":
+        raise RuntimeError(
+            f"unexpected side branch: {data.get('selected_grasp_branch')!r}"
+        )
+    if data.get("target_found") is not True or data.get("terminal_reject") is True:
+        raise RuntimeError("M39.4.2 ready summary did not produce a non-rejected candidate")
+    candidate = data.get("candidate") if isinstance(data.get("candidate"), Mapping) else {}
+    if not bool(candidate.get("production_grasp_ready", False)):
+        raise RuntimeError("candidate.production_grasp_ready is not true")
+    command = candidate.get("gripper_command") if isinstance(candidate.get("gripper_command"), Mapping) else {}
+    if command.get("close_allowed") is not True:
+        raise RuntimeError("M39.4.2.2 candidate does not explicitly allow gripper CLOSE")
+    validation = candidate.get("side_entry_validation") if isinstance(candidate.get("side_entry_validation"), Mapping) else {}
+    path = validation.get("path_collision") if isinstance(validation.get("path_collision"), Mapping) else {}
+    if str(path.get("status") or "") != "clear":
+        raise RuntimeError(f"M39.4.2 path_collision.status={path.get('status')!r}")
+    inner = validation.get("inner_finger_hole_envelope") if isinstance(validation.get("inner_finger_hole_envelope"), Mapping) else {}
+    outer = validation.get("outer_finger_clearance") if isinstance(validation.get("outer_finger_clearance"), Mapping) else {}
+    if inner.get("pass") is not True:
+        raise RuntimeError("M39.4.2 inner finger hole envelope did not pass")
+    if outer.get("pass") is not True:
+        raise RuntimeError("M39.4.2 outer finger clearance did not pass")
+    closed_env = validation.get("closed_grasp_environment") if isinstance(validation.get("closed_grasp_environment"), Mapping) else {}
+    if str(closed_env.get("status") or "") != "clear":
+        raise RuntimeError(f"M39.4.2.2 closed grasp environment status={closed_env.get('status')!r}")
+    if data.get("robot_pose_transform_ready") is not True:
+        raise RuntimeError("robot_pose_transform_ready is not true")
+    rt = data.get("robot_pose_transform") if isinstance(data.get("robot_pose_transform"), Mapping) else {}
+    if str(rt.get("status") or "") != "ok":
+        raise RuntimeError(f"robot_pose_transform.status={rt.get('status')!r}")
+    flange = rt.get("flange") if isinstance(rt.get("flange"), Mapping) else {}
+    if flange.get("available") is not True or str(flange.get("frame_id") or "") != EXPECTED_FLANGE_FRAME:
+        raise RuntimeError("M39.4.2 LEFT_LINK7 flange transform unavailable")
+    docs = {}
+    for name in ("pregrasp", "entry", "grasp"):
+        row = flange.get(name) if isinstance(flange.get(name), Mapping) else {}
+        doc = row.get("pose_base") if isinstance(row.get("pose_base"), Mapping) else None
+        if not isinstance(doc, Mapping):
+            raise RuntimeError(f"flange.{name}.pose_base missing")
+        docs[name] = _pose_from_document(doc, expected_frame=EXPECTED_BASE_FRAME)
+    pre_pose, entry_pose, grasp_pose = docs["pregrasp"], docs["entry"], docs["grasp"]
+    for name, pose in (("entry", entry_pose), ("grasp", grasp_pose)):
+        dr = _quat_angle_deg(pre_pose[3:7], pose[3:7])
+        if dr > MAX_PREGRASP_GRASP_ROTATION_DELTA_DEG:
+            raise RuntimeError(f"M39.4.2 {name} orientation changed by {dr:.3f}deg")
+    pre_entry = _distance_mm(pre_pose, entry_pose)
+    entry_grasp = _distance_mm(entry_pose, grasp_pose)
+    if not (10.0 <= pre_entry <= MAX_SIDE_PREGRASP_TO_ENTRY_MM):
+        raise RuntimeError(f"side PREGRASP->ENTRY distance abnormal: {pre_entry:.1f} mm")
+    if not (1.0 <= entry_grasp <= MAX_SIDE_ENTRY_TO_GRASP_MM):
+        raise RuntimeError(f"side ENTRY->GRASP distance abnormal: {entry_grasp:.1f} mm")
+    pre_grasp = _distance_mm(pre_pose, grasp_pose)
+    expected_direct = pre_entry + entry_grasp
+    if abs(pre_grasp - expected_direct) > 1.0:
+        raise RuntimeError(
+            f"side PREGRASP->GRASP is not a coaxial direct segment: "
+            f"direct={pre_grasp:.1f} mm, via-entry={expected_direct:.1f} mm"
+        )
+    return pre_pose, entry_pose, grasp_pose
 
 def save_result(data: Mapping[str, Any]) -> Path:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -523,6 +629,51 @@ def print_vision_summary(
 
 
 
+
+def print_m3942_side_entry_summary(data: Mapping[str, Any], poses: Tuple[Sequence[float], Sequence[float], Sequence[float]] | None = None) -> bool:
+    summary = data.get("scene_summary") if isinstance(data.get("scene_summary"), Mapping) else {}
+    m3942 = summary.get("m39_4_2_side_entry_validation") if isinstance(summary, Mapping) else None
+    if not isinstance(m3942, Mapping) or not bool(m3942.get("executed", False)):
+        return False
+    row = m3942.get("selected") if isinstance(m3942.get("selected"), Mapping) else m3942.get("diagnostic")
+    if not isinstance(row, Mapping):
+        row = {}
+    inner = row.get("inner_finger_hole_envelope") if isinstance(row.get("inner_finger_hole_envelope"), Mapping) else {}
+    outer = row.get("outer_finger_clearance") if isinstance(row.get("outer_finger_clearance"), Mapping) else {}
+    path = row.get("path_collision") if isinstance(row.get("path_collision"), Mapping) else {}
+    print("\n" + "=" * 78)
+    print("M39.4.2.2 SIDE PRODUCTION GRASP")
+    print("=" * 78)
+    print(f"request_id               : {data.get('request_id')}")
+    print(f"status                   : {m3942.get('status')}")
+    print(f"selected_grasp_branch    : {data.get('selected_grasp_branch')}")
+    print(f"entry endpoint           : {row.get('entry_endpoint')} / {row.get('entry_selection_rule')}")
+    print(f"opening center camera    : {row.get('opening_center_camera_mm')}")
+    print(f"rim midpoint ENTRY       : {row.get('entry_center_camera_mm')}")
+    print(f"GRASP preview            : {row.get('grasp_center_camera_mm')}")
+    print(f"PREGRASP                 : {row.get('pregrasp_center_camera_mm')}")
+    print(f"approach opening         : {row.get('approach_opening_mm')} mm")
+    print(f"inner hole clearance     : {inner.get('minimum_clearance_mm')} mm / pass={inner.get('pass')}")
+    print(f"outer finger clearance   : {outer.get('minimum_clearance_mm')} mm / pass={outer.get('pass')}")
+    print(f"open insertion path      : {path.get('status')}")
+    first = path.get("first_reject") if isinstance(path.get("first_reject"), Mapping) else None
+    if first:
+        print(f"first collision/reject   : {first.get('stage')} sample={first.get('sample_index')}")
+    print(f"rejection_reasons        : {row.get('rejection_reasons')}")
+    if poses is not None:
+        pre_pose, entry_pose, grasp_pose = poses
+        print(_format_pose("LEFT_LINK7 PREGRASP", pre_pose))
+        print(_format_pose("LEFT_LINK7 ENTRY", entry_pose))
+        print(_format_pose("LEFT_LINK7 GRASP", grasp_pose))
+        print(f"PREGRASP -> ENTRY(ref)   : {_distance_mm(pre_pose, entry_pose):.3f} mm")
+        print(f"ENTRY(ref) -> GRASP      : {_distance_mm(entry_pose, grasp_pose):.3f} mm")
+        print(f"PREGRASP -> GRASP direct : {_distance_mm(pre_pose, grasp_pose):.3f} mm")
+    print("robot action             : PREGRASP -> GRASP direct; CLOSE; GRASP -> AVOIDANCE direct")
+    print("ENTRY robot stop         : DISABLED (diagnostic reference only)")
+    print("GRASP/CLOSE              : ENABLED; CLOSE only after SIDE-GRASP is reached")
+    print("=" * 78)
+    return True
+
 def print_m3941_side_opening_summary(data: Mapping[str, Any]) -> bool:
     summary = data.get("scene_summary") if isinstance(data.get("scene_summary"), Mapping) else {}
     m3941 = summary.get("m39_4_1_side_opening_reconstruction") if isinstance(summary, Mapping) else None
@@ -617,6 +768,7 @@ def print_debug_artifacts(data: Mapping[str, Any]) -> None:
         ("MOUTH TOPO", "m39_4_0_1_mouth_topology_arbitration"),
         ("SIDE AXIS", "m39_4_0_side_axis_recovery"),
         ("SIDE OPEN", "m39_4_1_side_opening_reconstruction"),
+        ("SIDE ENTRY", "m39_4_2_side_entry_validation"),
     ]
     rows = []
     for label, key in wanted:
@@ -635,19 +787,31 @@ def print_debug_artifacts(data: Mapping[str, Any]) -> None:
         print(f"{label:<12}: {path}")
     print("-" * 78)
 
-def ensure_start_near_initial(robot: RobotClient) -> None:
+def ensure_start_near_pose(robot: RobotClient, expected_pose_mm: Sequence[float], label: str) -> None:
     actual = current_pose_mm(robot)
-    d = _distance_mm(actual, INITIAL_POSE_MM)
-    r = _quat_angle_deg(actual[3:7], INITIAL_POSE_MM[3:7])
+    d = _distance_mm(actual, expected_pose_mm)
+    r = _quat_angle_deg(actual[3:7], expected_pose_mm[3:7])
     print(_format_pose("current LEFT_LINK7", actual))
-    print(_format_pose("configured initial", INITIAL_POSE_MM))
+    print(_format_pose(label, expected_pose_mm))
     print(f"start offset              : {d:.3f} mm / {r:.3f} deg")
     if d > MAX_START_OFFSET_FROM_INITIAL_MM or r > MAX_START_ROTATION_FROM_INITIAL_DEG:
         raise RuntimeError(
-            f"robot start pose differs from configured initial pose by {d:.1f} mm / {r:.1f} deg; "
+            f"robot start pose differs from {label} by {d:.1f} mm / {r:.1f} deg; "
             f"limits are {MAX_START_OFFSET_FROM_INITIAL_MM:.1f} mm / "
-            f"{MAX_START_ROTATION_FROM_INITIAL_DEG:.1f} deg. Move it near the initial pose first."
+            f"{MAX_START_ROTATION_FROM_INITIAL_DEG:.1f} deg."
         )
+
+
+def print_known_start_poses(robot: RobotClient) -> None:
+    actual = current_pose_mm(robot)
+    print(_format_pose("current LEFT_LINK7", actual))
+    for label, pose in (("visible initial", VISIBLE_INITIAL_POSE_MM), ("side initial", SIDE_INITIAL_POSE_MM)):
+        print(_format_pose(label, pose))
+        print(
+            f"  offset -> {label}: {_distance_mm(actual, pose):.1f} mm / "
+            f"{_quat_angle_deg(actual[3:7], pose[3:7]):.1f} deg"
+        )
+    print("Branch-specific start pose will be enforced after vision routing.")
 
 
 def wait_for_confirmation(prompt: str = "Press Enter to confirm robot execution (or 'c' to cancel)") -> bool:
@@ -681,7 +845,7 @@ def execute_cycle(robot: RobotClient, pre_pose: Sequence[float], grasp_pose: Seq
         print("! Trying conservative retreat to PREGRASP, then INITIAL; gripper stays OPEN.")
         try:
             move_l_mm(robot, pre_pose, label="PREGRASP-RECOVERY", vel=APPROACH_VEL, acc=APPROACH_ACC)
-            move_l_mm(robot, INITIAL_POSE_MM, label="INITIAL-RECOVERY", vel=RETURN_VEL, acc=RETURN_ACC)
+            move_l_mm(robot, VISIBLE_INITIAL_POSE_MM, label="INITIAL-RECOVERY", vel=RETURN_VEL, acc=RETURN_ACC)
             # Reassert the required ready-state command after recovery.
             set_left_gripper(robot, opened=True, label="READY/INITIAL after recovery")
         except Exception as recovery_error:
@@ -697,7 +861,7 @@ def execute_cycle(robot: RobotClient, pre_pose: Sequence[float], grasp_pose: Seq
     # The extra pregrasp retreat avoids a direct diagonal grasp->initial path.
     try:
         move_l_mm(robot, pre_pose, label="PREGRASP-RETURN", vel=APPROACH_VEL, acc=APPROACH_ACC)
-        move_l_mm(robot, INITIAL_POSE_MM, label="INITIAL", vel=RETURN_VEL, acc=RETURN_ACC)
+        move_l_mm(robot, VISIBLE_INITIAL_POSE_MM, label="INITIAL", vel=RETURN_VEL, acc=RETURN_ACC)
     except Exception:
         print("\n! Return motion failed AFTER gripper CLOSE.")
         print("! Gripper will remain CLOSED; it will NOT be opened away from the ready/initial point.")
@@ -707,8 +871,65 @@ def execute_cycle(robot: RobotClient, pre_pose: Sequence[float], grasp_pose: Seq
     set_left_gripper(robot, opened=True, label="READY/INITIAL cycle complete")
 
 
+
+def execute_side_grasp_cycle(
+    robot: RobotClient,
+    pre_pose: Sequence[float],
+    entry_pose: Sequence[float],
+    grasp_pose: Sequence[float],
+) -> None:
+    """M39.4.2.2 direct side grasp with a short PREGRASP.
+
+    ENTRY is intentionally diagnostic-only.  The executable motion contract is:
+      SIDE_INITIAL[OPEN] -> AVOIDANCE[OPEN] -> PREGRASP[OPEN] -> GRASP[OPEN]
+      -> CLOSE -> AVOIDANCE[CLOSED] -> SIDE_INITIAL[CLOSED] -> OPEN.
+
+    `entry_pose` is kept in the function signature so the script can continue to
+    validate/print the reconstructed opening-plane pose, but no robot move is
+    issued to it.
+    """
+    del entry_pose  # geometric reference only; never a robot stop in M39.4.2.2
+    set_left_gripper(robot, opened=True, label="M39.4.2.2 SIDE INITIAL")
+    closed = False
+    reached_grasp = False
+    try:
+        move_l_mm(robot, SIDE_COLLISION_AVOIDANCE_POSE_MM, label="SIDE-AVOIDANCE", vel=SIDE_TRANSIT_VEL, acc=SIDE_TRANSIT_ACC)
+        move_l_mm(robot, pre_pose, label="SIDE-PREGRASP", vel=SIDE_TRANSIT_VEL, acc=SIDE_TRANSIT_ACC)
+        move_l_mm(robot, grasp_pose, label="SIDE-GRASP", vel=SIDE_GRASP_VEL, acc=SIDE_GRASP_ACC)
+        reached_grasp = True
+        set_left_gripper(robot, opened=False, label="SIDE-GRASP pose")
+        closed = True
+
+        # Field requirement: once the part is secured, do not retrace the
+        # insertion axis.  Leave the box directly via the fixed avoidance pose.
+        move_l_mm(robot, SIDE_COLLISION_AVOIDANCE_POSE_MM, label="SIDE-AVOIDANCE-RETURN", vel=SIDE_TRANSIT_VEL, acc=SIDE_TRANSIT_ACC)
+        move_l_mm(robot, SIDE_INITIAL_POSE_MM, label="SIDE-INITIAL", vel=RETURN_VEL, acc=RETURN_ACC)
+        set_left_gripper(robot, opened=True, label="SIDE INITIAL cycle complete")
+    except Exception:
+        if closed:
+            print("\n! M39.4.2.2 failure AFTER gripper CLOSE.")
+            print("! Gripper remains CLOSED. No automatic reverse-to-PREGRASP is attempted.")
+            print("! Best effort is direct SIDE-AVOIDANCE -> SIDE_INITIAL only.")
+        else:
+            print("\n! M39.4.2.2 approach failure while gripper is OPEN.")
+            print("! Attempting conservative PREGRASP -> AVOIDANCE -> SIDE INITIAL recovery.")
+        try:
+            if closed and reached_grasp:
+                move_l_mm(robot, SIDE_COLLISION_AVOIDANCE_POSE_MM, label="SIDE-AVOIDANCE-RECOVERY", vel=SIDE_TRANSIT_VEL, acc=SIDE_TRANSIT_ACC)
+                move_l_mm(robot, SIDE_INITIAL_POSE_MM, label="SIDE-INITIAL-RECOVERY", vel=RETURN_VEL, acc=RETURN_ACC)
+            else:
+                move_l_mm(robot, pre_pose, label="SIDE-PREGRASP-RECOVERY", vel=SIDE_ENTRY_VEL, acc=SIDE_ENTRY_ACC)
+                move_l_mm(robot, SIDE_COLLISION_AVOIDANCE_POSE_MM, label="SIDE-AVOIDANCE-RECOVERY", vel=SIDE_TRANSIT_VEL, acc=SIDE_TRANSIT_ACC)
+                move_l_mm(robot, SIDE_INITIAL_POSE_MM, label="SIDE-INITIAL-RECOVERY", vel=RETURN_VEL, acc=RETURN_ACC)
+                set_left_gripper(robot, opened=True, label="SIDE INITIAL after recovery")
+        except Exception as recovery_error:
+            print(f"!! automatic side recovery failed: {recovery_error}")
+            print("!! Stop and inspect the robot manually.")
+        raise
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="M39.4.1 side-opening frame validation + visible-mouth LEFT robot motion validation")
+    parser = argparse.ArgumentParser(description="M39.4.2.2 side production grasp + visible-mouth LEFT robot motion validation")
     parser.add_argument(
         "--execute",
         action="store_true",
@@ -744,7 +965,7 @@ def main() -> int:
 
     mode = "EXECUTE" if args.execute else "DRY-RUN"
     print("=" * 78)
-    print(f"M39.4.1 SIDE OPENING FRAME + VISIBLE-MOUTH PRODUCTION VALIDATION [{mode}]")
+    print(f"M39.4.2.2 SIDE GRASP + VISIBLE-MOUTH PRODUCTION VALIDATION [{mode}]")
     print("Enter : trigger vision")
     print("After vision: " + ("safe result executes immediately (--single-enter)" if args.single_enter else "Enter to execute robot motion, 'c' to cancel"))
     print("q     : quit")
@@ -758,7 +979,7 @@ def main() -> int:
     try:
         if args.execute:
             assert robot is not None
-            ensure_start_near_initial(robot)
+            print_known_start_poses(robot)
         else:
             print("DRY-RUN: robot is not connected and no motion is possible. Use --execute after checking the output.")
 
@@ -776,16 +997,54 @@ def main() -> int:
                 print("\n>>> TRIGGERING VISION...")
                 data = trigger_vision(vision_session, save_debug=not args.no_save_debug)
                 log_path = save_result(data)
+                scene_summary = data.get("scene_summary") if isinstance(data.get("scene_summary"), Mapping) else {}
+                m3942 = scene_summary.get("m39_4_2_side_entry_validation") if isinstance(scene_summary, Mapping) else None
+                if isinstance(m3942, Mapping) and bool(m3942.get("executed", False)):
+                    if bool(m3942.get("production_grasp_ready", False)):
+                        side_poses = extract_m3942_left_link7_targets(data)
+                        print_m3942_side_entry_summary(data, side_poses)
+                        print(f"vision JSON saved         : {log_path}")
+                        print_debug_artifacts(data)
+                        if not args.execute:
+                            print("DRY-RUN complete: M39.4.2.2 side grasp was not executed.")
+                            continue
+                        assert robot is not None
+                        ensure_start_near_pose(robot, SIDE_INITIAL_POSE_MM, "configured SIDE initial")
+                        print("\n" + "-" * 60)
+                        print("M39.4.2.2 SIDE GRASP NEXT STEPS:")
+                        print("  → OPEN left gripper")
+                        print("  → Move to SIDE-AVOIDANCE waypoint")
+                        print("  → Move to SIDE-PREGRASP")
+                        print("  → Direct coaxial move SIDE-PREGRASP → SIDE-GRASP (ENTRY is diagnostic only)")
+                        print("  → CLOSE left gripper at SIDE-GRASP")
+                        print("  → After CLOSE: direct SIDE-GRASP → SIDE-AVOIDANCE → SIDE-INITIAL")
+                        print("  → OPEN left gripper at SIDE-INITIAL")
+                        print("-" * 60)
+                        # Keep a second Enter for the first production side-grasp tests.
+                        confirmed = wait_for_confirmation("Press Enter for SIDE GRASP motion, or 'c' to cancel")
+                        if not confirmed:
+                            print(">> M39.4.2.2 side-grasp execution cancelled by operator.")
+                            continue
+                        pre_side, entry_side, grasp_side = side_poses
+                        execute_side_grasp_cycle(robot, pre_side, entry_side, grasp_side)
+                        print("\n✓ M39.4.2.2 SIDE GRASP CYCLE COMPLETE")
+                        continue
+                    print_m3942_side_entry_summary(data)
+                    print(f"vision JSON saved         : {log_path}")
+                    print_debug_artifacts(data)
+                    print("M39.4.2.2 rejected this side-grasp candidate; robot will NOT move.")
+                    continue
+
                 if data.get("target_found") is not True:
                     if print_m3941_side_opening_summary(data):
                         print(f"vision JSON saved         : {log_path}")
                         print_debug_artifacts(data)
-                        print("M39.4.1 is validation-only: this side-lying target will NOT move the robot.")
+                        print("M39.4.1 opening reconstruction did not reach M39.4.2.2 side-grasp routing; robot will NOT move.")
                         continue
                     if print_m3940_side_axis_summary(data):
                         print(f"vision JSON saved         : {log_path}")
                         print_debug_artifacts(data)
-                        print("M39.4.0.1 is diagnostic-only: this side-lying target will NOT move the robot.")
+                        print("M39.4.0.1 side axis is diagnostic-only until M39.4.1/.2 pass.")
                         continue
                 route_info = validate_m39341_production_route(
                     data,
@@ -804,7 +1063,7 @@ def main() -> int:
 
                 # Check start state before waiting for confirmation (so user sees if it's valid)
                 assert robot is not None
-                ensure_start_near_initial(robot)
+                ensure_start_near_pose(robot, VISIBLE_INITIAL_POSE_MM, "configured visible-mouth initial")
 
                 # Show what will happen
                 print("\n" + "-" * 60)

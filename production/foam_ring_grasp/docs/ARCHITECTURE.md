@@ -1,92 +1,121 @@
-# Foam Ring Grasp Production Architecture — M39.4.1
+# Foam Ring Grasp Production Architecture — Clean M39.4.2.2 Baseline
 
-## 1. 当前双主分支
-
-```text
-Orbbec 336L exact aligned RGB-D
-              │
-              ▼
-       RKNN segmentation
-     foam_ring / ring_mouth
-              │
-      ┌───────┴──────────────┐
-      │                      │
-front-accessible mouth   no mouth / pseudo mouth
-      │                      │
-      ▼                      ▼
-M39.3 FLAT/TILTED       M39.4.0.1 side axis
-clock-3 only                 │
-      │                      ▼
-robot production       reliable pure-side axis
-                             │
-                             ▼
-                   M39.4.1 camera-facing arc
-                             │
-                    fixed-radius centre line
-                             │
-                   selected-end support drop
-                             │
-                    opening plane / center
-                             │
-                    Side Grasp Frame preview
-                             │
-                       robot_ready=false
-```
-
-## 2. M39.4.0.1 的职责
-
-M39.4.0.1 只确定：
-
-- 纯侧躺无向轴线；
-- 进入端策略（非竖直取画面右端；近似竖直取更远箱壁端）；
-- semantic `ring_mouth` 是否只是 `SIDE_VIEW_PSEUDO_MOUTH`。
-
-轴线约束在 calibrated box XY，但**圆环不要求接触箱底**。`center_height_error_mm` 只作为 `FLOOR_RESTING_LIKE / ELEVATED_STACKED_OR_CENTER_UNCERTAIN` 诊断，不参与 M39.4.1 center 重建。
-
-## 3. M39.4.1 camera-facing outer arc
-
-M39.4.1 不从 RGB 猜隐藏孔，也不使用箱底高度恢复圆心。
-
-对目标 ring：
-
-1. 去 mask 边缘、邻环实例和 depth discontinuity；
-2. 按 M39.4.0.1 axis 去掉轴向两端，仅保留中央约 60%；
-3. 按轴向分 bin，每个 bin 保留局部更靠近相机的 depth envelope；
-4. 在垂直 axis 的截面中，用 `R=42.5 mm` 固定半径做鲁棒圆弧中心拟合；
-5. 粗拟合后剔除明显非目标圆柱点，再二次 fixed-radius refit；
-6. 只使用 camera-facing hemisphere 产生 closing radial。
-
-因此即使目标侧躺圆环下面是箱底、竖放圆环或其他支撑物，只要目标自身可见上半圆柱弧足够，仍可恢复 centre line。
-
-## 4. Opening plane
-
-从所有符合目标外圆柱 `R=42.5 mm` 的 shell points 得到轴向坐标。按 M39.4.0.1 已选 entry end 定向后，统计 2 mm axial bins 的 support profile。
-
-从圆柱内部向外移动时，outer-arc support 会在真实端面附近下降。M39.4.1 用该 support drop 恢复 opening plane，而不是直接相信旧 `center ±35 mm`。70 mm 轴向长度只保留为先验/诊断。
-
-## 5. Side Grasp Frame
+## 1. 双主分支
 
 ```text
-+X = closing: cross-section center → measured camera-facing outer wall
-+Z = approach/insertion: selected opening → cylinder interior
-+Y = +Z × +X
+Orbbec aligned RGB-D
+        ↓
+RKNN segmentation: foam_ring / ring_mouth
+        ↓
+ ┌───────────────┬───────────────────────────┐
+ │               │                           │
+real visible mouth                 no-mouth / pseudo-mouth
+ │                                           │
+M39.3 FLAT/TILTED                        M39.4.0.1
+clock-3 only                         side axis + selected end
+ │                                           ↓
+ │                                        M39.4.1
+ │                              camera-facing arc reconstruction
+ │                                           ↓
+ │                                        M39.4.2.2
+ │                            rim-pinch + clearance + collision
+ └───────────────────────────────┬───────────┘
+                                 ↓
+                     camera → robot_default_base
+                                 ↓
+                         hand_tcp → LEFT_LINK7
 ```
 
-保证 `+X × +Y = +Z`，并与现有 `m38_6_visual_grasp` / `T_grasp_hand_tcp` 坐标契约一致：Visual +Z 最终映射到 TCP +X 前进方向，Visual +X 映射到 TCP +Z 夹紧方向。
+## 2. Side opening reconstruction
 
-当前 frame 同时输出：
+M39.4.1 不使用箱底高度恢复圆环截面中心。已知可靠 cylinder axis 和 `Ro` 后，从目标 mask 的 camera-facing outer arc 做固定半径鲁棒拟合，再由 selected end 的 axial support drop 恢复 opening plane。
 
-- `opening_frame_camera`：origin = reconstructed opening center；
-- `side_grasp_frame_camera`：origin = opening center + 18 mm * +Z。
+`opening_center` 位于圆柱中心轴；rim-pinch 的 ENTRY origin 位于 camera-facing 环壁壁厚中点：
 
-第二个 origin 只是下一阶段的 preview insertion pose，不代表已经通过夹爪/碰撞验证。
-
-## 6. Safety contract
-
-```yaml
-m39_4_1_side_opening_reconstruction:
-  mode: online_validation_only
-  robot_routing_enabled: false
+```text
+rim_radius = (Ri + Ro) / 2
+ENTRY = opening_center + rim_radius * closing_axis
 ```
 
-M39.4.1 不写 `scene.robot_candidate`，因此不会进入 LEFT_LINK7 可执行路径。下一阶段再加入 inner-finger hole containment、outer-finger clearance、PREGRASP→ENTRY→GRASP sweep collision 和机器人路由。
+## 3. Side Visual Grasp Frame
+
+沿用 `m38_6_visual_grasp` 坐标合同：
+
+```text
+Visual +X = closing axis = hole → camera-facing outer wall
+Visual +Z = insertion axis = selected opening → ring interior
+Visual +Y = right-handed lateral axis
+```
+
+已有固定变换保持：Visual +Z → TCP +X；Visual +X → TCP +Z。
+
+## 4. 当前 PREGRASP / ENTRY / GRASP
+
+以 `config/line.yaml` 为唯一参数真值。当前：
+
+```text
+PREGRASP = ENTRY - 20 mm * +Z
+ENTRY    = opening-plane rim midpoint, diagnostic reference only
+GRASP    = ENTRY + 39 mm * +Z
+```
+
+因此机器人最后一段 `PREGRASP → GRASP` 为 59 mm 共轴直线，机器人不在 ENTRY 停车。
+
+注意：M39.4.1 的 `preview_insertion_depth_mm` 不是机器人 GRASP 深度。
+
+## 5. M39.4.2.2 安全门禁
+
+对 keyframe 与 PREGRASP→GRASP 路径采样检查：
+
+- inner finger 必须进入理论内孔，并满足 `inner_hole_clearance_margin_mm`；
+- outer finger 必须保持在理论外圆柱之外，并满足 `outer_finger_clearance_margin_mm`；
+- palm / contact block / mounting disk / pneumatic fitting 不得与目标、邻环、箱壁产生超阈值冲突；
+- CLOSED GRASP 环境必须通过；
+- selected entry 发生硬碰撞时直接拒绝，不自动换另一端。
+
+侧躺箱壁采用 component-wise physical-clearance policy；mounting disk 使用保守圆柱模型，允许最多 6 mm 模型/标定容差，但不是关闭箱壁碰撞。
+
+历史通用 `robot_wrist` 圆柱默认不参与视觉工具硬碰撞，机器人腕部/手臂由机器人控制/规划层负责。
+
+## 6. Robot transform
+
+production candidate 通过后生成：
+
+```text
+LEFT_LINK7 PREGRASP
+LEFT_LINK7 ENTRY   # diagnostic/reference
+LEFT_LINK7 GRASP
+```
+
+变换链：
+
+```text
+T_base_grasp
+= T_base_camera
+  @ T_camera_grasp
+
+T_base_hand_tcp
+= T_base_grasp
+  @ T_grasp_hand_tcp
+
+T_base_left_link7
+= T_base_hand_tcp
+  @ T_hand_tcp_left_link7
+```
+
+Eye-to-Hand 必须满足 `PASS + PARK + robot_default_base + SHA256` 契约。
+
+## 7. 实际 side robot cycle
+
+```text
+SIDE_INITIAL[OPEN]
+→ SIDE_AVOIDANCE[OPEN]
+→ SIDE_PREGRASP[OPEN]
+→ SIDE_GRASP[OPEN]
+→ CLOSE
+→ SIDE_AVOIDANCE[CLOSED]
+→ SIDE_INITIAL[CLOSED]
+→ OPEN
+```
+
+抓紧后不沿 ENTRY/PREGRASP 原路退出，而是直接返回固定 SIDE_AVOIDANCE。

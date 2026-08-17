@@ -83,6 +83,10 @@ from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.side_opening_recons
     attach_m3941_side_opening_reconstruction,
     draw_m3941_side_opening_overlay,
 )
+from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.side_entry_routing import (  # noqa: E402
+    attach_m3942_side_entry_validation,
+    draw_m3942_side_entry_overlay,
+)
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "line.yaml"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "data" / "foam_ring_online_geometry"
@@ -1022,6 +1026,16 @@ class OnlineGeometryProcessor:
             self.raw_config,
         )
         timings["m39_4_1_side_opening_reconstruction_ms"] = _perf_ms(side_opening_started)
+
+        side_entry_started = time.perf_counter()
+        attach_m3942_side_entry_validation(
+            scene,
+            list(prepared.adaptation.instances),
+            prepared.depth_geometry,
+            prepared.intrinsics,
+            self.raw_config,
+        )
+        timings["m39_4_2_side_entry_validation_ms"] = _perf_ms(side_entry_started)
         scene_clean = _strip_debug(scene)
         selected = scene_clean.get("robot_candidate") if isinstance(scene_clean, Mapping) else None
 
@@ -1134,6 +1148,9 @@ class OnlineGeometryProcessor:
             m3941 = scene.get("m39_4_1_side_opening_reconstruction") if isinstance(scene, Mapping) else None
             if isinstance(m3941, Mapping) and bool(m3941.get("executed", False)):
                 overlay = draw_m3941_side_opening_overlay(overlay, m3941)
+            m3942 = scene.get("m39_4_2_side_entry_validation") if isinstance(scene, Mapping) else None
+            if isinstance(m3942, Mapping) and bool(m3942.get("executed", False)):
+                overlay = draw_m3942_side_entry_overlay(overlay, m3942)
             branch_label = str(
                 scene.get("selected_grasp_branch")
                 if isinstance(scene, Mapping)
@@ -1340,6 +1357,7 @@ class OnlineGeometryProcessor:
                 "m39_3_4_1_tilted_production_routing": self.raw_config.get("m39_3_4_1_tilted_production_routing") or {},
                 "m39_4_0_side_axis_recovery": self.raw_config.get("m39_4_0_side_axis_recovery") or {},
                 "m39_4_1_side_opening_reconstruction": self.raw_config.get("m39_4_1_side_opening_reconstruction") or {},
+                "m39_4_2_side_entry_validation": self.raw_config.get("m39_4_2_side_entry_validation") or {},
             },
             "timing_ms": {
                 key: round(float(value), 3) for key, value in timings.items()
@@ -1381,6 +1399,11 @@ class OnlineGeometryProcessor:
                 side_opening_path = output_dir / "m39_4_1_side_opening_reconstruction.json"
                 write_json(side_opening_path, dict(side_opening_summary))
                 files["m39_4_1_side_opening_reconstruction"] = str(side_opening_path)
+            side_entry_summary = scene_clean.get("m39_4_2_side_entry_validation") if isinstance(scene_clean, Mapping) else None
+            if isinstance(side_entry_summary, Mapping):
+                side_entry_path = output_dir / "m39_4_2_side_entry_validation.json"
+                write_json(side_entry_path, dict(side_entry_summary))
+                files["m39_4_2_side_entry_validation"] = str(side_entry_path)
             path = output_dir / "online_geometry_result.json"
             files["geometry_result"] = str(path)
             payload["files"] = files

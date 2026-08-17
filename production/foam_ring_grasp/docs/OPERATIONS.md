@@ -1,13 +1,20 @@
-# Production Operations — M39.4.1
+# Production Operations — Clean M39.4.2.2
 
-## 1. 预检
+## 1. 生产预检
 
 ```bash
 cd /opt/visionops_v3
 python3 production/foam_ring_grasp/scripts/verify_production.py
 ```
 
-预检会检查 clock-3-only、hand-eye、M39.4.0.1、M39.4.1 validation-only 契约。
+必须确认：
+
+- `status=ok`；
+- visible-mouth FLAT/TILTED clock 固定 `[3]`，fallback disabled；
+- hand-eye = PASS / PARK / robot_default_base / SHA256 verified；
+- M39.4.2.2 `mode=side_grasp_production`；
+- `production_grasp_enabled=true`；
+- `gripper_closing_enabled=true`。
 
 ## 2. 启动
 
@@ -16,80 +23,56 @@ bash production/foam_ring_grasp/scripts/start_rgb_runtime.sh
 bash production/foam_ring_grasp/scripts/start_online_service.sh
 ```
 
-## 3. 一键验证
+## 3. Dry-run
+
+```bash
+python3 production/foam_ring_grasp/scripts/detect_move_validate.py
+```
+
+当前 side 参数应体现：
+
+```text
+PREGRASP → ENTRY(ref) = 20 mm
+ENTRY(ref) → GRASP    = 39 mm
+PREGRASP → GRASP      = 59 mm
+```
+
+ENTRY 只用于 opening-plane 几何诊断，机器人不停车。
+
+## 4. 正式抓取
 
 ```bash
 python3 production/foam_ring_grasp/scripts/detect_move_validate.py --execute
 ```
 
-Visible-mouth FLAT/TILTED 保持原机器人流程。
-
-侧躺分支打印：
+Side cycle：
 
 ```text
-M39.4.1 CAMERA-FACING ARC + SIDE OPENING FRAME [VALIDATION ONLY]
-axis_image_angle_deg
-arc residual med/p90
-arc inlier/raw ratio
-arc span
-opening support status / drop ratio
-opening center camera
-opening shift vs M39.4.0.1 nominal endpoint
-preview grasp center
-frame +X closing
-frame +Y lateral
-frame +Z insertion
-frame quaternion
-robot motion: DISABLED
+SIDE_INITIAL[OPEN]
+→ SIDE_AVOIDANCE[OPEN]
+→ SIDE_PREGRASP[OPEN]
+→ SIDE_GRASP[OPEN]
+→ CLOSE
+→ SIDE_AVOIDANCE[CLOSED]
+→ SIDE_INITIAL[CLOSED]
+→ OPEN
 ```
 
-## 4. Debug 文件
+侧躺正式抓取保留第二次 Enter 确认。
 
-保存目录：
-
-```text
-/opt/visionops_v3/data/foam_ring_online_geometry/<timestamp>/
-```
-
-M39.4.1 新增：
-
-```text
-m39_4_1_side_opening_reconstruction.json
-```
-
-`online_geometry_overlay.jpg` 会叠加：
-
-- M39.4.0.1 side axis；
-- reconstructed opening center；
-- preview grasp center；
-- `+X close`；
-- `+Z insert`；
-- arc span / opening support drop；
-- `robot=OFF`。
-
-常用：
+## 5. 8 点 box calibration
 
 ```bash
-LATEST=$(ls -dt /opt/visionops_v3/data/foam_ring_online_geometry/* | head -1)
-jq '.scene.m39_4_1_side_opening_reconstruction' "$LATEST/online_geometry_result.json"
+python3 production/foam_ring_grasp/scripts/fit_box_model_8point.py
 ```
 
-## 5. 当前质量门槛
+点击顺序：
 
-`line.yaml -> m39_4_1_side_opening_reconstruction` 主要检查：
+```text
+OPEN_TL → OPEN_TR → OPEN_BR → OPEN_BL
+BOTTOM_TL → BOTTOM_TR → BOTTOM_BR → BOTTOM_BL
+```
 
-- camera-facing arc clean support；
-- fixed-radius residual median / p90；
-- camera-facing arc angular span；
-- raw contamination 不得严重到失去目标圆柱证据；
-- selected-end axial support drop。
+默认输出 candidate + overlay + points，不覆盖生产模型。确认后再用 `--install`；工具会备份旧 `box_model.json`。
 
-M39.4.0.1 的 `center_height_error_mm` 不参与 M39.4.1 PASS/FAIL。
-
-## 6. 当前明确不做
-
-- 侧躺机器人运动；
-- inner-finger 实际孔内包络验证；
-- outer-finger / 邻环 / 箱壁完整碰撞；
-- PREGRASP→ENTRY→GRASP swept-volume；
-- 一头翘起 / axis 有明显 Z 倾角的侧躺圆环。
+这些 candidate / backup 属于现场标定中间产物，不应长期打包进干净 production 基线。

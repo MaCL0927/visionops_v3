@@ -5,42 +5,42 @@
   "coordinate_frame": "camera_color_optical_frame",
   "origin_definition": "front_left_top_inner_corner",
   "origin_camera_mm": [
-    -304.82266310761145,
-    -139.6469224532787,
-    740.1717155355758
+    -279.9543142594883,
+    -127.76831571339694,
+    724.2706758777381
   ],
   "axes_camera": {
     "x_right": [
-      0.9999662933435195,
-      -0.0014478691211799435,
-      -0.008081822308755088
+      0.9994887742639396,
+      -0.005390362345899272,
+      0.03151403043324596
     ],
     "y_down": [
-      0.0011893188217537134,
-      0.9994901915420933,
-      -0.03190521167286099
+      0.005707708561551443,
+      0.9999338215184632,
+      -0.009988725967735066
     ],
     "z_inside": [
-      0.00812389669817263,
-      0.03189452439146532,
-      0.9994582240475485
+      -0.0314581020302248,
+      0.010163492375262892,
+      0.9994533962318574
     ]
   },
   "rotation_camera_from_box_rows": [
     [
-      0.9999662933435195,
-      0.0011893188217537134,
-      0.00812389669817263
+      0.9994887742639396,
+      0.005707708561551443,
+      -0.0314581020302248
     ],
     [
-      -0.0014478691211799435,
-      0.9994901915420933,
-      0.03189452439146532
+      -0.005390362345899272,
+      0.9999338215184632,
+      0.010163492375262892
     ],
     [
-      -0.008081822308755088,
-      -0.03190521167286099,
-      0.9994582240475485
+      0.03151403043324596,
+      -0.009988725967735066,
+      0.9994533962318574
     ]
   ],
   "inner_size_mm": {
@@ -66,94 +66,96 @@
     "cy": 362.55133056640625
   },
   "calibration": {
-    "status": "calibrated_three_frame_manual_opening_corners",
-    "method": "three_frame_floor_plane_plus_user_corrected_opening_corners_after_camera_move",
+    "status": "calibrated_8point_manual_opening_bottom",
+    "method": "bottom_depth_plane_plus_known_depth_opening_ray_intersections_8point",
+    "created_at_local": "20260817_070727",
     "source": {
-      "batch": "rk3576-252_empty_box2_20260808_021510",
-      "capture_ids": [
-        "visionops_20260808_021445_977",
-        "visionops_20260808_021449_464",
-        "visionops_20260808_021452_267"
+      "mode": "live_shared_memory",
+      "timestamp_epoch_ms": 1786950418890,
+      "full_resolution": [
+        1280,
+        720
       ],
-      "rgb_filenames": [
-        "visionops_20260808_021445_977.jpg",
-        "visionops_20260808_021449_464.jpg",
-        "visionops_20260808_021452_267.jpg"
+      "geometry_roi_xyxy": [
+        295,
+        0,
+        935,
+        640
       ],
-      "depth_filenames": [
-        "visionops_20260808_021445_977.png",
-        "visionops_20260808_021449_464.png",
-        "visionops_20260808_021452_267.png"
-      ],
-      "meta_filenames": [
-        "visionops_20260808_021445_977.json",
-        "visionops_20260808_021449_464.json",
-        "visionops_20260808_021452_267.json"
-      ]
+      "line_yaml": "/opt/visionops_v3/production/foam_ring_grasp/config/line.yaml"
     },
     "nominal_inner_size_mm": {
       "width": 420.0,
       "height": 280.0,
       "depth": 90.0,
-      "source": "user_measured"
+      "source": "production_reference_or_cli_override"
     },
     "input": {
       "manual_opening_corners_uv": {
         "TL": [
-          93.0,
-          247.0
+          114,
+          261
         ],
         "TR": [
-          440.0,
-          246.0
+          456,
+          258
         ],
         "BR": [
-          441.0,
-          480.0
+          458,
+          484
         ],
         "BL": [
-          94.0,
-          480.0
+          115,
+          485
         ]
       },
-      "floor_roi_xyxy": [
-        100,
-        170,
-        470,
-        410
-      ],
-      "depth_keep_range_mm": [
-        790,
-        860
-      ],
-      "nominal_depth_offset_mm": 90.0
+      "manual_bottom_corners_uv": {
+        "TL": [
+          140,
+          273
+        ],
+        "TR": [
+          442,
+          272
+        ],
+        "BR": [
+          441,
+          471
+        ],
+        "BL": [
+          140,
+          472
+        ]
+      },
+      "bottom_depth_patch_radius_px": 7,
+      "bottom_depth_keep_window_mm": 20.0,
+      "opening_depth_policy": "ray_intersection_with_plane_parallel_to_bottom_offset_by_nominal_depth"
     },
     "stability": {
-      "origin_std_mm_xyz": [
-        0.03348420696201044,
-        0.006608874762374876,
-        0.16042722418153302
-      ],
-      "origin_std_norm_mm": 0.16401757101021633,
-      "plane_residual_median_mm_mean": 1.72289478763424,
-      "plane_residual_p95_mm_mean": 5.244170501207983,
-      "fitted_point_count_mean": 57111.333333333336
+      "plane_residual_median_mm": 1.6698865844574584,
+      "plane_residual_p95_mm": 4.058993330894031,
+      "fitted_point_count": 519,
+      "fitted_point_ratio": 0.9470802919708029
     },
     "derived": {
       "opening_center_camera_mm": [
-        -94.66323687042684,
-        -0.02234815283341618,
-        734.0078032165367
+        -69.26259246544379,
+        11.090443206549068,
+        729.4902006332368
       ],
       "bottom_center_camera_mm": [
-        -93.93208616759131,
-        2.8481590423984624,
-        823.9590433808161
+        -72.09382164816401,
+        12.00515752032274,
+        819.441006294104
       ],
-      "box_z_vs_camera_z_deg": 1.8861103656632114,
-      "box_x_yaw_in_image_deg": -0.08295952824728098,
-      "manual_top_edge_length_projected_mm": 422.2514816389628,
-      "manual_left_edge_length_projected_mm": 282.4352010470806
+      "box_z_vs_camera_z_deg": 1.8944961416061914,
+      "box_x_yaw_in_image_deg": -0.3089999869359769,
+      "manual_top_edge_length_projected_mm": 410.200704342614,
+      "manual_left_edge_length_projected_mm": 270.257680157054,
+      "opening_corner_fit_error_median_mm": 7.0146582831716575,
+      "opening_corner_fit_error_max_mm": 8.484615523669966,
+      "bottom_corner_model_error_median_mm": 12.141136600907299,
+      "bottom_corner_model_error_max_mm": 19.930588939475996
     }
   }
 }

@@ -96,13 +96,37 @@ def _visible_mouth_scope(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise RuntimeError("M39.4.1 must remain validation-only: robot_routing_enabled=false")
     if str(side_opening.get("mode") or "") != "online_validation_only":
         raise RuntimeError("M39.4.1 mode must be online_validation_only")
+    side_entry = _mapping(
+        raw.get("m39_4_2_side_entry_validation") or {},
+        "m39_4_2_side_entry_validation",
+    )
+    if not bool(side_entry.get("enabled", False)):
+        raise RuntimeError("M39.4.2.2 side grasp routing must be enabled")
+    if str(side_entry.get("mode") or "") != "side_grasp_production":
+        raise RuntimeError("M39.4.2.2 mode must be side_grasp_production")
+    if not bool(side_entry.get("production_grasp_enabled", False)):
+        raise RuntimeError("M39.4.2.2 production grasp must be enabled")
+    if not bool(side_entry.get("gripper_closing_enabled", False)):
+        raise RuntimeError("M39.4.2.2 gripper closing must be enabled")
+    thresholds = side_entry.get("component_minimum_box_clearance_mm") or {}
+    if float(thresholds.get("mounting_disk", 0.0)) < -6.01:
+        raise RuntimeError("M39.4.2.2 mounting-disk model tolerance exceeds 6 mm")
+    if float(side_entry.get("grasp_insertion_depth_mm", 0.0)) <= 0.0:
+        raise RuntimeError("M39.4.2 grasp insertion depth must be positive")
+    pregrasp_offset = float(side_entry.get("pregrasp_offset_from_entry_mm", 0.0))
+    if not (10.0 <= pregrasp_offset <= 50.0):
+        raise RuntimeError("M39.4.2.2 pregrasp offset must stay in the field-validated short range 10..50 mm")
+    if int(side_entry.get("pregrasp_to_grasp_samples", 0)) < 5:
+        raise RuntimeError("M39.4.2.2 direct PREGRASP->GRASP sweep needs at least 5 samples")
     return {
         "status": "ok",
         "visible_mouth_branch": "enabled",
         "side_no_mouth": "M39.4.0.1_axis_recovery",
         "pseudo_mouth": "M39.4.0.1_geometry_reroute_to_side_axis",
-        "side_opening": "M39.4.1_camera_facing_arc_opening_frame_validation_only",
-        "side_robot_motion": "disabled",
+        "side_opening": "M39.4.1_camera_facing_arc_opening_reconstruction",
+        "side_entry": "M39.4.2.2_short_PREGRASP_direct_GRASP_LEFT_LINK7",
+        "side_gripper_close": "enabled_at_GRASP",
+        "side_production_grasp": "enabled_direct_PREGRASP_to_GRASP_and_GRASP_to_AVOIDANCE",
     }
 
 

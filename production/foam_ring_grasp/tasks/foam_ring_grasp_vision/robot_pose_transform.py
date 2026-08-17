@@ -469,6 +469,15 @@ class RobotPoseTransformer:
         T_camera_pregrasp[:3, 3] = pregrasp_camera_mm
         T_base_pregrasp = self.T_base_camera_mm @ T_camera_pregrasp
 
+        entry_camera_raw = candidate.get("entry_center_camera_mm")
+        T_camera_entry = None
+        T_base_entry = None
+        if entry_camera_raw is not None:
+            entry_camera_mm = _vector3(entry_camera_raw, "candidate.entry_center_camera_mm")
+            T_camera_entry = T_camera_grasp.copy()
+            T_camera_entry[:3, 3] = entry_camera_mm
+            T_base_entry = self.T_base_camera_mm @ T_camera_entry
+
         result: Dict[str, Any] = {
             **base,
             "status": "base_grasp_ready",
@@ -500,11 +509,21 @@ class RobotPoseTransformer:
                 "visual_grasp_pose_base": _pose_document(T_base_grasp, config.base_frame_id),
             },
             "pregrasp": {
-                "source": "M38.6 candidate.pregrasp_center_camera_mm with grasp orientation preserved",
+                "source": "candidate.pregrasp_center_camera_mm with grasp orientation preserved",
                 "T_camera_pregrasp_mm": _rows(T_camera_pregrasp),
                 "T_base_pregrasp_mm": _rows(T_base_pregrasp),
                 "visual_grasp_pose_base": _pose_document(T_base_pregrasp, config.base_frame_id),
             },
+            "entry": (
+                {
+                    "source": "candidate.entry_center_camera_mm with grasp orientation preserved",
+                    "T_camera_entry_mm": _rows(T_camera_entry),
+                    "T_base_entry_mm": _rows(T_base_entry),
+                    "visual_grasp_pose_base": _pose_document(T_base_entry, config.base_frame_id),
+                }
+                if T_camera_entry is not None and T_base_entry is not None
+                else {"available": False, "reason": "candidate_has_no_entry_center_camera_mm"}
+            ),
             "hand_tcp": {
                 "available": False,
                 "frame_id": config.hand_tcp_frame_id,
@@ -526,6 +545,11 @@ class RobotPoseTransformer:
         if config.visual_to_tcp_enabled and config.T_grasp_hand_tcp_mm is not None:
             T_base_hand_tcp = T_base_grasp @ config.T_grasp_hand_tcp_mm
             T_base_hand_tcp_pregrasp = T_base_pregrasp @ config.T_grasp_hand_tcp_mm
+            T_base_hand_tcp_entry = (
+                T_base_entry @ config.T_grasp_hand_tcp_mm
+                if T_base_entry is not None
+                else None
+            )
             result["status"] = "ok"
             result["grasp"]["T_base_hand_tcp_mm"] = _rows(T_base_hand_tcp)
             result["grasp"]["hand_tcp_pose_base"] = _pose_document(
@@ -535,16 +559,30 @@ class RobotPoseTransformer:
             result["pregrasp"]["hand_tcp_pose_base"] = _pose_document(
                 T_base_hand_tcp_pregrasp, config.base_frame_id
             )
+            if T_base_hand_tcp_entry is not None and isinstance(result.get("entry"), dict):
+                result["entry"]["T_base_hand_tcp_mm"] = _rows(T_base_hand_tcp_entry)
+                result["entry"]["hand_tcp_pose_base"] = _pose_document(
+                    T_base_hand_tcp_entry, config.base_frame_id
+                )
             result["hand_tcp"] = {
                 "available": True,
                 "frame_id": config.hand_tcp_frame_id,
                 "grasp_pose_base": _pose_document(T_base_hand_tcp, config.base_frame_id),
                 "pregrasp_pose_base": _pose_document(T_base_hand_tcp_pregrasp, config.base_frame_id),
+                "entry_pose_base": (
+                    _pose_document(T_base_hand_tcp_entry, config.base_frame_id)
+                    if T_base_hand_tcp_entry is not None else None
+                ),
             }
 
             if config.flange_enabled and config.T_hand_tcp_flange_mm is not None:
                 T_base_flange = T_base_hand_tcp @ config.T_hand_tcp_flange_mm
                 T_base_flange_pregrasp = T_base_hand_tcp_pregrasp @ config.T_hand_tcp_flange_mm
+                T_base_flange_entry = (
+                    T_base_hand_tcp_entry @ config.T_hand_tcp_flange_mm
+                    if T_base_hand_tcp_entry is not None
+                    else None
+                )
                 result["flange"] = {
                     "available": True,
                     "frame_id": config.flange_frame_id,
@@ -557,5 +595,13 @@ class RobotPoseTransformer:
                         "T_base_left_link7_mm": _rows(T_base_flange_pregrasp),
                         "pose_base": _pose_document(T_base_flange_pregrasp, config.base_frame_id),
                     },
+                    "entry": (
+                        {
+                            "T_base_left_link7_mm": _rows(T_base_flange_entry),
+                            "pose_base": _pose_document(T_base_flange_entry, config.base_frame_id),
+                        }
+                        if T_base_flange_entry is not None
+                        else {"available": False}
+                    ),
                 }
         return result

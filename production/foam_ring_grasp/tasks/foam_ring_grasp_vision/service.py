@@ -504,12 +504,33 @@ class FoamRingOnlineService:
         m39401_topology = scene.get("m39_4_0_1_mouth_topology_arbitration") if isinstance(scene.get("m39_4_0_1_mouth_topology_arbitration"), Mapping) else {}
         m3940 = scene.get("m39_4_0_side_axis_recovery") if isinstance(scene.get("m39_4_0_side_axis_recovery"), Mapping) else {}
         m3941 = scene.get("m39_4_1_side_opening_reconstruction") if isinstance(scene.get("m39_4_1_side_opening_reconstruction"), Mapping) else {}
+        m3942 = scene.get("m39_4_2_side_entry_validation") if isinstance(scene.get("m39_4_2_side_entry_validation"), Mapping) else {}
         routing_reject = bool(routing.get("terminal_reject", False))
         m3940_reject = bool(m3940.get("executed", False) and m3940.get("terminal_reject", True))
         m3941_reject = bool(m3941.get("executed", False) and m3941.get("terminal_reject", True))
+        m3942_executed = bool(m3942.get("executed", False))
+        m3942_ready = bool(m3942.get("production_grasp_ready", False))
+        m3942_reject = bool(m3942_executed and not m3942_ready)
         branch_c_reject = bool(branch_c.get("fast_terminated", False))
-        terminal_reject = bool(m3941_reject or m3940_reject or branch_c_reject or routing_reject)
-        if m3941_reject:
+        # M39.4.2.2 is the authoritative terminal state for the no-mouth side branch.
+        # A production-ready side-grasp candidate supersedes validation-only
+        # rejects from M39.4.0/.1; an M39.4.2.2 reject remains terminal.
+        terminal_reject = (
+            bool(m3942_reject)
+            if m3942_executed
+            else bool(m3941_reject or m3940_reject or branch_c_reject or routing_reject)
+        )
+        if m3942_reject:
+            terminal_reject_reason = m3942.get("reason")
+            terminal_reject_message = m3942.get("display_reason_detail") or m3942.get("reason")
+            terminal_reject_display = m3942.get("display_reason_short")
+            operator_action = m3942.get("operator_action")
+        elif m3942_executed and m3942_ready:
+            terminal_reject_reason = None
+            terminal_reject_message = None
+            terminal_reject_display = None
+            operator_action = m3942.get("operator_action")
+        elif m3941_reject:
             terminal_reject_reason = m3941.get("reason")
             terminal_reject_message = m3941.get("display_reason_detail") or m3941.get("reason")
             terminal_reject_display = m3941.get("display_reason_short")
@@ -545,7 +566,9 @@ class FoamRingOnlineService:
             time.monotonic() - job.submitted_monotonic
         ) * 1000.0
         selected_branch = (
-            m3941.get("selected_grasp_branch")
+            m3942.get("selected_grasp_branch")
+            if bool(m3942.get("executed", False))
+            else m3941.get("selected_grasp_branch")
             if bool(m3941.get("executed", False))
             else m3940.get("selected_grasp_branch")
             if bool(m3940.get("executed", False))
@@ -629,6 +652,9 @@ class FoamRingOnlineService:
                 ),
                 "m39_4_1_side_opening_reconstruction": deepcopy(
                     scene.get("m39_4_1_side_opening_reconstruction") or {}
+                ),
+                "m39_4_2_side_entry_validation": deepcopy(
+                    scene.get("m39_4_2_side_entry_validation") or {}
                 ),
                 "production_surface_state": (candidate or {}).get("production_surface_state") if isinstance(candidate, Mapping) else None,
                 "production_surface_route": deepcopy((candidate or {}).get("production_surface_route") or {}) if isinstance(candidate, Mapping) else {},
