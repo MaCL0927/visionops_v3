@@ -240,6 +240,80 @@ def apply_m39341_tilted_production_routing(
         scene["m39_3_4_1_tilted_production_routing"] = summary
         return summary
 
+    # M39.4.3 VISIBLE-priority arbitration.  A clear M38.1 visible-mouth
+    # candidate has already passed the complete floor-constrained grasp/collision
+    # validation.  M39.3.4 is allowed to override it with a tilted pose only
+    # when the *direct dense depth* evidence is strong enough.  This prevents a
+    # weak conic/mouth-band fit from deleting a valid flat grasp, while still
+    # preserving genuinely tilted cases whose annulus depth strongly supports
+    # the non-flat solution.
+    flat_protection_cfg = cfg.get("visible_flat_protection") or {}
+    flat_protection_cfg = flat_protection_cfg if isinstance(flat_protection_cfg, Mapping) else {}
+    prior_summary = scene.get("m39_3_1_tilt_evidence") or {}
+    prior_selected = prior_summary.get("selected") if isinstance(prior_summary, Mapping) else None
+    prior_selected = prior_selected if isinstance(prior_selected, Mapping) else {}
+    prior_state = str(prior_selected.get("state") or prior_selected.get("classification") or "").upper()
+    prior_conf = str(prior_selected.get("confidence") or "").lower()
+    dense = (selected_surface or {}).get("dense_depth") or {}
+    dense = dense if isinstance(dense, Mapping) else {}
+    dense_inlier = _f(dense.get("inlier_ratio"), 0.0)
+    dense_valid = _f(dense.get("valid_depth_ratio"), 0.0)
+    dense_coverage = _f(dense.get("angular_coverage_deg"), 0.0)
+    dense_residual = _f(dense.get("residual_median_mm"), 999.0)
+    direct_tilt_depth_strong = bool(
+        dense.get("available")
+        and dense_inlier >= _f(flat_protection_cfg.get("minimum_dense_inlier_ratio_to_override_flat"), 0.30)
+        and dense_valid >= _f(flat_protection_cfg.get("minimum_dense_valid_ratio_to_override_flat"), 0.30)
+        and dense_coverage >= _f(flat_protection_cfg.get("minimum_dense_coverage_deg_to_override_flat"), 90.0)
+        and dense_residual <= _f(flat_protection_cfg.get("maximum_dense_residual_median_mm_to_override_flat"), 25.0)
+    )
+    prior_flat_allowed = bool(
+        prior_state == "FLAT"
+        and prior_conf in {str(v).lower() for v in (flat_protection_cfg.get("accepted_m3931_confidence") or ["strong", "moderate"])}
+    )
+    selected_surface_label = str((selected_surface or {}).get("candidate_label") or "")
+    protect_flat = False
+    if bool(flat_protection_cfg.get("enabled", True)) and prior_flat_allowed:
+        if classification == "TILTED" and not direct_tilt_depth_strong:
+            protect_flat = True
+        elif classification == "UNCERTAIN" and selected_surface_label == "FLAT_REFERENCE":
+            # The analytic solver itself selected the explicit calibrated-floor
+            # reference; uncertainty only means it could not prove the competing
+            # conic branch.  With an independent FLAT vote, preserve the already
+            # collision-validated M38.1 grasp instead of deleting it.
+            protect_flat = True
+        elif classification == "UNCERTAIN" and not direct_tilt_depth_strong:
+            protect_flat = True
+    summary["visible_flat_protection"] = {
+        "enabled": bool(flat_protection_cfg.get("enabled", True)),
+        "m3931_state": prior_state,
+        "m3931_confidence": prior_conf,
+        "dense_inlier_ratio": float(dense_inlier),
+        "dense_valid_depth_ratio": float(dense_valid),
+        "dense_angular_coverage_deg": float(dense_coverage),
+        "dense_residual_median_mm": float(dense_residual),
+        "direct_tilt_depth_strong": bool(direct_tilt_depth_strong),
+        "selected_surface_label": selected_surface_label,
+        "flat_candidate_protected": bool(protect_flat),
+    }
+    if protect_flat:
+        summary.update(
+            status="ok",
+            route="M39.2.9_FLAT_PROTECTED",
+            classification="FLAT",
+            reason="m3931_flat_and_analytic_tilt_lacks_direct_dense_depth_support",
+            source_tilt_deg=(selected_surface or {}).get("tilt_deg"),
+            candidate_replaced=False,
+            terminal_reject=False,
+        )
+        candidate = dict(previous_candidate)
+        candidate["production_surface_state"] = "FLAT"
+        candidate["production_surface_route"] = deepcopy(summary)
+        scene["robot_candidate"] = candidate
+        scene["m39_3_4_1_tilted_production_routing"] = summary
+        summary["timing_ms"]["total_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
+        return summary
+
     # FLAT is deliberately boring: preserve the already validated M39.2.9
     # candidate bit-for-bit, but add an explicit route marker for the robot-side
     # validation script.

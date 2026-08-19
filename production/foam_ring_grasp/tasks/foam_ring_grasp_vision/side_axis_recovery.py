@@ -752,10 +752,24 @@ def attach_m3940_side_axis_recovery(
         int(v) for v in (topology.get("pseudo_mouth_ring_ids") or [])
     } if isinstance(topology, Mapping) else set()
     side_candidate_ids = unmatched_ids | pseudo_ids
+    # M39.4.3: a visible-mouth target already rejected by its own production
+    # surface routing must not be silently reinterpreted as a SIDE target in
+    # the same trigger.  Other unmatched/pseudo-mouth rings remain eligible.
+    retry_summary = scene.get("production_target_retry") or {}
+    rejected_visible_ids = {
+        int(v) for v in (retry_summary.get("rejected_visible_ring_instance_ids") or [])
+    } if isinstance(retry_summary, Mapping) else set()
+    rejected_side_ids = {
+        int(v) for v in (retry_summary.get("rejected_side_ring_instance_ids") or [])
+    } if isinstance(retry_summary, Mapping) else set()
+    side_candidate_ids -= rejected_visible_ids
+    side_candidate_ids -= rejected_side_ids
     all_foam_rings = [item for item in instances if item.class_name == "foam_ring"]
     rings = [item for item in all_foam_rings if int(item.instance_id) in side_candidate_ids]
     summary["unmatched_ring_ids"] = sorted(unmatched_ids)
     summary["pseudo_mouth_ring_ids"] = sorted(pseudo_ids)
+    summary["production_rejected_visible_ring_ids"] = sorted(rejected_visible_ids)
+    summary["production_rejected_side_ring_ids"] = sorted(rejected_side_ids)
     summary["side_candidate_ring_ids"] = sorted(side_candidate_ids)
     if not rings:
         summary["status"] = "no_side_axis_candidate"

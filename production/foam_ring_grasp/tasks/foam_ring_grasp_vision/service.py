@@ -380,7 +380,7 @@ class FoamRingOnlineService:
                     prepared,
                     save_debug=job.save_debug,
                     generate_overlay=bool(self.settings["latest_overlay_enabled"]),
-                    stage="M39.3.1_online_tilt_diagnostic_persistent_trigger_service",
+                    stage="M39.5.0_visible_mouth_axis_validation_persistent_trigger_service",
                     geometry_queue_wait_ms=geometry_wait_ms,
                 )
                 service_processing_ms = max(
@@ -505,6 +505,10 @@ class FoamRingOnlineService:
         m3940 = scene.get("m39_4_0_side_axis_recovery") if isinstance(scene.get("m39_4_0_side_axis_recovery"), Mapping) else {}
         m3941 = scene.get("m39_4_1_side_opening_reconstruction") if isinstance(scene.get("m39_4_1_side_opening_reconstruction"), Mapping) else {}
         m3942 = scene.get("m39_4_2_side_entry_validation") if isinstance(scene.get("m39_4_2_side_entry_validation"), Mapping) else {}
+        m3951 = scene.get("m39_5_1_tilted_visible_grasp") if isinstance(scene.get("m39_5_1_tilted_visible_grasp"), Mapping) else {}
+        m3951_executed = bool(m3951.get("executed", False))
+        m3951_ready = bool(m3951.get("production_grasp_ready", False))
+        m3951_reject = bool(m3951_executed and not m3951_ready)
         routing_reject = bool(routing.get("terminal_reject", False))
         m3940_reject = bool(m3940.get("executed", False) and m3940.get("terminal_reject", True))
         m3941_reject = bool(m3941.get("executed", False) and m3941.get("terminal_reject", True))
@@ -515,12 +519,27 @@ class FoamRingOnlineService:
         # M39.4.2.2 is the authoritative terminal state for the no-mouth side branch.
         # A production-ready side-grasp candidate supersedes validation-only
         # rejects from M39.4.0/.1; an M39.4.2.2 reject remains terminal.
+        # M39.5.1 is the authoritative terminal state whenever it executed.
+        # Historical M38/M39.3/M39.4 rejects remain diagnostic only and must
+        # never veto a production-ready signed-axis camera-near grasp.
         terminal_reject = (
-            bool(m3942_reject)
+            bool(m3951_reject)
+            if m3951_executed
+            else bool(m3942_reject)
             if m3942_executed
             else bool(m3941_reject or m3940_reject or branch_c_reject or routing_reject)
         )
-        if m3942_reject:
+        if m3951_reject:
+            terminal_reject_reason = m3951.get("reason")
+            terminal_reject_message = m3951.get("reason")
+            terminal_reject_display = "REJECT: M39.5.1 TILTED-VISIBLE GRASP"
+            operator_action = "inspect_m39_5_1_collision_or_axis_debug"
+        elif m3951_executed and m3951_ready:
+            terminal_reject_reason = None
+            terminal_reject_message = None
+            terminal_reject_display = None
+            operator_action = "m39_5_1_tilted_visible_grasp_allowed"
+        elif m3942_reject:
             terminal_reject_reason = m3942.get("reason")
             terminal_reject_message = m3942.get("display_reason_detail") or m3942.get("reason")
             terminal_reject_display = m3942.get("display_reason_short")
@@ -566,7 +585,9 @@ class FoamRingOnlineService:
             time.monotonic() - job.submitted_monotonic
         ) * 1000.0
         selected_branch = (
-            m3942.get("selected_grasp_branch")
+            scene.get("selected_grasp_branch")
+            if m3951_executed and m3951_ready
+            else m3942.get("selected_grasp_branch")
             if bool(m3942.get("executed", False))
             else m3941.get("selected_grasp_branch")
             if bool(m3941.get("executed", False))
@@ -577,7 +598,7 @@ class FoamRingOnlineService:
         return {
             "schema_version": "1.0",
             "message_type": "foam_ring_trigger_result",
-            "stage": str(payload.get("stage") or "M39.3.1_online_tilt_diagnostic_persistent_trigger_service"),
+            "stage": str(payload.get("stage") or "M39.5.2_30deg_hybrid_ready_routing_persistent_trigger_service"),
             "status": "ok",
             "request_id": job.request_id,
             "idempotent_replay": False,
@@ -655,6 +676,15 @@ class FoamRingOnlineService:
                 ),
                 "m39_4_2_side_entry_validation": deepcopy(
                     scene.get("m39_4_2_side_entry_validation") or {}
+                ),
+                "m39_5_0_visible_mouth_axis_validation": deepcopy(
+                    scene.get("m39_5_0_visible_mouth_axis_validation") or {}
+                ),
+                "m39_5_2_mild_tilt_visible_clock3": deepcopy(
+                    scene.get("m39_5_2_mild_tilt_visible_clock3") or {}
+                ),
+                "m39_5_1_tilted_visible_grasp": deepcopy(
+                    scene.get("m39_5_1_tilted_visible_grasp") or {}
                 ),
                 "production_surface_state": (candidate or {}).get("production_surface_state") if isinstance(candidate, Mapping) else None,
                 "production_surface_route": deepcopy((candidate or {}).get("production_surface_route") or {}) if isinstance(candidate, Mapping) else {},

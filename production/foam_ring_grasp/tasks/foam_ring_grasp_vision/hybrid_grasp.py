@@ -1315,8 +1315,20 @@ def run_hybrid_grasp(
     # M37.6 fallback is allowed to run.  This prevents a shallow side-only ring
     # from consuming seconds while a slightly deeper clear/partial opening is
     # already available.
+    # M39.4.3: a target-specific production rejection must not pin the
+    # whole scene to the same visible ring.  The online processor may retry
+    # this same RGB-D frame while excluding only previously rejected target
+    # IDs from *selection*.  All instances stay in ``instances`` so collision
+    # checks still see the rejected rings as physical obstacles.
+    runtime_cfg = raw_config.get("_runtime") or {}
+    runtime_cfg = runtime_cfg if isinstance(runtime_cfg, Mapping) else {}
+    excluded_visible_ids = {
+        int(value)
+        for value in (runtime_cfg.get("production_retry_excluded_ring_ids") or [])
+        if value is not None
+    }
     matched_ring_ids_ordered = sorted(
-        matched_ids,
+        (instance_id for instance_id in matched_ids if instance_id not in excluded_visible_ids),
         key=lambda instance_id: (
             _safe_float(depth_by_id.get(instance_id, {}).get("surface_depth_mm"), float("inf")),
             _safe_int(depth_by_id.get(instance_id, {}).get("depth_rank"), 10**9),
@@ -2321,6 +2333,7 @@ def run_hybrid_grasp(
     result["global_matched_pairs"] = len(matches)
     result["association_debug"] = association_debug
     result["unmatched_ring_ids"] = [int(item.instance_id) for item in unmatched_rings]
+    result["production_retry_excluded_visible_ring_ids"] = sorted(excluded_visible_ids)
     result["unmatched_mouth_ids"] = [int(item.instance_id) for item in unmatched_mouths]
     result["m38_1_eligible_count"] = (
         selected_m38a_scene.get("eligible_count")

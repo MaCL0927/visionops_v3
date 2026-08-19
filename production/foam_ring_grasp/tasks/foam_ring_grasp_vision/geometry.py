@@ -2504,12 +2504,33 @@ def _clock_candidate(
     fallback_allowed_hour = (not fallback_hours) or (clock_hour in fallback_hours)
     trigger_ambiguous = bool(fallback_cfg.get("trigger_on_ambiguous", True))
     trigger_out_of_range = bool(fallback_cfg.get("trigger_on_out_of_range", True))
+    trigger_compression_infeasible = bool(fallback_cfg.get("trigger_on_compression_infeasible", True))
     raw_out_of_range = not (min_wall <= raw_wall_thickness <= max_wall)
+
+    # M39.4.3: the old nominal-wall fallback considered a 10.1 mm measured
+    # wall "in range" because the configured physical lower bound is 10 mm.
+    # But with a 10 mm gripper minimum opening, 0.5 mm closing margin and
+    # 0.5 mm minimum compression per side, any wall below 11.5 mm can never
+    # satisfy the grasp compression constraint.  Treat that measurement as
+    # operationally infeasible and use the already-calibrated nominal 14 mm
+    # fallback at the fixed 3-o'clock grasp.  Collision checks remain active.
+    fallback_minimum_opening = _safe_float(gripper.get("minimum_opening_mm"), 10.0)
+    fallback_closing_margin = _safe_float(gripper.get("closing_limit_margin_mm"), 0.5)
+    fallback_min_compression = _safe_float(gripper.get("minimum_contact_compression_mm"), 0.5)
+    minimum_compression_feasible_wall_mm = (
+        fallback_minimum_opening
+        + fallback_closing_margin
+        + 2.0 * fallback_min_compression
+    )
+    raw_compression_infeasible = raw_wall_thickness < minimum_compression_feasible_wall_mm
+
     fallback_reason = None
     if raw_outer_boundary_ambiguous and trigger_ambiguous:
         fallback_reason = "outer_boundary_ambiguous"
     elif raw_out_of_range and trigger_out_of_range:
         fallback_reason = "wall_thickness_out_of_range"
+    elif raw_compression_infeasible and trigger_compression_infeasible:
+        fallback_reason = "wall_thickness_compression_infeasible"
 
     nominal_wall_fallback_applied = False
     if bool(fallback_cfg.get("enabled", False)) and fallback_allowed_hour and fallback_reason is not None:
@@ -2782,6 +2803,8 @@ def _clock_candidate(
             "raw_wall_thickness_mm": float(raw_wall_thickness),
             "nominal_wall_fallback_applied": bool(nominal_wall_fallback_applied),
             "nominal_wall_fallback_reason": fallback_reason if nominal_wall_fallback_applied else None,
+            "minimum_compression_feasible_wall_mm": float(minimum_compression_feasible_wall_mm),
+            "raw_wall_compression_infeasible": bool(raw_compression_infeasible),
         }
         result["grasp_frame_camera"] = _robot_grasp_frame(result, config)
         timing_ms["total_ms"] = _elapsed_ms(candidate_started)
@@ -3265,6 +3288,8 @@ def _clock_candidate(
         "raw_wall_thickness_mm": float(raw_wall_thickness),
         "nominal_wall_fallback_applied": bool(nominal_wall_fallback_applied),
         "nominal_wall_fallback_reason": fallback_reason if nominal_wall_fallback_applied else None,
+        "minimum_compression_feasible_wall_mm": float(minimum_compression_feasible_wall_mm),
+        "raw_wall_compression_infeasible": bool(raw_compression_infeasible),
     }
     result["grasp_frame_camera"] = _robot_grasp_frame(result, config)
     timing_ms["total_ms"] = _elapsed_ms(candidate_started)

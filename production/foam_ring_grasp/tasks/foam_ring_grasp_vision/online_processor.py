@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
+from copy import deepcopy
 import threading
 import time
 from dataclasses import dataclass
@@ -86,6 +87,13 @@ from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.side_opening_recons
 from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.side_entry_routing import (  # noqa: E402
     attach_m3942_side_entry_validation,
     draw_m3942_side_entry_overlay,
+)
+from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.visible_mouth_axis_m3950 import (  # noqa: E402
+    attach_m3950_visible_mouth_axis_validation,
+    draw_m3950_visible_mouth_axis_overlay,
+)
+from production.foam_ring_grasp.tasks.foam_ring_grasp_vision.tilted_visible_grasp_m3951 import (  # noqa: E402
+    attach_m3951_tilted_visible_grasp_production,
 )
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "line.yaml"
@@ -953,89 +961,435 @@ class OnlineGeometryProcessor:
             ) * 1000.0
         timings["geometry_queue_wait_ms"] = max(0.0, float(geometry_queue_wait_ms))
 
-        geometry_started = time.perf_counter()
-        if self.hybrid_config.enabled:
-            scene = run_hybrid_grasp(
-                prepared.adaptation.instances,
+        # M39.4.3 VISIBLE-priority production loop.  A target-specific late
+        # production rejection must not terminate a multi-target scene.  Retry
+        # the same exact RGB-D frame with the rejected visible target excluded
+        # from selection, while keeping every segmentation instance in the
+        # collision scene.  SIDE recovery runs only after these bounded visible
+        # attempts are exhausted.
+        retry_cfg = self.raw_config.get("production_target_retry") or {}
+        retry_cfg = retry_cfg if isinstance(retry_cfg, Mapping) else {}
+        retry_enabled = bool(retry_cfg.get("enabled", True))
+        max_visible_attempts = max(1, int(retry_cfg.get("maximum_visible_target_attempts", 3)))
+        excluded_visible_ring_ids: set[int] = set()
+        visible_attempts: list[Dict[str, Any]] = []
+        geometry_total_ms = 0.0
+        topology_total_ms = 0.0
+        m3950_total_ms = 0.0
+        m3951_total_ms = 0.0
+        m3951_rejected_ring_ids: set[int] = set()
+        tilt_total_ms = 0.0
+        analytic_total_ms = 0.0
+        routing_total_ms = 0.0
+        scene: Dict[str, Any]
+
+        while True:
+            attempt_index = len(visible_attempts) + 1
+            attempt_config = deepcopy(self.raw_config)
+            runtime_cfg = attempt_config.get("_runtime") or {}
+            runtime_cfg = dict(runtime_cfg) if isinstance(runtime_cfg, Mapping) else {}
+            runtime_cfg["production_retry_excluded_ring_ids"] = sorted(excluded_visible_ring_ids)
+            attempt_config["_runtime"] = runtime_cfg
+
+            geometry_started = time.perf_counter()
+            if self.hybrid_config.enabled:
+                scene = run_hybrid_grasp(
+                    prepared.adaptation.instances,
+                    prepared.depth_geometry,
+                    prepared.intrinsics,
+                    raw_config=attempt_config,
+                    geometry_config=self.geometry_config,
+                    analyze_fn=self._analyze_fn,
+                )
+            else:
+                scene = self._analyze_fn(
+                    prepared.adaptation.instances,
+                    prepared.depth_geometry,
+                    prepared.intrinsics,
+                    self.geometry_config,
+                )
+            geometry_elapsed = _perf_ms(geometry_started)
+            geometry_total_ms += geometry_elapsed
+
+            candidate_before_topology = (
+                deepcopy(scene.get("robot_candidate"))
+                if isinstance(scene.get("robot_candidate"), Mapping)
+                else None
+            )
+            selected_ring_id = scene.get("selected_ring_instance_id")
+            if isinstance(candidate_before_topology, Mapping):
+                target = candidate_before_topology.get("target") or {}
+                if isinstance(target, Mapping) and target.get("ring_instance_id") is not None:
+                    selected_ring_id = target.get("ring_instance_id")
+            try:
+                selected_ring_id_int = int(selected_ring_id) if selected_ring_id is not None else None
+            except Exception:
+                selected_ring_id_int = None
+
+            # M39.5.x axis/shape source runs BEFORE historical M39.4 pseudo-mouth
+            # arbitration so a genuinely visible tilted mouth is not collapsed
+            # into PURE_SIDE.  The axis stage itself does not mutate
+            # robot_candidate; M39.5.1 production routing consumes it below.
+            m3950_started = time.perf_counter()
+            m3950 = attach_m3950_visible_mouth_axis_validation(
+                scene,
+                list(prepared.adaptation.instances),
                 prepared.depth_geometry,
                 prepared.intrinsics,
-                raw_config=self.raw_config,
+                raw_config=attempt_config,
                 geometry_config=self.geometry_config,
-                analyze_fn=self._analyze_fn,
             )
-        else:
-            scene = self._analyze_fn(
-                prepared.adaptation.instances,
+            m3950_elapsed = _perf_ms(m3950_started)
+            m3950_total_ms += m3950_elapsed
+
+            topology_started = time.perf_counter()
+            apply_m39401_mouth_topology_arbitration(
+                scene, list(prepared.adaptation.instances), attempt_config
+            )
+            topology_elapsed = _perf_ms(topology_started)
+            topology_total_ms += topology_elapsed
+            candidate_after_topology = isinstance(scene.get("robot_candidate"), Mapping)
+
+            tilt_started = time.perf_counter()
+            _attach_m3931_online_tilt_diagnostics(
+                scene,
+                list(prepared.adaptation.instances),
                 prepared.depth_geometry,
                 prepared.intrinsics,
-                self.geometry_config,
+                raw_config=attempt_config,
+                geometry_config=self.geometry_config,
             )
-        timings["geometry_ms"] = _perf_ms(geometry_started)
+            tilt_elapsed = _perf_ms(tilt_started)
+            tilt_total_ms += tilt_elapsed
 
-        topology_started = time.perf_counter()
-        apply_m39401_mouth_topology_arbitration(
-            scene, list(prepared.adaptation.instances), self.raw_config
-        )
-        timings["m39_4_0_1_mouth_topology_arbitration_ms"] = _perf_ms(topology_started)
+            analytic_started = time.perf_counter()
+            _attach_m3934_analytic_conic_diagnostic(
+                scene, list(prepared.adaptation.instances), prepared.depth_geometry, prepared.intrinsics,
+                raw_config=attempt_config, geometry_config=self.geometry_config,
+            )
+            analytic_elapsed = _perf_ms(analytic_started)
+            analytic_total_ms += analytic_elapsed
 
-        tilt_started = time.perf_counter()
-        _attach_m3931_online_tilt_diagnostics(
-            scene,
-            list(prepared.adaptation.instances),
-            prepared.depth_geometry,
-            prepared.intrinsics,
-            raw_config=self.raw_config,
-            geometry_config=self.geometry_config,
-        )
-        timings["m39_3_1_tilt_diagnostic_ms"] = _perf_ms(tilt_started)
+            routing_started = time.perf_counter()
+            routing = apply_m39341_tilted_production_routing(
+                scene,
+                list(prepared.adaptation.instances),
+                prepared.depth_geometry,
+                prepared.intrinsics,
+                raw_config=attempt_config,
+                geometry_config=self.geometry_config,
+            )
+            routing_elapsed = _perf_ms(routing_started)
+            routing_total_ms += routing_elapsed
 
-        analytic_started = time.perf_counter()
-        _attach_m3934_analytic_conic_diagnostic(
-            scene, list(prepared.adaptation.instances), prepared.depth_geometry, prepared.intrinsics,
-            raw_config=self.raw_config, geometry_config=self.geometry_config,
-        )
-        timings["m39_3_4_analytic_conic_diagnostic_ms"] = _perf_ms(analytic_started)
+            # M39.5.2 mild-tilt production override.  The M39.5.x signed axis
+            # is authoritative for READY selection.  When the measured axis is
+            # below 30 deg we deliberately use the already collision-checked
+            # M38.1 preferred clock-3 candidate from this exact RGB-D frame,
+            # even if historical M39.3.4.1 classified its analytic surface as
+            # UNCERTAIN.  This does NOT resurrect a candidate that M38.1 itself
+            # rejected: a real source candidate must exist and must be clock 3.
+            m3952_mild_override: Dict[str, Any] = {
+                "executed": False,
+                "status": "not_applicable",
+            }
+            if (
+                isinstance(m3950, Mapping)
+                and str(m3950.get("classification") or "").upper() == "UPRIGHT_VISIBLE"
+                and str(m3950.get("production_grasp_policy") or "") == "VISIBLE_CLOCK3_MILD_TILT"
+            ):
+                source_candidate = candidate_before_topology
+                if not isinstance(source_candidate, Mapping):
+                    source_candidate = scene.get("m38_1_robot_candidate") if isinstance(scene.get("m38_1_robot_candidate"), Mapping) else None
+                source_target = source_candidate.get("target") if isinstance(source_candidate, Mapping) and isinstance(source_candidate.get("target"), Mapping) else {}
+                source_clock = source_target.get("clock_hour")
+                try:
+                    source_clock_int = int(source_clock) if source_clock is not None else None
+                except Exception:
+                    source_clock_int = None
+                if isinstance(source_candidate, Mapping) and source_clock_int == 3:
+                    mild_candidate = deepcopy(dict(source_candidate))
+                    mild_route = {
+                        "schema_version": "1.0",
+                        "stage": "M39.5.2_mild_tilt_visible_clock3_override",
+                        "enabled": True,
+                        "status": "ok",
+                        "route": "M39.2.9_FLAT",
+                        "classification": "FLAT",
+                        "terminal_reject": False,
+                        "reason": "m3952_signed_axis_below_30deg_use_visible_initial_clock3",
+                        "source_tilt_deg": m3950.get("axis_tilt_from_box_z_deg"),
+                        "selected_clock_hour": 3,
+                        "m39_5_2_override": True,
+                    }
+                    mild_candidate["grasp_branch"] = str(mild_candidate.get("grasp_branch") or "m38_1_clear_mouth_front_annulus_rim_pinch")
+                    mild_candidate["production_surface_state"] = "FLAT"
+                    mild_candidate["production_surface_route"] = deepcopy(mild_route)
+                    mild_candidate["m39_5_2_mild_tilt_visible"] = {
+                        "geometric_pose_classification": m3950.get("geometric_pose_classification"),
+                        "axis_tilt_from_box_z_deg": m3950.get("axis_tilt_from_box_z_deg"),
+                        "ready_pose": "VISIBLE_INITIAL",
+                        "grasp_policy": "preferred_clock3",
+                    }
+                    scene["robot_candidate"] = mild_candidate
+                    scene["selected_grasp_branch"] = mild_candidate["grasp_branch"]
+                    scene["grasp_result_status"] = "candidate_found"
+                    scene["operator_action"] = "m3952_visible_initial_clock3_grasp_allowed"
+                    scene["m39_3_4_1_tilted_production_routing"] = mild_route
+                    routing = mild_route
+                    m3952_mild_override = {
+                        "executed": True,
+                        "status": "production_ready",
+                        "axis_tilt_from_box_z_deg": m3950.get("axis_tilt_from_box_z_deg"),
+                        "ready_pose": "VISIBLE_INITIAL",
+                        "selected_clock_hour": 3,
+                    }
+                else:
+                    m3952_mild_override = {
+                        "executed": True,
+                        "status": "source_clock3_candidate_unavailable",
+                        "axis_tilt_from_box_z_deg": m3950.get("axis_tilt_from_box_z_deg"),
+                        "ready_pose": "VISIBLE_INITIAL",
+                    }
+            scene["m39_5_2_mild_tilt_visible_clock3"] = m3952_mild_override
 
-        routing_started = time.perf_counter()
-        apply_m39341_tilted_production_routing(
-            scene,
-            list(prepared.adaptation.instances),
-            prepared.depth_geometry,
-            prepared.intrinsics,
-            raw_config=self.raw_config,
-            geometry_config=self.geometry_config,
-        )
-        timings["m39_3_4_1_tilted_production_routing_ms"] = _perf_ms(routing_started)
+            # M39.5.1 owns every TILTED_VISIBLE_SIDE production target.  Apply
+            # it after the historical M39.3.4.1 route so the old tilted clock-3
+            # candidate can never survive this classification.  The new stage
+            # reuses M39.4.2 collision/clearance validation with a camera-near
+            # visible-mouth rim frame.
+            m3951_started = time.perf_counter()
+            m3951 = attach_m3951_tilted_visible_grasp_production(
+                scene,
+                list(prepared.adaptation.instances),
+                prepared.depth_geometry,
+                prepared.intrinsics,
+                attempt_config,
+            )
+            m3951_elapsed = _perf_ms(m3951_started)
+            m3951_total_ms += m3951_elapsed
+            if (
+                isinstance(m3951, Mapping)
+                and bool(m3951.get("executed", False))
+                and bool(m3951.get("terminal_reject", False))
+                and m3951.get("selected_ring_instance_id") is not None
+            ):
+                try:
+                    m3951_rejected_ring_ids.add(int(m3951.get("selected_ring_instance_id")))
+                except Exception:
+                    pass
 
-        side_axis_started = time.perf_counter()
-        attach_m3940_side_axis_recovery(
-            scene,
-            list(prepared.adaptation.instances),
-            prepared.depth_geometry,
-            prepared.intrinsics,
-            self.raw_config,
-        )
-        timings["m39_4_0_side_axis_recovery_ms"] = _perf_ms(side_axis_started)
+            tilt_summary = scene.get("m39_3_1_tilt_evidence") or {}
+            tilt_selected = tilt_summary.get("selected") if isinstance(tilt_summary, Mapping) else None
+            analytic_summary = scene.get("m39_3_4_analytic_conic_surface") or {}
+            analytic_selected = analytic_summary.get("selected") if isinstance(analytic_summary, Mapping) else None
+            topology_summary = scene.get("m39_4_0_1_mouth_topology_arbitration") or {}
+            attempt_row: Dict[str, Any] = {
+                "attempt_index": int(attempt_index),
+                "excluded_before_attempt": sorted(excluded_visible_ring_ids),
+                "selected_ring_instance_id": selected_ring_id_int,
+                "candidate_before_topology": bool(candidate_before_topology is not None),
+                "candidate_after_topology": bool(candidate_after_topology),
+                "m39_5_0_classification": m3950.get("classification") if isinstance(m3950, Mapping) else None,
+                "m39_5_0_ready_pose": m3950.get("recommended_ready_pose") if isinstance(m3950, Mapping) else None,
+                "m39_5_0_axis_tilt_deg": m3950.get("axis_tilt_from_box_z_deg") if isinstance(m3950, Mapping) else None,
+                "topology_status": topology_summary.get("status") if isinstance(topology_summary, Mapping) else None,
+                "m39_3_1_state": tilt_selected.get("state") if isinstance(tilt_selected, Mapping) else None,
+                "m39_3_1_confidence": tilt_selected.get("confidence") if isinstance(tilt_selected, Mapping) else None,
+                "m39_3_4_classification": analytic_selected.get("classification") if isinstance(analytic_selected, Mapping) else None,
+                "m39_3_4_reason": analytic_selected.get("reason") if isinstance(analytic_selected, Mapping) else None,
+                "routing_status": routing.get("status") if isinstance(routing, Mapping) else None,
+                "routing_route": routing.get("route") if isinstance(routing, Mapping) else None,
+                "routing_reason": routing.get("reason") if isinstance(routing, Mapping) else None,
+                "m39_5_2_mild_clock3_status": m3952_mild_override.get("status"),
+                "m39_5_1_executed": bool(m3951.get("executed", False)) if isinstance(m3951, Mapping) else False,
+                "m39_5_1_status": m3951.get("status") if isinstance(m3951, Mapping) else None,
+                "m39_5_1_production_grasp_ready": bool(m3951.get("production_grasp_ready", False)) if isinstance(m3951, Mapping) else False,
+                "m39_5_1_terminal_reject": bool(m3951.get("terminal_reject", False)) if isinstance(m3951, Mapping) else False,
+                "terminal_reject": bool(
+                    (isinstance(m3951, Mapping) and m3951.get("executed", False) and m3951.get("terminal_reject", False))
+                    or (isinstance(routing, Mapping) and routing.get("terminal_reject", False))
+                ),
+                "robot_candidate_survived": isinstance(scene.get("robot_candidate"), Mapping),
+                "timing_ms": {
+                    "geometry": round(float(geometry_elapsed), 3),
+                    "m39_5_0": round(float(m3950_elapsed), 3),
+                    "topology": round(float(topology_elapsed), 3),
+                    "tilt": round(float(tilt_elapsed), 3),
+                    "analytic": round(float(analytic_elapsed), 3),
+                    "routing": round(float(routing_elapsed), 3),
+                    "m39_5_1": round(float(m3951_elapsed), 3),
+                },
+            }
+            visible_attempts.append(attempt_row)
 
-        side_opening_started = time.perf_counter()
-        attach_m3941_side_opening_reconstruction(
-            scene,
-            list(prepared.adaptation.instances),
-            prepared.depth_geometry,
-            prepared.intrinsics,
-            self.raw_config,
-        )
-        timings["m39_4_1_side_opening_reconstruction_ms"] = _perf_ms(side_opening_started)
+            if isinstance(scene.get("robot_candidate"), Mapping):
+                break
 
-        side_entry_started = time.perf_counter()
-        attach_m3942_side_entry_validation(
-            scene,
-            list(prepared.adaptation.instances),
-            prepared.depth_geometry,
-            prepared.intrinsics,
-            self.raw_config,
-        )
-        timings["m39_4_2_side_entry_validation_ms"] = _perf_ms(side_entry_started)
+            target_specific_visible_reject = bool(
+                retry_enabled
+                and candidate_before_topology is not None
+                and candidate_after_topology
+                and selected_ring_id_int is not None
+                and (
+                    (isinstance(m3951, Mapping) and bool(m3951.get("executed", False)) and bool(m3951.get("terminal_reject", False)))
+                    or (isinstance(routing, Mapping) and bool(routing.get("terminal_reject", False)))
+                )
+            )
+            if target_specific_visible_reject:
+                excluded_visible_ring_ids.add(int(selected_ring_id_int))
+
+            remaining_visible_ids: set[int] = set()
+            for item in scene.get("instances") or []:
+                if not isinstance(item, Mapping):
+                    continue
+                if str(item.get("pose_strategy") or "") != "m38_1_front_annulus":
+                    continue
+                rid = item.get("ring_instance_id")
+                try:
+                    rid_int = int(rid)
+                except Exception:
+                    continue
+                if rid_int not in excluded_visible_ring_ids:
+                    remaining_visible_ids.add(rid_int)
+            retry_this_target = bool(
+                target_specific_visible_reject
+                and attempt_index < max_visible_attempts
+                and remaining_visible_ids
+            )
+            attempt_row["remaining_visible_ring_instance_ids"] = sorted(remaining_visible_ids)
+            if not retry_this_target:
+                break
+
+        scene["production_target_retry"] = {
+            "schema_version": "1.0",
+            "stage": "M39.4.3_visible_priority_target_retry",
+            "enabled": bool(retry_enabled),
+            "maximum_visible_target_attempts": int(max_visible_attempts),
+            "attempt_count": int(len(visible_attempts)),
+            "attempts": visible_attempts,
+            "rejected_visible_ring_instance_ids": sorted(excluded_visible_ring_ids),
+            "final_robot_candidate_available": isinstance(scene.get("robot_candidate"), Mapping),
+        }
+        timings["geometry_ms"] = geometry_total_ms
+        timings["m39_4_0_1_mouth_topology_arbitration_ms"] = topology_total_ms
+        timings["m39_3_1_tilt_diagnostic_ms"] = tilt_total_ms
+        timings["m39_3_4_analytic_conic_diagnostic_ms"] = analytic_total_ms
+        timings["m39_5_0_visible_mouth_axis_validation_ms"] = m3950_total_ms
+        timings["m39_5_1_tilted_visible_grasp_ms"] = m3951_total_ms
+        timings["m39_3_4_1_tilted_production_routing_ms"] = routing_total_ms
+
+        # M39.4.3 SIDE target retry uses the same target-level principle.  It is
+        # reached only when no VISIBLE production candidate survived.  If a
+        # recovered SIDE target later fails opening/entry validation, exclude
+        # that ring and try another side candidate from the same RGB-D frame.
+        max_side_attempts = max(1, int(retry_cfg.get("maximum_side_target_attempts", 3)))
+        # Never reinterpret a rejected TILTED_VISIBLE_SIDE target through the
+        # pure-side XY-axis fallback.  It remains a visible-mouth 3-D-axis target.
+        rejected_side_ring_ids: set[int] = set(m3951_rejected_ring_ids)
+        side_attempts: list[Dict[str, Any]] = []
+        side_axis_total_ms = 0.0
+        side_opening_total_ms = 0.0
+        side_entry_total_ms = 0.0
+
+        for side_attempt_index in range(1, max_side_attempts + 1):
+            retry_summary = scene.get("production_target_retry")
+            if not isinstance(retry_summary, dict):
+                retry_summary = {}
+                scene["production_target_retry"] = retry_summary
+            retry_summary["rejected_side_ring_instance_ids"] = sorted(rejected_side_ring_ids)
+
+            side_axis_started = time.perf_counter()
+            side_axis = attach_m3940_side_axis_recovery(
+                scene,
+                list(prepared.adaptation.instances),
+                prepared.depth_geometry,
+                prepared.intrinsics,
+                self.raw_config,
+            )
+            side_axis_elapsed = _perf_ms(side_axis_started)
+            side_axis_total_ms += side_axis_elapsed
+
+            side_opening_started = time.perf_counter()
+            side_opening = attach_m3941_side_opening_reconstruction(
+                scene,
+                list(prepared.adaptation.instances),
+                prepared.depth_geometry,
+                prepared.intrinsics,
+                self.raw_config,
+            )
+            side_opening_elapsed = _perf_ms(side_opening_started)
+            side_opening_total_ms += side_opening_elapsed
+
+            side_entry_started = time.perf_counter()
+            side_entry = attach_m3942_side_entry_validation(
+                scene,
+                list(prepared.adaptation.instances),
+                prepared.depth_geometry,
+                prepared.intrinsics,
+                self.raw_config,
+            )
+            side_entry_elapsed = _perf_ms(side_entry_started)
+            side_entry_total_ms += side_entry_elapsed
+
+            selected_side_id = None
+            for source in (side_entry, side_opening, side_axis):
+                if isinstance(source, Mapping) and source.get("selected_ring_instance_id") is not None:
+                    try:
+                        selected_side_id = int(source.get("selected_ring_instance_id"))
+                    except Exception:
+                        selected_side_id = None
+                    if selected_side_id is not None:
+                        break
+            side_row: Dict[str, Any] = {
+                "attempt_index": int(side_attempt_index),
+                "excluded_before_attempt": sorted(rejected_side_ring_ids),
+                "selected_ring_instance_id": selected_side_id,
+                "axis_status": side_axis.get("status") if isinstance(side_axis, Mapping) else None,
+                "opening_status": side_opening.get("status") if isinstance(side_opening, Mapping) else None,
+                "entry_status": side_entry.get("status") if isinstance(side_entry, Mapping) else None,
+                "entry_reason": side_entry.get("reason") if isinstance(side_entry, Mapping) else None,
+                "production_grasp_ready": bool(side_entry.get("production_grasp_ready", False)) if isinstance(side_entry, Mapping) else False,
+                "timing_ms": {
+                    "axis": round(float(side_axis_elapsed), 3),
+                    "opening": round(float(side_opening_elapsed), 3),
+                    "entry": round(float(side_entry_elapsed), 3),
+                },
+            }
+            side_attempts.append(side_row)
+
+            if isinstance(scene.get("robot_candidate"), Mapping):
+                break
+
+            target_specific_side_reject = bool(
+                retry_enabled
+                and selected_side_id is not None
+                and (
+                    (isinstance(side_entry, Mapping) and bool(side_entry.get("executed", False)) and bool(side_entry.get("terminal_reject", False)))
+                    or (isinstance(side_opening, Mapping) and bool(side_opening.get("executed", False)) and not isinstance(side_opening.get("selected"), Mapping))
+                )
+            )
+            if not target_specific_side_reject:
+                break
+            rejected_side_ring_ids.add(int(selected_side_id))
+            remaining_side_ids = {
+                int(v) for v in (side_axis.get("side_candidate_ring_ids") or [])
+                if int(v) not in rejected_side_ring_ids
+            } if isinstance(side_axis, Mapping) else set()
+            side_row["remaining_side_ring_instance_ids"] = sorted(remaining_side_ids)
+            if side_attempt_index >= max_side_attempts or not remaining_side_ids:
+                break
+
+        retry_summary = scene.get("production_target_retry")
+        if isinstance(retry_summary, dict):
+            retry_summary["maximum_side_target_attempts"] = int(max_side_attempts)
+            retry_summary["side_attempt_count"] = int(len(side_attempts))
+            retry_summary["side_attempts"] = side_attempts
+            retry_summary["rejected_side_ring_instance_ids"] = sorted(rejected_side_ring_ids)
+            retry_summary["final_robot_candidate_available"] = isinstance(scene.get("robot_candidate"), Mapping)
+        timings["m39_4_0_side_axis_recovery_ms"] = side_axis_total_ms
+        timings["m39_4_1_side_opening_reconstruction_ms"] = side_opening_total_ms
+        timings["m39_4_2_side_entry_validation_ms"] = side_entry_total_ms
         scene_clean = _strip_debug(scene)
         selected = scene_clean.get("robot_candidate") if isinstance(scene_clean, Mapping) else None
 
@@ -1151,6 +1505,12 @@ class OnlineGeometryProcessor:
             m3942 = scene.get("m39_4_2_side_entry_validation") if isinstance(scene, Mapping) else None
             if isinstance(m3942, Mapping) and bool(m3942.get("executed", False)):
                 overlay = draw_m3942_side_entry_overlay(overlay, m3942)
+            m3950 = scene.get("m39_5_0_visible_mouth_axis_validation") if isinstance(scene, Mapping) else None
+            m3950_overlay_authoritative = bool(
+                isinstance(m3950, Mapping)
+                and bool(m3950.get("enabled", False))
+                and bool(m3950.get("mouth_visible", False))
+            )
             branch_label = str(
                 scene.get("selected_grasp_branch")
                 if isinstance(scene, Mapping)
@@ -1180,7 +1540,7 @@ class OnlineGeometryProcessor:
                 reject_text = str(branch_c.get("display_reason_short") or "")
                 reject_detail = str(branch_c.get("display_reason_detail") or "")
                 reject_active = bool(branch_c.get("fast_terminated"))
-            if reject_active and reject_text:
+            if reject_active and reject_text and not m3950_overlay_authoritative:
                 cv2.rectangle(overlay, (6, 6), (min(overlay.shape[1] - 6, 520), 58), (0, 0, 0), -1)
                 cv2.putText(
                     overlay,
@@ -1203,6 +1563,12 @@ class OnlineGeometryProcessor:
                         1,
                         cv2.LINE_AA,
                     )
+
+            # M39.5.2.2 overlay arbitration: visible-mouth signed-axis routing
+            # owns the top status banner. Draw it LAST so historical M39.3/M39.4
+            # diagnostic overlays can never overwrite the current decision.
+            if isinstance(m3950, Mapping) and bool(m3950.get("enabled", False)):
+                overlay = draw_m3950_visible_mouth_axis_overlay(overlay, m3950, prepared.intrinsics)
             ok, encoded = cv2.imencode(
                 ".jpg",
                 overlay,
@@ -1358,6 +1724,8 @@ class OnlineGeometryProcessor:
                 "m39_4_0_side_axis_recovery": self.raw_config.get("m39_4_0_side_axis_recovery") or {},
                 "m39_4_1_side_opening_reconstruction": self.raw_config.get("m39_4_1_side_opening_reconstruction") or {},
                 "m39_4_2_side_entry_validation": self.raw_config.get("m39_4_2_side_entry_validation") or {},
+                "m39_5_0_visible_mouth_axis_validation": self.raw_config.get("m39_5_0_visible_mouth_axis_validation") or {},
+                "m39_5_1_tilted_visible_grasp": self.raw_config.get("m39_5_1_tilted_visible_grasp") or {},
             },
             "timing_ms": {
                 key: round(float(value), 3) for key, value in timings.items()
@@ -1404,6 +1772,16 @@ class OnlineGeometryProcessor:
                 side_entry_path = output_dir / "m39_4_2_side_entry_validation.json"
                 write_json(side_entry_path, dict(side_entry_summary))
                 files["m39_4_2_side_entry_validation"] = str(side_entry_path)
+            m3950_summary = scene_clean.get("m39_5_0_visible_mouth_axis_validation") if isinstance(scene_clean, Mapping) else None
+            if isinstance(m3950_summary, Mapping):
+                m3950_path = output_dir / "m39_5_0_visible_mouth_axis_validation.json"
+                write_json(m3950_path, dict(m3950_summary))
+                files["m39_5_0_visible_mouth_axis_validation"] = str(m3950_path)
+            m3951_summary = scene_clean.get("m39_5_1_tilted_visible_grasp") if isinstance(scene_clean, Mapping) else None
+            if isinstance(m3951_summary, Mapping):
+                m3951_path = output_dir / "m39_5_1_tilted_visible_grasp.json"
+                write_json(m3951_path, dict(m3951_summary))
+                files["m39_5_1_tilted_visible_grasp"] = str(m3951_path)
             path = output_dir / "online_geometry_result.json"
             files["geometry_result"] = str(path)
             payload["files"] = files

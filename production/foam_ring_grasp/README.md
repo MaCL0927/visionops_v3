@@ -1,14 +1,28 @@
+# Foam Ring Grasp M39.5.2
+
+M39.5.2 freezes a 30-degree robot READY split for visible mouths:
+- measured signed-axis tilt < 30 deg: VISIBLE_INITIAL + preferred clock-3 grasp;
+- measured signed-axis tilt >= 30 deg: SIDE_INITIAL + camera-nearest-rim grasp;
+- PURE_SIDE: existing M39.4.2 side branch.
+
+The trigger service now treats an executed M39.5.1 tilted-visible production result as authoritative, so legacy M38/M39.3/M39.4 terminal flags cannot veto a new production-ready candidate.
+
 # foam_ring_grasp production package
 
-当前干净生产基线：**M39.4.2.2 — visible-mouth + pure-side dual-branch production**。
+当前版本：**M39.5.2 — 30° Hybrid READY Routing + Legacy Arbitration Fix**。
+
+M39.5.1 已把 `TILTED_VISIBLE_SIDE` 正式接入 SIDE_INITIAL 机器人分支：抓取点改为开口圆弧上最靠近相机的壁厚中径点，并复用 M39.4.2 全套碰撞/间隙校验。无运动视觉检查仍可使用 `scripts/validate_m3950_visible_mouth_axis.py`。
 
 ## 当前有效能力
 
-- `ring_mouth` 可见且可匹配：M39.3 FLAT / TILTED 生产抓取，clock 固定为 3 点钟，失败直接拒绝，不搜索其他 clock。
+- `ring_mouth` 可见且可匹配：M39.5.2 先恢复 signed 3-D axis；轴倾角 `<30°` 使用 `VISIBLE_INITIAL + clock-3`，轴倾角 `>=30°` 使用 `SIDE_INITIAL + CAMERA-NEAR-RIM`。
 - `ring_mouth` 不可见，或被 topology gate 判定为 `SIDE_VIEW_PSEUDO_MOUTH`：进入 M39.4 纯侧躺分支。
 - M39.4.0.1：恢复纯侧躺轴线与 selected entry end。
 - M39.4.1：利用目标自身 camera-facing outer arc 重建 cross-section center、opening plane、opening center 与 Side Grasp Frame；不要求目标躺在箱底。
 - M39.4.2.2：inner-finger 孔内包络、outer-finger clearance、完整工具/箱壁/邻环碰撞、PREGRASP→GRASP swept path、CLOSED grasp 环境、LEFT_LINK7 与正式闭夹抓取。
+- M39.4.3：VISIBLE flat protection + 同帧多目标 retry。
+- M39.5.1：提供 visible-mouth signed 3-D axis 与 camera-nearest-rim SIDE 抓取几何。
+- M39.5.2：冻结 30° READY 分界；`<30°` 回到成熟的 VISIBLE_INITIAL + 3点钟抓取，`>=30°` 才使用 M39.5.1 SIDE 抓取；同时修复 service 最终仲裁，使 M39.5.1 READY 不再被旧 M39.3/M39.4 reject 覆盖。
 
 ## 当前侧躺几何参数
 

@@ -1,14 +1,17 @@
 # Foam ring production configuration
-# Current scope at M39.4.2.2:
+# Current scope at M39.5.0 validation:
 #   - real ring_mouth visible: frozen FLAT + TILTED production grasp
 #   - no mouth or side-view pseudo mouth: M39.4.0.1 side-axis recovery
 #   - reliable side axis: M39.4.1 camera-facing arc + opening reconstruction
 #   - M39.4.2.2 shortens side PREGRASP and simplifies robot motion to PREGRASP→GRASP, then direct AVOIDANCE return
 #   - side path uses branch-specific INITIAL + collision-avoidance waypoint
 #   - grasp direction for visible-mouth production: 3 o'clock only
+#   - M39.5.1 routes clearly tilted visible-mouth rings to SIDE_INITIAL,
+#     targets the camera-nearest opening-wall midpoint, and enables the robot
+#     branch only after full M39.4.2 collision/clearance validation.
 # Historical stage-tuning configs stay outside production.
 schema_version: '7.2'
-task: foam_ring_grasp_m39_4_2_2_short_pregrasp_direct_side_grasp
+task: foam_ring_grasp_m39_5_2_30deg_hybrid_ready_routing
 classes:
   foam_ring: foam_ring
   ring_mouth: ring_mouth
@@ -85,6 +88,7 @@ object_geometry:
     - 3
     trigger_on_ambiguous: true
     trigger_on_out_of_range: true
+    trigger_on_compression_infeasible: true
     nominal_wall_thickness_mm: 14.0
   axial_length_mm: 70.0
   minimum_inner_diameter_mm: 50.0
@@ -439,6 +443,94 @@ m39_3_4_1_tilted_production_routing:
   minimum_routed_tilt_deg: 8.0
   maximum_routed_tilt_deg: 35.0
   maximum_approach_normal_error_deg: 2.0
+  visible_flat_protection:
+    enabled: true
+    accepted_m3931_confidence: [strong, moderate]
+    minimum_dense_inlier_ratio_to_override_flat: 0.30
+    minimum_dense_valid_ratio_to_override_flat: 0.30
+    minimum_dense_coverage_deg_to_override_flat: 90.0
+    maximum_dense_residual_median_mm_to_override_flat: 25.0
+m39_5_0_visible_mouth_axis_validation:
+  enabled: true
+  mode: production_axis_source
+  production_routing_enabled: true
+  selected_target_only: true
+  # True edge-on/pseudo-mouth remains in the legacy PURE_SIDE family.
+  pure_side_mouth_axis_ratio_max: 0.34
+
+  # M39.5.1 no longer accepts "looks circular" as an upright shortcut.
+  # Compare the observed mouth ellipse with the calibrated box-Z flat-circle
+  # projection at the same location.  Supplied field data:
+  #   12 true flat: deficit 0.0234..0.0770
+  #   8 mild tilt: deficit 0.0839..0.1825
+  # Use a deliberately wider 0.07..0.09 transition band and arbitrate it with
+  # independent ring sector-depth gradient evidence.
+  flat_reference_axis_ratio_deficit_upright_max: 0.070
+  flat_reference_axis_ratio_deficit_tilted_min: 0.090
+  transition_sector_tilt_min_deg: 10.0
+  transition_peak_to_peak_min_mm: 14.0
+  transition_sector_flat_max_deg: 8.0
+  transition_peak_to_peak_flat_max_mm: 12.0
+
+  # M39.5.2 production READY split.  Geometric tilt below 30 deg keeps the
+  # proven VISIBLE_INITIAL + preferred clock-3 grasp.  At/above 30 deg the
+  # camera-nearest-rim SIDE_INITIAL grasp owns production.
+  side_ready_axis_tilt_min_deg: 30.0
+
+  # Signed conic A/B disambiguation.  Large body->mouth displacement uses the
+  # semantic axis first.  Mild tilt with nearly concentric centroids falls back
+  # to the independent ring sector-depth gradient direction.
+  minimum_semantic_offset_px_for_sign: 6.0
+  maximum_semantic_conic_alignment_deg: 30.0
+  minimum_semantic_branch_separation_deg: 60.0
+  maximum_sector_gradient_alignment_deg: 85.0
+  minimum_sector_gradient_branch_separation_deg: 25.0
+  minimum_conic_evidence_margin_for_axis: 0.020
+  axis_projection_probe_mm: 60.0
+
+  # Geometry quality gates for allowing the recovered signed axis to reach the
+  # robot-production stage.  These do not decide flat-vs-tilt; they decide
+  # whether the chosen 3-D axis is safe enough to execute.
+  maximum_axis_reprojection_chamfer_p90_px: 5.5
+  # Foam/depth edge residual is not used for flat-vs-tilt classification.
+  # The 16-frame field set had two visually correct strong-tilt axes at
+  # 4.84/6.02 mm radial p90; keep RGB conic reprojection + sector support as
+  # independent gates and let the downstream full gripper collision checker
+  # decide executability.
+  maximum_axis_circle_radial_residual_p90_mm: 6.5
+  minimum_axis_mouth_band_valid_sectors: 10
+  overlay_enabled: true
+
+m39_5_1_tilted_visible_grasp:
+  enabled: true
+  production_grasp_enabled: true
+  gripper_closing_enabled: true
+  ready_pose: SIDE_INITIAL
+  rim_policy: camera_nearest_visible_opening_wall_midpoint
+  # Reuse the already field-tested SIDE direct insertion lengths and all
+  # M39.4.2 full-gripper/box/neighbor/target-ring collision gates.
+  grasp_insertion_depth_mm: 39.0
+  pregrasp_offset_from_entry_mm: 20.0
+  inner_hole_clearance_margin_mm: 2.0
+  outer_finger_clearance_margin_mm: 2.0
+  target_material_intersection_tolerance_mm: 1.5
+  target_axial_tolerance_mm: 1.5
+  minimum_environment_clearance_mm: 3.0
+  default_component_minimum_box_clearance_mm: 2.0
+  component_minimum_box_clearance_mm:
+    moving_finger: 2.0
+    contact_block: 2.0
+    palm: 2.0
+    pneumatic_fitting: 2.0
+    mounting_disk: -6.0
+  include_robot_wrist_in_tool_collision: false
+  pregrasp_to_grasp_samples: 9
+  stop_on_first_hard_reject: true
+
+production_target_retry:
+  enabled: true
+  maximum_visible_target_attempts: 3
+  maximum_side_target_attempts: 3
 m39_4_0_side_axis_recovery:
   enabled: true
   mode: online_diagnostic_only

@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Foam-ring production validation for two frozen branches:
-- visible-mouth FLAT/TILTED: existing M39.3.4.1 production grasp;
-- side-lying: M39.4.2.2 short-PREGRASP direct side rim-pinch production grasp.
+Foam-ring production validation for two frozen branches with joint-space
+branch-ready routing:
+- upright visible-mouth: existing frozen clock-3 visible grasp;
+- tilted visible-mouth: M39.5.1 camera-nearest-rim grasp from SIDE_INITIAL;
+- pure side-lying: M39.4.2.2 short-PREGRASP direct side rim-pinch grasp.
 
-Side-lying motion uses its own ready pose and mandatory collision-avoidance
+The vision result owns the branch choice.  The robot is NOT rejected merely
+because it is currently parked at the other branch's ready pose.  After vision
+routing and operator confirmation, the script automatically switches between
+VISIBLE_INITIAL and SIDE_INITIAL as required.  The switch itself uses the frozen
+7-DOF joint coordinates and SDK move_j(); move_l() is no longer used for this
+large ready-to-ready reorientation.  Automatic switching is allowed only when
+the current joint state AND LEFT_LINK7 TCP pose agree with one of the two known
+ready configurations; an unknown or inconsistent start remains rejected.
+
+SIDE-family motion (tilted-visible and pure-side) uses its own ready pose and mandatory collision-avoidance
 waypoint before PREGRASP. ENTRY is retained only as a visual/geometric reference;
 the robot moves directly PREGRASP -> GRASP. After CLOSE it moves directly from
-GRASP to the collision-avoidance waypoint before returning to SIDE_INITIAL.  Side motion always retains a second operator Enter;
---single-enter applies only to the mature visible-mouth branch.
+GRASP to the collision-avoidance waypoint before returning to SIDE_INITIAL. Side
+motion always retains a second operator Enter; --single-enter applies only to the
+mature visible-mouth branch.
 
 IMPORTANT FRAME CONTRACT
 ------------------------
@@ -61,26 +73,45 @@ EXPECTED_BASE_FRAME = "robot_default_base"
 EXPECTED_FLANGE_FRAME = "left_link7"
 
 # Branch-specific LEFT_LINK7 ready poses in SDK default / robot_default_base.
-# Visible-mouth FLAT/TILTED keeps the previously validated ready pose.
+# These TCP values are retained for frame/arrival verification.  The actual
+# VISIBLE_INITIAL <-> SIDE_INITIAL transition is commanded with move_j() using
+# the frozen 7-DOF joint coordinates captured at the same two poses.
 VISIBLE_INITIAL_POSE_MM = [
-    438.5426645162859,
-    505.62191497575617,
-    882.1935751476652,
-    0.5042044184726129,
-    0.48014826760863427,
-    -0.5025941271032957,
-    0.5124789643550238
+    438.543238,
+    505.621470,
+    882.193036,
+    0.504203443,
+    0.480148479,
+    -0.502595128,
+    0.512478745,
+]
+VISIBLE_INITIAL_JOINTS = [
+    -1.384214505,
+    1.195394052,
+    1.578050856,
+    0.950808014,
+    -3.172495758,
+    -1.835441114,
+    -4.496910523,
 ]
 
-# M39.4 side-lying branch uses the field-provided ready pose below.
 SIDE_INITIAL_POSE_MM = [
-    415.5408865584812,
-    611.0484969003413,
-    774.353022981596,
-    -0.684075236879074,
-    0.7291619332140463,
-    0.005389005927504927,
-    0.018300384026211324
+    415.540859,
+    611.048579,
+    774.352657,
+    -0.684075344,
+    0.729161824,
+    0.005389774,
+    0.018300499,
+]
+SIDE_INITIAL_JOINTS = [
+    -1.908033563,
+    1.307147586,
+    1.973150538,
+    1.429727333,
+    -1.632750113,
+    -1.496229154,
+    -1.611350731,
 ]
 
 # Field-provided collision-avoidance waypoint.  Every side-lying production
@@ -102,6 +133,10 @@ APPROACH_VEL = 5
 APPROACH_ACC = 20
 RETURN_VEL = 10
 RETURN_ACC = 30
+# Branch-ready switching is a fixed joint-space transit between the two captured
+# 7-DOF configurations. Keep the first field tests deliberately slow.
+READY_SWITCH_JOINT_VEL = 10
+READY_SWITCH_JOINT_ACC = 20
 PLANNER = "pilz"
 
 # Sanity checks. They catch unit/frame/extrinsic explosions; they are not a
@@ -112,12 +147,23 @@ MAX_PREGRASP_TO_GRASP_MM = 250.0
 MIN_PREGRASP_TO_GRASP_MM = 10.0
 MAX_START_OFFSET_FROM_INITIAL_MM = 80.0
 MAX_START_ROTATION_FROM_INITIAL_DEG = 15.0
+# Joint state is now the primary identity of a ready configuration.  Direct/raw
+# SDK values are compared intentionally (no 2*pi wrapping) so a different
+# multi-turn joint configuration is never treated as the same safe ready state.
+MAX_START_JOINT_ERROR_RAD = math.radians(5.0)
+# M39.5.2.2: a robot that is already TCP-tight at a frozen READY pose may
+# naturally report a slightly different redundant 7-DOF solution after a
+# previous motion. Up to 8deg max joint delta is accepted ONLY for this
+# TCP-tight case, and is never treated as execution-ready: the script
+# immediately normalizes it back to the frozen joint target with move_j.
+MAX_TCP_TIGHT_NORMALIZE_JOINT_ERROR_RAD = math.radians(8.0)
+VERIFY_READY_JOINT_TOL_RAD = math.radians(3.0)
 VERIFY_TRANSLATION_TOL_MM = 8.0
 VERIFY_ROTATION_TOL_DEG = 5.0
 
 VISION_TIMEOUT_S = 30.0
 VISION_WAIT_TIMEOUT_MS = 25000
-LOG_DIR = Path("foam_ring_robot_validation_logs")
+LOG_DIR = Path("./data/foam_ring_robot_validation_logs")
 EXPECTED_TILTED_ROUTE = "M39.3.4.1_TILTED"
 EXPECTED_FLAT_ROUTE = "M39.2.9_FLAT"
 DEFAULT_MIN_TILTED_ROUTE_DEG = 8.0
@@ -504,6 +550,77 @@ def extract_m3942_left_link7_targets(data: Mapping[str, Any]) -> Tuple[List[floa
         )
     return pre_pose, entry_pose, grasp_pose
 
+
+def extract_m3951_left_link7_targets(data: Mapping[str, Any]) -> Tuple[List[float], List[float], List[float]]:
+    summary = data.get("scene_summary") if isinstance(data.get("scene_summary"), Mapping) else {}
+    m3951 = summary.get("m39_5_1_tilted_visible_grasp") if isinstance(summary, Mapping) else None
+    if not isinstance(m3951, Mapping) or not bool(m3951.get("executed", False)):
+        raise RuntimeError("M39.5.1 tilted-visible production summary missing")
+    if not bool(m3951.get("production_grasp_ready", False)):
+        raise RuntimeError(
+            "M39.5.1 tilted-visible grasp is not production-ready: "
+            f"{m3951.get('reason')} / {m3951.get('rejection_reasons')}"
+        )
+    expected_branch = "m39_5_1_tilted_visible_camera_near_rim_grasp"
+    if str(data.get("selected_grasp_branch") or "") != expected_branch:
+        raise RuntimeError(f"unexpected M39.5.1 branch: {data.get('selected_grasp_branch')!r}")
+    if data.get("target_found") is not True or data.get("terminal_reject") is True:
+        raise RuntimeError("M39.5.1 ready summary did not produce a non-rejected candidate")
+    candidate = data.get("candidate") if isinstance(data.get("candidate"), Mapping) else {}
+    if not bool(candidate.get("production_grasp_ready", False)):
+        raise RuntimeError("M39.5.1 candidate.production_grasp_ready is not true")
+    command = candidate.get("gripper_command") if isinstance(candidate.get("gripper_command"), Mapping) else {}
+    if command.get("close_allowed") is not True:
+        raise RuntimeError("M39.5.1 candidate does not explicitly allow gripper CLOSE")
+    validation = candidate.get("tilted_visible_entry_validation") if isinstance(candidate.get("tilted_visible_entry_validation"), Mapping) else {}
+    if not validation:
+        validation = candidate.get("side_entry_validation") if isinstance(candidate.get("side_entry_validation"), Mapping) else {}
+    path = validation.get("path_collision") if isinstance(validation.get("path_collision"), Mapping) else {}
+    if str(path.get("status") or "") != "clear":
+        raise RuntimeError(f"M39.5.1 path_collision.status={path.get('status')!r}")
+    inner = validation.get("inner_finger_hole_envelope") if isinstance(validation.get("inner_finger_hole_envelope"), Mapping) else {}
+    outer = validation.get("outer_finger_clearance") if isinstance(validation.get("outer_finger_clearance"), Mapping) else {}
+    if inner.get("pass") is not True:
+        raise RuntimeError("M39.5.1 inner finger hole envelope did not pass")
+    if outer.get("pass") is not True:
+        raise RuntimeError("M39.5.1 outer finger clearance did not pass")
+    closed_env = validation.get("closed_grasp_environment") if isinstance(validation.get("closed_grasp_environment"), Mapping) else {}
+    if str(closed_env.get("status") or "") != "clear":
+        raise RuntimeError(f"M39.5.1 closed grasp environment status={closed_env.get('status')!r}")
+    if data.get("robot_pose_transform_ready") is not True:
+        raise RuntimeError("M39.5.1 robot_pose_transform_ready is not true")
+    rt = data.get("robot_pose_transform") if isinstance(data.get("robot_pose_transform"), Mapping) else {}
+    if str(rt.get("status") or "") != "ok":
+        raise RuntimeError(f"robot_pose_transform.status={rt.get('status')!r}")
+    flange = rt.get("flange") if isinstance(rt.get("flange"), Mapping) else {}
+    if flange.get("available") is not True or str(flange.get("frame_id") or "") != EXPECTED_FLANGE_FRAME:
+        raise RuntimeError("M39.5.1 LEFT_LINK7 flange transform unavailable")
+    docs = {}
+    for name in ("pregrasp", "entry", "grasp"):
+        row = flange.get(name) if isinstance(flange.get(name), Mapping) else {}
+        doc = row.get("pose_base") if isinstance(row.get("pose_base"), Mapping) else None
+        if not isinstance(doc, Mapping):
+            raise RuntimeError(f"M39.5.1 flange.{name}.pose_base missing")
+        docs[name] = _pose_from_document(doc, expected_frame=EXPECTED_BASE_FRAME)
+    pre_pose, entry_pose, grasp_pose = docs["pregrasp"], docs["entry"], docs["grasp"]
+    for name, pose in (("entry", entry_pose), ("grasp", grasp_pose)):
+        dr = _quat_angle_deg(pre_pose[3:7], pose[3:7])
+        if dr > MAX_PREGRASP_GRASP_ROTATION_DELTA_DEG:
+            raise RuntimeError(f"M39.5.1 {name} orientation changed by {dr:.3f}deg")
+    pre_entry = _distance_mm(pre_pose, entry_pose)
+    entry_grasp = _distance_mm(entry_pose, grasp_pose)
+    pre_grasp = _distance_mm(pre_pose, grasp_pose)
+    if not (10.0 <= pre_entry <= MAX_SIDE_PREGRASP_TO_ENTRY_MM):
+        raise RuntimeError(f"M39.5.1 PREGRASP->ENTRY distance abnormal: {pre_entry:.1f} mm")
+    if not (1.0 <= entry_grasp <= MAX_SIDE_ENTRY_TO_GRASP_MM):
+        raise RuntimeError(f"M39.5.1 ENTRY->GRASP distance abnormal: {entry_grasp:.1f} mm")
+    if abs(pre_grasp - (pre_entry + entry_grasp)) > 1.0:
+        raise RuntimeError(
+            f"M39.5.1 PREGRASP->GRASP is not coaxial: direct={pre_grasp:.1f} mm, "
+            f"via-entry={pre_entry + entry_grasp:.1f} mm"
+        )
+    return pre_pose, entry_pose, grasp_pose
+
 def save_result(data: Mapping[str, Any]) -> Path:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     request_id = str(data.get("request_id") or int(time.time() * 1000))
@@ -528,6 +645,37 @@ def connect_robot() -> RobotClient:
 def current_pose_mm(robot: RobotClient) -> List[float]:
     # Deliberately omit frame: this is the calibrated robot_default_base/default SDK frame.
     return _sdk_pose_to_mm(robot.motion.get_pose(ArmType.Left))
+
+
+def current_joints(robot: RobotClient) -> List[float]:
+    js = robot.motion.get_joint_state(ArmType.Left)
+    joints = [float(v) for v in (js.positions or [])]
+    if len(joints) != 7:
+        raise RuntimeError(f"expected 7 LEFT-arm joints, got {len(joints)}: {joints}")
+    if not _finite(joints):
+        raise RuntimeError(f"LEFT-arm joint state contains NaN/Inf: {joints}")
+    return joints
+
+
+def _joint_abs_errors(actual: Sequence[float], target: Sequence[float]) -> List[float]:
+    if len(actual) != 7 or len(target) != 7:
+        raise ValueError("joint vectors must contain 7 values")
+    # Deliberately do NOT wrap by 2*pi.  The captured raw multi-turn joint
+    # configuration is part of the ready-pose safety contract.
+    return [abs(float(a) - float(t)) for a, t in zip(actual, target)]
+
+
+def _max_joint_error_rad(actual: Sequence[float], target: Sequence[float]) -> float:
+    return max(_joint_abs_errors(actual, target))
+
+
+def _format_joints(label: str, joints: Sequence[float]) -> str:
+    values = ", ".join(f"{float(v):.6f}" for v in joints)
+    return f"{label:<22} [{values}]"
+
+
+def _joint_ready_match(actual: Sequence[float], target: Sequence[float]) -> bool:
+    return _max_joint_error_rad(actual, target) <= MAX_START_JOINT_ERROR_RAD
 
 
 def set_left_gripper(robot: RobotClient, *, opened: bool, label: str) -> None:
@@ -592,6 +740,73 @@ def move_l_mm(
         raise RuntimeError(f"move {label} failed: {result.message}")
     verify_reached(robot, pose_mm, label)
     print(f"✓ {label} reached")
+
+
+def verify_ready_reached(
+    robot: RobotClient,
+    *,
+    target_pose_mm: Sequence[float],
+    target_joints: Sequence[float],
+    label: str,
+) -> None:
+    actual_joints = current_joints(robot)
+    errors = _joint_abs_errors(actual_joints, target_joints)
+    max_err = max(errors)
+    print(_format_joints(f"actual {label} J", actual_joints))
+    print(
+        f"  joint reach error: max={max_err:.6f} rad / "
+        f"{math.degrees(max_err):.3f} deg; per-joint="
+        + "[" + ", ".join(f"{math.degrees(e):.2f}" for e in errors) + "] deg"
+    )
+    if max_err > VERIFY_READY_JOINT_TOL_RAD:
+        raise RuntimeError(
+            f"{label} joint verification failed: max joint error "
+            f"{max_err:.6f} rad / {math.degrees(max_err):.3f} deg"
+        )
+
+    # Secondary independent check in the calibrated/default TCP frame.
+    actual_pose = current_pose_mm(robot)
+    dt = _distance_mm(actual_pose, target_pose_mm)
+    dr = _quat_angle_deg(actual_pose[3:7], target_pose_mm[3:7])
+    print(_format_pose(f"actual {label} TCP", actual_pose))
+    print(f"  TCP reach error: translation={dt:.3f} mm, rotation={dr:.3f} deg")
+    if dt > VERIFY_TRANSLATION_TOL_MM or dr > VERIFY_ROTATION_TOL_DEG:
+        raise RuntimeError(
+            f"{label} TCP secondary verification failed: {dt:.3f} mm / {dr:.3f} deg"
+        )
+
+
+def move_j_ready(
+    robot: RobotClient,
+    *,
+    target_pose_mm: Sequence[float],
+    target_joints: Sequence[float],
+    label: str,
+    vel: int,
+    acc: int,
+) -> None:
+    if len(target_joints) != 7 or not _finite(target_joints):
+        raise RuntimeError(f"{label} target joints invalid: {target_joints}")
+    print(f"\n[Robot] move_j -> {label}")
+    print(_format_joints(f"{label} J", target_joints))
+    print(_format_pose(f"{label} TCP(ref)", target_pose_mm))
+    result = robot.motion.move_j(
+        arm=ArmType.Left,
+        joints=[float(v) for v in target_joints],
+        vel=vel,
+        acc=acc,
+        wait=True,
+        planner=PLANNER,
+    )
+    if not result.success:
+        raise RuntimeError(f"move_j {label} failed: {result.message}")
+    verify_ready_reached(
+        robot,
+        target_pose_mm=target_pose_mm,
+        target_joints=target_joints,
+        label=label,
+    )
+    print(f"✓ {label} reached by move_j")
 
 
 def print_vision_summary(
@@ -787,31 +1002,205 @@ def print_debug_artifacts(data: Mapping[str, Any]) -> None:
         print(f"{label:<12}: {path}")
     print("-" * 78)
 
-def ensure_start_near_pose(robot: RobotClient, expected_pose_mm: Sequence[float], label: str) -> None:
-    actual = current_pose_mm(robot)
-    d = _distance_mm(actual, expected_pose_mm)
-    r = _quat_angle_deg(actual[3:7], expected_pose_mm[3:7])
-    print(_format_pose("current LEFT_LINK7", actual))
-    print(_format_pose(label, expected_pose_mm))
-    print(f"start offset              : {d:.3f} mm / {r:.3f} deg")
-    if d > MAX_START_OFFSET_FROM_INITIAL_MM or r > MAX_START_ROTATION_FROM_INITIAL_DEG:
-        raise RuntimeError(
-            f"robot start pose differs from {label} by {d:.1f} mm / {r:.1f} deg; "
-            f"limits are {MAX_START_OFFSET_FROM_INITIAL_MM:.1f} mm / "
-            f"{MAX_START_ROTATION_FROM_INITIAL_DEG:.1f} deg."
+def _pose_is_near_ready(actual_mm: Sequence[float], ready_pose_mm: Sequence[float]) -> bool:
+    return (
+        _distance_mm(actual_mm, ready_pose_mm) <= MAX_START_OFFSET_FROM_INITIAL_MM
+        and _quat_angle_deg(actual_mm[3:7], ready_pose_mm[3:7]) <= MAX_START_ROTATION_FROM_INITIAL_DEG
+    )
+
+
+def _ready_definitions() -> List[Dict[str, Any]]:
+    return [
+        {
+            "label": "VISIBLE initial",
+            "pose_mm": VISIBLE_INITIAL_POSE_MM,
+            "joints": VISIBLE_INITIAL_JOINTS,
+        },
+        {
+            "label": "SIDE initial",
+            "pose_mm": SIDE_INITIAL_POSE_MM,
+            "joints": SIDE_INITIAL_JOINTS,
+        },
+    ]
+
+
+def plan_branch_ready_transition(
+    robot: RobotClient,
+    *,
+    target_pose_mm: Sequence[float],
+    target_joints: Sequence[float],
+    target_label: str,
+) -> Dict[str, Any]:
+    """Plan a deterministic joint-space branch-ready transition.
+
+    Ready-state identity is joint-primary and TCP-secondary.  This deliberately
+    prevents a TCP pose with an unexpected/mirrored/multi-turn joint solution
+    from being accepted as a known safe starting configuration.
+    """
+    actual_pose = current_pose_mm(robot)
+    actual_joints = current_joints(robot)
+    known_ready = _ready_definitions()
+
+    print(_format_pose("current LEFT_LINK7", actual_pose))
+    print(_format_joints("current LEFT joints", actual_joints))
+    print(_format_pose(target_label, target_pose_mm))
+    print(_format_joints(f"{target_label} J", target_joints))
+
+    target_d = _distance_mm(actual_pose, target_pose_mm)
+    target_r = _quat_angle_deg(actual_pose[3:7], target_pose_mm[3:7])
+    target_j = _max_joint_error_rad(actual_joints, target_joints)
+    print(
+        f"target ready offset       : TCP={target_d:.3f} mm / {target_r:.3f} deg; "
+        f"joint_max={target_j:.6f} rad / {math.degrees(target_j):.3f} deg"
+    )
+
+    matches: List[Dict[str, Any]] = []
+    diagnostics: List[str] = []
+    for ready in known_ready:
+        pose = ready["pose_mm"]
+        joints = ready["joints"]
+        dt = _distance_mm(actual_pose, pose)
+        dr = _quat_angle_deg(actual_pose[3:7], pose[3:7])
+        dj = _max_joint_error_rad(actual_joints, joints)
+        joint_ok = dj <= MAX_START_JOINT_ERROR_RAD
+        tcp_ok = dt <= MAX_START_OFFSET_FROM_INITIAL_MM and dr <= MAX_START_ROTATION_FROM_INITIAL_DEG
+        tcp_tight = dt <= VERIFY_TRANSLATION_TOL_MM and dr <= VERIFY_ROTATION_TOL_DEG
+        joint_normalizable = dj <= MAX_TCP_TIGHT_NORMALIZE_JOINT_ERROR_RAD
+        diagnostics.append(
+            f"{ready['label']}: joint_max={math.degrees(dj):.2f}deg, "
+            f"TCP={dt:.1f}mm/{dr:.1f}deg"
         )
+        if joint_ok and tcp_ok:
+            matches.append(ready)
+        elif tcp_tight and joint_normalizable:
+            # M39.5.2.2: this is a known READY TCP with a slightly different
+            # redundant joint solution. Accept it only as a source for
+            # normalization. Later, because it is outside the 3deg tight joint
+            # gate, move_j(target frozen joints) is mandatory before grasping.
+            print(
+                f"ready normalization        : TCP is tightly at {ready['label']}, "
+                f"joint_max={math.degrees(dj):.2f}deg; accept for move_j normalization "
+                f"(limit={math.degrees(MAX_TCP_TIGHT_NORMALIZE_JOINT_ERROR_RAD):.2f}deg)"
+            )
+            matches.append(ready)
+        elif tcp_ok and not joint_ok:
+            raise RuntimeError(
+                f"TCP is near {ready['label']} but the 7-DOF joint configuration is outside the "
+                f"safe ready identity/normalization envelope (max joint error={math.degrees(dj):.2f}deg; "
+                f"coarse={math.degrees(MAX_START_JOINT_ERROR_RAD):.2f}deg, "
+                f"TCP-tight normalize={math.degrees(MAX_TCP_TIGHT_NORMALIZE_JOINT_ERROR_RAD):.2f}deg). "
+                "Refuse automatic routing."
+            )
+        elif joint_ok and not tcp_ok:
+            raise RuntimeError(
+                f"joints are near {ready['label']} but TCP verification is inconsistent "
+                f"({dt:.1f}mm/{dr:.1f}deg). Refuse automatic routing; check frame/state."
+            )
+
+    if len(matches) != 1:
+        raise RuntimeError(
+            "robot is not in exactly one validated ready configuration; automatic branch routing "
+            "is disabled from an unknown/ambiguous start. " + "; ".join(diagnostics)
+        )
+
+    source = matches[0]
+    if str(source["label"]) == target_label:
+        target_joint_tight = target_j <= VERIFY_READY_JOINT_TOL_RAD
+        target_tcp_tight = (
+            target_d <= VERIFY_TRANSLATION_TOL_MM
+            and target_r <= VERIFY_ROTATION_TOL_DEG
+        )
+        if target_joint_tight and target_tcp_tight:
+            print(f"ready routing             : ALREADY at {target_label}; no move_j switch needed")
+            return {
+                "action": "already_ready",
+                "source_label": target_label,
+                "target_label": target_label,
+                "target_pose_mm": list(target_pose_mm),
+                "target_joints": list(target_joints),
+            }
+        print(
+            f"ready routing             : NORMALIZE {target_label} with move_j "
+            f"(inside coarse ready gate but outside tight execution tolerance)"
+        )
+    else:
+        print(
+            f"ready routing             : AUTO MOVEJ {source['label']} -> {target_label} "
+            f"(joint-space frozen target)"
+        )
+    return {
+        "action": "switch_ready",
+        "source_label": source["label"],
+        "target_label": target_label,
+        "target_pose_mm": list(target_pose_mm),
+        "target_joints": list(target_joints),
+    }
+
+
+def execute_branch_ready_transition(robot: RobotClient, plan: Mapping[str, Any]) -> None:
+    """Execute the planned ready-pose switch with SDK move_j after confirmation."""
+    target_label = str(plan.get("target_label") or "branch initial")
+    target_pose = plan.get("target_pose_mm")
+    target_joints = plan.get("target_joints")
+    if not (isinstance(target_pose, list) and len(target_pose) == 7):
+        raise RuntimeError("branch ready transition target TCP pose is invalid")
+    if not (isinstance(target_joints, list) and len(target_joints) == 7):
+        raise RuntimeError("branch ready transition target joints are invalid")
+
+    # Re-read BOTH joint and TCP state after operator confirmation.
+    fresh_plan = plan_branch_ready_transition(
+        robot,
+        target_pose_mm=target_pose,
+        target_joints=target_joints,
+        target_label=target_label,
+    )
+    fresh_action = str(fresh_plan.get("action") or "")
+    if fresh_action == "already_ready":
+        # Even when no move is needed, perform a tighter joint + TCP verification
+        # before entering a production grasp branch.
+        verify_ready_reached(
+            robot,
+            target_pose_mm=target_pose,
+            target_joints=target_joints,
+            label=target_label,
+        )
+        return
+    if fresh_action != "switch_ready":
+        raise RuntimeError(f"unexpected branch ready transition action: {fresh_action!r}")
+
+    print(
+        f"\n[Branch Ready] vision-selected branch requires {target_label}; "
+        f"joint-space switch from {fresh_plan.get('source_label')}"
+    )
+    set_left_gripper(robot, opened=True, label="AUTO READY MOVEJ SWITCH")
+    move_j_ready(
+        robot,
+        target_pose_mm=target_pose,
+        target_joints=target_joints,
+        label=f"{target_label.upper()}-AUTO",
+        vel=READY_SWITCH_JOINT_VEL,
+        acc=READY_SWITCH_JOINT_ACC,
+    )
 
 
 def print_known_start_poses(robot: RobotClient) -> None:
-    actual = current_pose_mm(robot)
-    print(_format_pose("current LEFT_LINK7", actual))
-    for label, pose in (("visible initial", VISIBLE_INITIAL_POSE_MM), ("side initial", SIDE_INITIAL_POSE_MM)):
+    actual_pose = current_pose_mm(robot)
+    actual_joints = current_joints(robot)
+    print(_format_pose("current LEFT_LINK7", actual_pose))
+    print(_format_joints("current LEFT joints", actual_joints))
+    for ready in _ready_definitions():
+        label = str(ready["label"])
+        pose = ready["pose_mm"]
+        joints = ready["joints"]
+        dj = _max_joint_error_rad(actual_joints, joints)
         print(_format_pose(label, pose))
+        print(_format_joints(f"{label} J", joints))
         print(
-            f"  offset -> {label}: {_distance_mm(actual, pose):.1f} mm / "
-            f"{_quat_angle_deg(actual[3:7], pose[3:7]):.1f} deg"
+            f"  offset -> {label}: joint_max={math.degrees(dj):.2f} deg; "
+            f"TCP={_distance_mm(actual_pose, pose):.1f} mm / "
+            f"{_quat_angle_deg(actual_pose[3:7], pose[3:7]):.1f} deg"
         )
-    print("Branch-specific start pose will be enforced after vision routing.")
+    print("Vision selects the branch; ready-to-ready switching uses frozen 7-DOF move_j targets.")
 
 
 def wait_for_confirmation(prompt: str = "Press Enter to confirm robot execution (or 'c' to cancel)") -> bool:
@@ -929,7 +1318,7 @@ def execute_side_grasp_cycle(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="M39.4.2.2 side production grasp + visible-mouth LEFT robot motion validation")
+    parser = argparse.ArgumentParser(description="M39.5.2.2 30deg hybrid-ready LEFT robot motion validation with READY normalization")
     parser.add_argument(
         "--execute",
         action="store_true",
@@ -965,11 +1354,12 @@ def main() -> int:
 
     mode = "EXECUTE" if args.execute else "DRY-RUN"
     print("=" * 78)
-    print(f"M39.4.2.2 SIDE GRASP + VISIBLE-MOUTH PRODUCTION VALIDATION [{mode}]")
+    print(f"M39.5.2.2 HYBRID READY + JOINT NORMALIZATION + CAMERA-NEAR PRODUCTION [{mode}]")
     print("Enter : trigger vision")
     print("After vision: " + ("safe result executes immediately (--single-enter)" if args.single_enter else "Enter to execute robot motion, 'c' to cancel"))
     print("q     : quit")
     print("Frame : robot_default_base / SDK default frame=None")
+    print("Ready switch: SDK move_j with frozen raw 7-DOF joint targets; TCP used only for verification")
     print(f"Gripper: Modbus register {LEFT_GRIPPER_REGISTER}, 1=OPEN, 2=CLOSE")
     print("=" * 78)
 
@@ -998,6 +1388,93 @@ def main() -> int:
                 data = trigger_vision(vision_session, save_debug=not args.no_save_debug)
                 log_path = save_result(data)
                 scene_summary = data.get("scene_summary") if isinstance(data.get("scene_summary"), Mapping) else {}
+                m3950 = scene_summary.get("m39_5_0_visible_mouth_axis_validation") if isinstance(scene_summary, Mapping) else None
+                if isinstance(m3950, Mapping):
+                    m3950_class = str(m3950.get("classification") or "UNCERTAIN").upper()
+                    m3950_ready = str(m3950.get("recommended_ready_pose") or "NONE")
+                    m3950_tilt = m3950.get("axis_tilt_from_box_z_deg")
+                    tilt_text = "n/a" if m3950_tilt is None else f"{float(m3950_tilt):.2f} deg"
+                    print(
+                        f"[M39.5.0] {m3950_class} | axis={tilt_text} | "
+                        f"recommended_ready={m3950_ready} | reason={m3950.get('reason')}"
+                    )
+                    # M39.5.1 owns TILTED_VISIBLE_SIDE and will be handled
+                    # immediately below through its camera-near-rim production
+                    # summary.  Never execute the historical tilted clock-3 path.
+                    m3950_policy = str(m3950.get("production_grasp_policy") or "")
+                    if m3950_policy == "VISIBLE_CLOCK3_MILD_TILT":
+                        print(
+                            f"[M39.5.2] mild tilt <30deg -> VISIBLE_INITIAL + preferred clock-3; "
+                            f"measured_axis={tilt_text}"
+                        )
+                    if m3950_class == "TILTED_VISIBLE_SIDE":
+                        near = m3950.get("camera_near_rim") if isinstance(m3950.get("camera_near_rim"), Mapping) else {}
+                        print(
+                            f"[M39.5.1] tilted visible mouth -> SIDE_INITIAL; "
+                            f"axis_reliable={m3950.get('axis_solution_reliable')} | "
+                            f"camera_near_rim={near.get('camera_near_rim_midpoint_camera_mm')}"
+                        )
+                    if m3950_class == "UNCERTAIN":
+                        print(f"vision JSON saved         : {log_path}")
+                        print_debug_artifacts(data)
+                        print("M39.5.0 axis/READY classification is UNCERTAIN; robot will NOT move.")
+                        continue
+                m3951 = scene_summary.get("m39_5_1_tilted_visible_grasp") if isinstance(scene_summary, Mapping) else None
+                if isinstance(m3951, Mapping) and bool(m3951.get("executed", False)):
+                    if bool(m3951.get("production_grasp_ready", False)):
+                        tilted_side_poses = extract_m3951_left_link7_targets(data)
+                        print("\n" + "=" * 78)
+                        print("M39.5.1 TILTED-VISIBLE CAMERA-NEAR-RIM PRODUCTION GRASP")
+                        print("=" * 78)
+                        print(f"axis tilt               : {m3951.get('axis_tilt_from_box_z_deg')} deg")
+                        near = m3951.get("camera_near_rim") if isinstance(m3951.get("camera_near_rim"), Mapping) else {}
+                        print(f"camera-near rim camera  : {near.get('camera_near_rim_midpoint_camera_mm')}")
+                        print(f"axis source              : {m3951.get('axis_source')}")
+                        print(f"rejection_reasons        : {m3951.get('rejection_reasons') or []}")
+                        print(f"LEFT_LINK7 PREGRASP      : {tilted_side_poses[0]}")
+                        print(f"LEFT_LINK7 ENTRY(ref)    : {tilted_side_poses[1]}")
+                        print(f"LEFT_LINK7 GRASP         : {tilted_side_poses[2]}")
+                        print("robot action             : SIDE_INITIAL -> AVOIDANCE -> PREGRASP -> GRASP; CLOSE; AVOIDANCE -> SIDE_INITIAL")
+                        print("=" * 78)
+                        print(f"vision JSON saved         : {log_path}")
+                        print_debug_artifacts(data)
+                        if not args.execute:
+                            print("DRY-RUN complete: M39.5.1 tilted-visible grasp was not executed.")
+                            continue
+                        assert robot is not None
+                        ready_plan = plan_branch_ready_transition(
+                            robot,
+                            target_pose_mm=SIDE_INITIAL_POSE_MM,
+                            target_joints=SIDE_INITIAL_JOINTS,
+                            target_label="SIDE initial",
+                        )
+                        print("\n" + "-" * 60)
+                        print("M39.5.1 TILTED-VISIBLE NEXT STEPS:")
+                        print("  → If needed, AUTO-MOVEJ to SIDE initial using frozen 7-DOF joints")
+                        print("  → OPEN left gripper")
+                        print("  → Move to SIDE-AVOIDANCE waypoint")
+                        print("  → Move to camera-near-rim PREGRASP")
+                        print("  → Direct coaxial PREGRASP → GRASP along recovered 3-D cylinder axis")
+                        print("  → CLOSE at GRASP")
+                        print("  → Direct GRASP → SIDE-AVOIDANCE → SIDE-INITIAL")
+                        print("  → OPEN at SIDE-INITIAL")
+                        print("-" * 60)
+                        confirmed = wait_for_confirmation("Press Enter for M39.5.1 TILTED-VISIBLE motion, or 'c' to cancel")
+                        if not confirmed:
+                            print(">> M39.5.1 tilted-visible execution cancelled by operator.")
+                            continue
+                        execute_branch_ready_transition(robot, ready_plan)
+                        execute_side_grasp_cycle(robot, *tilted_side_poses)
+                        print("\n✓ M39.5.1 TILTED-VISIBLE GRASP CYCLE COMPLETE")
+                        continue
+                    print("\nM39.5.1 TILTED-VISIBLE target rejected before robot motion")
+                    print(f"status                   : {m3951.get('status')}")
+                    print(f"reason                   : {m3951.get('reason')}")
+                    print(f"rejection_reasons        : {m3951.get('rejection_reasons') or []}")
+                    print(f"vision JSON saved         : {log_path}")
+                    print_debug_artifacts(data)
+                    continue
+
                 m3942 = scene_summary.get("m39_4_2_side_entry_validation") if isinstance(scene_summary, Mapping) else None
                 if isinstance(m3942, Mapping) and bool(m3942.get("executed", False)):
                     if bool(m3942.get("production_grasp_ready", False)):
@@ -1009,9 +1486,15 @@ def main() -> int:
                             print("DRY-RUN complete: M39.4.2.2 side grasp was not executed.")
                             continue
                         assert robot is not None
-                        ensure_start_near_pose(robot, SIDE_INITIAL_POSE_MM, "configured SIDE initial")
+                        ready_plan = plan_branch_ready_transition(
+                            robot,
+                            target_pose_mm=SIDE_INITIAL_POSE_MM,
+                            target_joints=SIDE_INITIAL_JOINTS,
+                            target_label="SIDE initial",
+                        )
                         print("\n" + "-" * 60)
                         print("M39.4.2.2 SIDE GRASP NEXT STEPS:")
+                        print("  → If needed, AUTO-MOVEJ to SIDE initial using frozen 7-DOF joints (gripper OPEN)")
                         print("  → OPEN left gripper")
                         print("  → Move to SIDE-AVOIDANCE waypoint")
                         print("  → Move to SIDE-PREGRASP")
@@ -1025,6 +1508,7 @@ def main() -> int:
                         if not confirmed:
                             print(">> M39.4.2.2 side-grasp execution cancelled by operator.")
                             continue
+                        execute_branch_ready_transition(robot, ready_plan)
                         pre_side, entry_side, grasp_side = side_poses
                         execute_side_grasp_cycle(robot, pre_side, entry_side, grasp_side)
                         print("\n✓ M39.4.2.2 SIDE GRASP CYCLE COMPLETE")
@@ -1061,13 +1545,20 @@ def main() -> int:
                     print("DRY-RUN complete: no robot motion performed.")
                     continue
 
-                # Check start state before waiting for confirmation (so user sees if it's valid)
+                # Plan the vision-selected branch ready pose.  Being parked at the
+                # other known branch ready pose is no longer a rejection condition.
                 assert robot is not None
-                ensure_start_near_pose(robot, VISIBLE_INITIAL_POSE_MM, "configured visible-mouth initial")
+                ready_plan = plan_branch_ready_transition(
+                    robot,
+                    target_pose_mm=VISIBLE_INITIAL_POSE_MM,
+                    target_joints=VISIBLE_INITIAL_JOINTS,
+                    target_label="VISIBLE initial",
+                )
 
                 # Show what will happen
                 print("\n" + "-" * 60)
                 print("NEXT STEPS (if confirmed):")
+                print("  → If needed, AUTO-MOVEJ to VISIBLE initial using frozen 7-DOF joints (gripper OPEN)")
                 print("  → OPEN left gripper")
                 print("  → Move to PREGRASP pose")
                 print("  → Move to GRASP pose")
@@ -1088,7 +1579,8 @@ def main() -> int:
                     print("   Robot remains at current position.")
                     continue
 
-                # Step 4: Execute robot motion
+                # Step 4: Route to the vision-selected ready pose, then execute.
+                execute_branch_ready_transition(robot, ready_plan)
                 print("\n>>> EXECUTING ROBOT MOTION...")
                 print(
                     "Motion sequence: "

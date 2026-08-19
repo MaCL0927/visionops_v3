@@ -118,6 +118,45 @@ def _visible_mouth_scope(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise RuntimeError("M39.4.2.2 pregrasp offset must stay in the field-validated short range 10..50 mm")
     if int(side_entry.get("pregrasp_to_grasp_samples", 0)) < 5:
         raise RuntimeError("M39.4.2.2 direct PREGRASP->GRASP sweep needs at least 5 samples")
+    m3950 = _mapping(
+        raw.get("m39_5_0_visible_mouth_axis_validation") or {},
+        "m39_5_0_visible_mouth_axis_validation",
+    )
+    if not bool(m3950.get("enabled", False)):
+        raise RuntimeError("M39.5.x visible-mouth axis source must be enabled")
+    if str(m3950.get("mode") or "") != "production_axis_source":
+        raise RuntimeError("M39.5.x axis mode must be production_axis_source")
+    flat_upright = float(m3950.get("flat_reference_axis_ratio_deficit_upright_max", -1.0))
+    flat_tilted = float(m3950.get("flat_reference_axis_ratio_deficit_tilted_min", -1.0))
+    if not (0.0 <= flat_upright < flat_tilted):
+        raise RuntimeError("M39.5.1 flat-reference shape thresholds must preserve a transition band")
+    # M39.5.2 deliberately has a *single* robot READY split: mild visible
+    # tilt below side_ready_axis_tilt_min_deg keeps VISIBLE_INITIAL + clock-3,
+    # while tilt at/above the threshold uses SIDE_INITIAL + camera-near-rim.
+    # There is no UNCERTAIN gap in the READY split.  The only intentional
+    # uncertainty/transition band is the independent flat-reference shape
+    # test checked immediately above.
+    side_ready_tilt = float(m3950.get("side_ready_axis_tilt_min_deg", -1.0))
+    if not (10.0 <= side_ready_tilt <= 60.0):
+        raise RuntimeError(
+            "M39.5.2 side_ready_axis_tilt_min_deg must stay in the safe configurable range 10..60 deg"
+        )
+    if float(m3950.get("pure_side_mouth_axis_ratio_max", 0.0)) >= 0.50:
+        raise RuntimeError("M39.5.1 PURE_SIDE mouth gate must not swallow moderately visible tilted mouths")
+    m3951 = _mapping(
+        raw.get("m39_5_1_tilted_visible_grasp") or {},
+        "m39_5_1_tilted_visible_grasp",
+    )
+    if not bool(m3951.get("enabled", False)):
+        raise RuntimeError("M39.5.1 tilted-visible production grasp must be enabled")
+    if not bool(m3951.get("production_grasp_enabled", False)):
+        raise RuntimeError("M39.5.1 production grasp must be enabled")
+    if not bool(m3951.get("gripper_closing_enabled", False)):
+        raise RuntimeError("M39.5.1 gripper closing must be enabled")
+    if str(m3951.get("ready_pose") or "") != "SIDE_INITIAL":
+        raise RuntimeError("M39.5.1 tilted-visible branch must route through SIDE_INITIAL")
+    if str(m3951.get("rim_policy") or "") != "camera_nearest_visible_opening_wall_midpoint":
+        raise RuntimeError("M39.5.1 rim policy must be camera-nearest opening wall midpoint")
     return {
         "status": "ok",
         "visible_mouth_branch": "enabled",
@@ -127,6 +166,8 @@ def _visible_mouth_scope(raw: Mapping[str, Any]) -> dict[str, Any]:
         "side_entry": "M39.4.2.2_short_PREGRASP_direct_GRASP_LEFT_LINK7",
         "side_gripper_close": "enabled_at_GRASP",
         "side_production_grasp": "enabled_direct_PREGRASP_to_GRASP_and_GRASP_to_AVOIDANCE",
+        "m39_5_0": "flat_reference_shape_plus_signed_axis_source",
+        "m39_5_1": "SIDE_INITIAL_camera_nearest_rim_production_with_M39.4.2_collision_gates",
     }
 
 
