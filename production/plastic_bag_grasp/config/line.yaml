@@ -1,0 +1,113 @@
+schema_version: "1.0"
+task_id: plastic_bag_grasp
+device_id: lb3576-plastic-bag-grasp
+
+# 本任务使用 Orbbec 336L RGB-D。Web“设置 → 相机设置”仍是运行态相机选择的唯一入口。
+camera_bridge:
+  fps: 30
+  shared_rgb_enabled: true
+  shared_rgb_name: /visionops_orbbec336l_rgb
+  shared_rgb_fallback_http: true
+  shared_depth_enabled: true
+  shared_depth_name: /visionops_orbbec336l_depth
+  shared_depth_fallback_http: true
+  sample_deproject_path: /api/coordinate/sample_deproject
+  stale_ms: 5000
+
+runtime_recovery:
+  stale_frame_timeout_ms: 3000
+  failure_threshold: 3
+  initial_backoff_ms: 200
+  max_backoff_ms: 2000
+
+runtime:
+  url: http://127.0.0.1:28088
+  model_dir: models/rk3576-252_plastic_bag_grasp_det_20260819_094048
+  roi_config_path: data/runtime/roi_plastic_bag_grasp.json
+  device_id: lb3576-plastic-bag-grasp-runtime
+  component: rknn_runtime_plastic_bag_grasp
+  accepted_task_types: [detection, detect]
+  accepted_model_ids: []
+  accepted_model_names: []
+  max_detections: 20
+
+app:
+  listen_host: 127.0.0.1
+  listen_port: 19214
+  request_timeout_ms: 5000
+  inference_settings_path: /opt/visionops_v3/configs/runtime/generated/plastic_bag_grasp_inference_settings.json
+  # 不再使用历史固定 5 Hz；上限 30 FPS，实际推送频率等于真实完成推理频率。
+  default_production_inference_fps: 30.0
+
+collector:
+  listen_host: 0.0.0.0
+  listen_port: 18097
+  device_id: lb3576-plastic-bag-grasp
+  component: collector_plastic_bag_grasp
+  models_root: models
+  snapshot_refresh_interval_ms: 200
+  status_refresh_interval_ms: 2000
+  production_inference_source: app
+
+websocket:
+  listen_host: 0.0.0.0
+  listen_port: 9001
+  path: /vision
+  token: ""
+  auto_start: true
+  status_interval_s: 2.0
+  read_timeout_s: 30.0
+  max_clients: 4
+  max_payload_bytes: 1048576
+  trigger_queue_size: 32
+  trigger_task_ids: [plastic_bag_grasp, plastic_bag_pick, "1", 1]
+
+# 已验证的生产 FPS 架构：推理线程持续请求 Runtime；容量 1 的 latest-only
+# 队列连接后处理线程。显式 trigger/request_id 结果可靠保留，不被连续帧覆盖。
+pipeline:
+  enabled: true
+  result_queue_size: 1
+  max_result_age_ms: 500
+
+# 已验证的本机 Runtime IPC：TCP_NODELAY + header/body 一次 sendall；推理线程
+# 只读取原始 response bytes，JSON 在后处理线程延迟解码。
+runtime_ipc:
+  raw_http_enabled: true
+  raw_http_fallback_urllib: true
+  max_response_bytes: 33554432
+
+video:
+  type: mjpeg
+  # host 保留为视觉盒现场 IP；load_config 会按 active_camera 自动切换端口/路径。
+  public_url: http://192.168.20.20:18182/stream.mjpeg
+  sync: soft
+
+algorithm:
+  image:
+    width: 640
+    height: 480
+    # 模型验证截图当前是 1280x720 源图 + 640x640 ROI；机器人必须拿原图坐标。
+    # 因此不把源图尺寸写死为 640x480，Runtime 返回多大就按多大计算中心。
+    require_fixed_size: false
+  classes:
+    # 当前检测模型截图显示 class_name=plastic_bag，class_id 默认按 0 处理。
+    target_ids: [0]
+    target_names: [plastic_bag, bag, plastic_bag_package, package]
+    min_confidence: 0.50
+  selection:
+    max_targets: 1
+    mode: confidence
+  depth:
+    # 抓取点固定取检测框中心。center_px 永远返回；D2C 深度有效时同时给 camera XYZ。
+    # 深度失败不会拒绝 RGB 检测，position_camera 按既有协议返回 [0,0,0]。
+    enabled: true
+    roi_radius_px: 6
+    percentile: 50
+    min_valid_pixels: 5
+    min_depth_mm: 100
+    max_depth_mm: 5000
+    max_age_ms: 1500
+
+debug:
+  save_every_trigger: false
+  save_root: /tmp/visionops_v3/plastic_bag_grasp/latest

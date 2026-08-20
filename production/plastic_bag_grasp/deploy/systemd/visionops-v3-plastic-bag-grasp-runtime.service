@@ -1,0 +1,16 @@
+[Unit]
+Description=VisionOps v3 Plastic Bag Grasp Detection RKNN Runtime
+After=network-online.target visionops-hp60c-sdk-bridge.service visionops-orbbec336l-bridge.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/visionops_v3
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/visionops_v3/plastic_bag_grasp.env
+ExecStart=/opt/visionops_v3/production/plastic_bag_grasp/scripts/start_runtime.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

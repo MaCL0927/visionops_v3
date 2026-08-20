@@ -1,0 +1,26 @@
+# 仅作为 plastic_bag_grasp detection 模型包的字段示例。
+# 生产部署时以训练/转换工具实际生成的 model.yaml 为准。
+schema_version: "1.0"
+model_id: rk3576-252-plastic-bag-grasp-det
+model_name: plastic_bag_grasp_det
+model_version: "1.0"
+task_type: detection
+target_platform: rk3576
+input_size: [640, 640]
+model:
+  name: plastic_bag_grasp_det
+  version: "1.0"
+  task: detection
+  format: rknn
+  target_platform: rk3576
+  input_size: [640, 640]
+classes:
+  - {id: 0, name: plastic_bag}
+class_names: [plastic_bag]
+postprocess:
+  conf_threshold: 0.50
+  iou_threshold: 0.45
+  max_det: 20
+runtime:
+  preprocess: letterbox
+  color: rgb
