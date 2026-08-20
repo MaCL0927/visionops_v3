@@ -1,4 +1,4 @@
-"""M39.5.2.2 Visible-Mouth Signed 3D Axis + Camera-Near-Rim routing support.
+"""M39.5.3 Visible-Mouth Signed 3D Axis + Flat-Workspace Stabilization.
 
 Axis/shape stage used by M39.5.1 production routing.  This module itself does
 not mutate ``robot_candidate``; the dedicated M39.5.1 production stage consumes
@@ -404,6 +404,15 @@ def attach_m3950_visible_mouth_axis_validation(
     transition_sector_flat_max = _f(cfg.get("transition_sector_flat_max_deg"), 8.0)
     transition_peak_flat_max = _f(cfg.get("transition_peak_to_peak_flat_max_mm"), 12.0)
     side_ready_tilt_min = _f(cfg.get("side_ready_axis_tilt_min_deg"), 30.0)
+    # M39.5.3 flat-first consensus.  A conic tilt >=30 deg may override a
+    # collision-valid M38.1 floor-constrained clock-3 candidate only when at
+    # least one independent tilt cue corroborates it.  This prevents spatial
+    # mask/conic bias from turning a truly flat ring into SIDE.
+    flat_anchor_enabled = bool(cfg.get("flat_anchor_consensus_enabled", True))
+    flat_anchor_strong_shape_deficit = _f(cfg.get("flat_anchor_strong_shape_deficit_min"), 0.120)
+    flat_anchor_sector_tilt_min = _f(cfg.get("flat_anchor_sector_tilt_min_deg"), 12.0)
+    flat_anchor_sector_peak_min = _f(cfg.get("flat_anchor_sector_peak_to_peak_min_mm"), 14.0)
+    flat_anchor_measured_plane_severe_min = _f(cfg.get("flat_anchor_measured_plane_severe_min_deg"), 20.0)
     min_semantic_px = _f(cfg.get("minimum_semantic_offset_px_for_sign"), 6.0)
     max_align = _f(cfg.get("maximum_semantic_conic_alignment_deg"), 30.0)
     min_semantic_branch_sep = _f(cfg.get("minimum_semantic_branch_separation_deg"), 60.0)
@@ -428,6 +437,11 @@ def attach_m3950_visible_mouth_axis_validation(
         "transition_sector_flat_max_deg": transition_sector_flat_max,
         "transition_peak_to_peak_flat_max_mm": transition_peak_flat_max,
         "side_ready_axis_tilt_min_deg": side_ready_tilt_min,
+        "flat_anchor_consensus_enabled": flat_anchor_enabled,
+        "flat_anchor_strong_shape_deficit_min": flat_anchor_strong_shape_deficit,
+        "flat_anchor_sector_tilt_min_deg": flat_anchor_sector_tilt_min,
+        "flat_anchor_sector_peak_to_peak_min_mm": flat_anchor_sector_peak_min,
+        "flat_anchor_measured_plane_severe_min_deg": flat_anchor_measured_plane_severe_min,
         "maximum_semantic_conic_alignment_deg": max_align,
         "minimum_semantic_offset_px_for_sign": min_semantic_px,
         "maximum_sector_gradient_alignment_deg": max_gradient_align,
@@ -493,6 +507,69 @@ def attach_m3950_visible_mouth_axis_validation(
         "reason": shape_reason,
     }
 
+    # M39.5.3: build a production flat anchor from the exact M38.1 candidate.
+    # The anchor is deliberately based on an already collision-checked clock-3
+    # candidate plus calibrated floor-constrained front geometry.  It is not a
+    # new grasp candidate and cannot bypass M38.1 safety checks.
+    source_candidate = scene.get("m38_1_robot_candidate") if isinstance(scene.get("m38_1_robot_candidate"), Mapping) else scene.get("robot_candidate")
+    source_target = source_candidate.get("target") if isinstance(source_candidate, Mapping) and isinstance(source_candidate.get("target"), Mapping) else {}
+    try:
+        source_clock = int(source_target.get("clock_hour")) if source_target.get("clock_hour") is not None else None
+    except Exception:
+        source_clock = None
+    front_surface = branch.get("front_surface") if isinstance(branch, Mapping) and isinstance(branch.get("front_surface"), Mapping) else {}
+    measured_plane = front_surface.get("measured_plane_diagnostic") if isinstance(front_surface.get("measured_plane_diagnostic"), Mapping) else {}
+    measured_vs_floor_deg = measured_plane.get("measured_vs_floor_deg")
+    try:
+        measured_vs_floor_deg = float(measured_vs_floor_deg) if measured_vs_floor_deg is not None else None
+    except Exception:
+        measured_vs_floor_deg = None
+    prior_state = str(prior.get("state") or "").upper()
+    prior_conf = str(prior.get("confidence") or "").lower()
+    flat_anchor_available = bool(
+        flat_anchor_enabled
+        and isinstance(source_candidate, Mapping)
+        and source_clock == 3
+        and str(front_surface.get("status") or "") == "ok"
+    )
+    strong_shape_tilt = bool(flat_deficit is not None and flat_deficit >= flat_anchor_strong_shape_deficit)
+    prior_tilt_support = bool(prior_state == "TILTED" and prior_conf in {"strong", "moderate"})
+    sector_tilt_support = bool(
+        prior_conf in {"strong", "moderate"}
+        and sector_tilt >= flat_anchor_sector_tilt_min
+        and sector_peak_to_peak >= flat_anchor_sector_peak_min
+    )
+    measured_plane_support = bool(
+        measured_vs_floor_deg is not None
+        and measured_vs_floor_deg >= flat_anchor_measured_plane_severe_min
+        and str(measured_plane.get("status") or "") == "depth_normal_severely_unreliable"
+    )
+    tilt_corroborations = [
+        name for name, passed in (
+            ("strong_flat_reference_shape_deformation", strong_shape_tilt),
+            ("m39_3_1_tilted", prior_tilt_support),
+            ("sector_depth_gradient_tilted", sector_tilt_support),
+            ("measured_plane_severe_disagreement", measured_plane_support),
+        ) if passed
+    ]
+    result["flat_anchor_consensus"] = {
+        "enabled": flat_anchor_enabled,
+        "available": flat_anchor_available,
+        "source_clock_hour": source_clock,
+        "front_surface_status": front_surface.get("status"),
+        "prior_state": prior.get("state"),
+        "prior_confidence": prior.get("confidence"),
+        "measured_vs_floor_deg": measured_vs_floor_deg,
+        "measured_plane_status": measured_plane.get("status"),
+        "tilt_corroborations": tilt_corroborations,
+    }
+
+    # If the mouth shape is not strongly upright but no independent tilt cue
+    # corroborates it, keep the exact M38.1 floor-constrained clock-3 candidate
+    # as the production anchor.  This is especially important when conic A/B
+    # cannot be resolved from a nearly circular mouth.
+    weak_nonflat_shape = bool(flat_deficit is None or flat_deficit < flat_anchor_strong_shape_deficit)
+
     if shape_state == "UPRIGHT":
         axis_out = -_norm(box_z_inside)
         center = reference_center
@@ -536,15 +613,35 @@ def attach_m3950_visible_mouth_axis_validation(
             prior_tilt_evidence=prior,
         )
     except Exception as exc:
-        result.update(
-            classification="UNCERTAIN",
-            recommended_ready_pose="NONE",
-            production_grasp_policy="NONE",
-            geometric_pose_classification=("TILTED_SHAPE_AXIS_UNRESOLVED" if shape_state == "TILTED" else "TRANSITION_AXIS_UNRESOLVED"),
-            reason=f"conic_reconstruction_error:{type(exc).__name__}:{exc}",
-            axis_solution_reliable=False,
-            thresholds=threshold_doc,
-        )
+        if flat_anchor_available and weak_nonflat_shape and not prior_tilt_support and not sector_tilt_support:
+            axis_out = -_norm(box_z_inside)
+            center = reference_center
+            near = _camera_near_rim_geometry(center, axis_out, inner_radius, outer_radius)
+            result.update(
+                classification="UPRIGHT_VISIBLE",
+                recommended_ready_pose="VISIBLE_INITIAL",
+                production_grasp_policy="VISIBLE_CLOCK3_FLAT_ANCHOR",
+                geometric_pose_classification="FLAT_ANCHOR_CONIC_UNRESOLVED",
+                reason="m3953_flat_anchor_kept_when_conic_reconstruction_failed_without_tilt_consensus",
+                axis_solution_reliable=True,
+                signed_axis_source="calibrated_box_z_flat_anchor",
+                axis_out_of_opening_camera=_json_vec(axis_out),
+                axis_into_opening_camera=_json_vec(-axis_out),
+                axis_tilt_from_box_z_deg=0.0,
+                opening_center_camera_mm=_json_vec(center),
+                camera_near_rim=near,
+                thresholds=threshold_doc,
+            )
+        else:
+            result.update(
+                classification="UNCERTAIN",
+                recommended_ready_pose="NONE",
+                production_grasp_policy="NONE",
+                geometric_pose_classification=("TILTED_SHAPE_AXIS_UNRESOLVED" if shape_state == "TILTED" else "TRANSITION_AXIS_UNRESOLVED"),
+                reason=f"conic_reconstruction_error:{type(exc).__name__}:{exc}",
+                axis_solution_reliable=False,
+                thresholds=threshold_doc,
+            )
         scene["m39_5_0_visible_mouth_axis_validation"] = result
         return result
 
@@ -594,15 +691,35 @@ def attach_m3950_visible_mouth_axis_validation(
         "candidates": [row for _cand, row in conic_rows],
     }
     if not conic_rows:
-        result.update(
-            classification="UNCERTAIN",
-            recommended_ready_pose="NONE",
-            production_grasp_policy="NONE",
-            geometric_pose_classification=("TILTED_SHAPE_AXIS_UNRESOLVED" if shape_state == "TILTED" else "TRANSITION_AXIS_UNRESOLVED"),
-            reason="no_analytic_conic_axis_candidates",
-            axis_solution_reliable=False,
-            thresholds=threshold_doc,
-        )
+        if flat_anchor_available and weak_nonflat_shape and not prior_tilt_support and not sector_tilt_support:
+            axis_out = -_norm(box_z_inside)
+            center = reference_center
+            near = _camera_near_rim_geometry(center, axis_out, inner_radius, outer_radius)
+            result.update(
+                classification="UPRIGHT_VISIBLE",
+                recommended_ready_pose="VISIBLE_INITIAL",
+                production_grasp_policy="VISIBLE_CLOCK3_FLAT_ANCHOR",
+                geometric_pose_classification="FLAT_ANCHOR_CONIC_UNRESOLVED",
+                reason="m3953_flat_anchor_kept_without_analytic_conic_candidates",
+                axis_solution_reliable=True,
+                signed_axis_source="calibrated_box_z_flat_anchor",
+                axis_out_of_opening_camera=_json_vec(axis_out),
+                axis_into_opening_camera=_json_vec(-axis_out),
+                axis_tilt_from_box_z_deg=0.0,
+                opening_center_camera_mm=_json_vec(center),
+                camera_near_rim=near,
+                thresholds=threshold_doc,
+            )
+        else:
+            result.update(
+                classification="UNCERTAIN",
+                recommended_ready_pose="NONE",
+                production_grasp_policy="NONE",
+                geometric_pose_classification=("TILTED_SHAPE_AXIS_UNRESOLVED" if shape_state == "TILTED" else "TRANSITION_AXIS_UNRESOLVED"),
+                reason="no_analytic_conic_axis_candidates",
+                axis_solution_reliable=False,
+                thresholds=threshold_doc,
+            )
         scene["m39_5_0_visible_mouth_axis_validation"] = result
         return result
 
@@ -668,16 +785,37 @@ def attach_m3950_visible_mouth_axis_validation(
                 selection_diag.update(evidence_best=best[0], evidence_runner=runner)
 
     if chosen is None or chosen_row is None:
-        result.update(
-            classification="UNCERTAIN",
-            recommended_ready_pose="NONE",
-            production_grasp_policy="NONE",
-            geometric_pose_classification=("TILTED_SHAPE_AXIS_UNRESOLVED" if shape_state == "TILTED" else "TRANSITION_AXIS_UNRESOLVED"),
-            reason=("tilted_shape_but_signed_axis_unresolved" if shape_state == "TILTED" else "transition_shape_and_axis_unresolved"),
-            axis_solution_reliable=False,
-            axis_selection=selection_diag,
-            thresholds=threshold_doc,
-        )
+        if flat_anchor_available and weak_nonflat_shape and not prior_tilt_support and not sector_tilt_support:
+            axis_out = -_norm(box_z_inside)
+            center = reference_center
+            near = _camera_near_rim_geometry(center, axis_out, inner_radius, outer_radius)
+            result.update(
+                classification="UPRIGHT_VISIBLE",
+                recommended_ready_pose="VISIBLE_INITIAL",
+                production_grasp_policy="VISIBLE_CLOCK3_FLAT_ANCHOR",
+                geometric_pose_classification="FLAT_ANCHOR_AXIS_UNRESOLVED",
+                reason="m3953_flat_anchor_kept_when_signed_axis_unresolved_without_tilt_consensus",
+                axis_solution_reliable=True,
+                signed_axis_source="calibrated_box_z_flat_anchor",
+                axis_selection=selection_diag,
+                axis_out_of_opening_camera=_json_vec(axis_out),
+                axis_into_opening_camera=_json_vec(-axis_out),
+                axis_tilt_from_box_z_deg=0.0,
+                opening_center_camera_mm=_json_vec(center),
+                camera_near_rim=near,
+                thresholds=threshold_doc,
+            )
+        else:
+            result.update(
+                classification="UNCERTAIN",
+                recommended_ready_pose="NONE",
+                production_grasp_policy="NONE",
+                geometric_pose_classification=("TILTED_SHAPE_AXIS_UNRESOLVED" if shape_state == "TILTED" else "TRANSITION_AXIS_UNRESOLVED"),
+                reason=("tilted_shape_but_signed_axis_unresolved" if shape_state == "TILTED" else "transition_shape_and_axis_unresolved"),
+                axis_solution_reliable=False,
+                axis_selection=selection_diag,
+                thresholds=threshold_doc,
+            )
         scene["m39_5_0_visible_mouth_axis_validation"] = result
         return result
 
@@ -704,6 +842,13 @@ def attach_m3950_visible_mouth_axis_validation(
         geometric_pose = "MILD_TILT_VISIBLE" if tilt > 1.0 else "UPRIGHT"
         reason = "signed_axis_tilt_below_30deg_use_visible_clock3"
     else:
+        # M39.5.3 keeps the field-frozen 30deg robot policy intact: once the
+        # signed conic axis is actually resolved at >=30deg, use SIDE_INITIAL.
+        # Flat-workspace stabilization acts *before* this point by supplying
+        # M39.3.1 prior evidence to A/B selection and by rescuing only unresolved
+        # weak-nonflat cases with the validated M38.1 flat anchor.  This avoids
+        # the old 12-grid false 33-36deg results without hiding a real resolved
+        # 30+deg tilt.
         classification, ready = "TILTED_VISIBLE_SIDE", "SIDE_INITIAL"
         grasp_policy = "SIDE_CAMERA_NEAR_RIM"
         geometric_pose = "TILTED_VISIBLE"
@@ -724,6 +869,7 @@ def attach_m3950_visible_mouth_axis_validation(
         axis_out_of_opening_camera=_json_vec(axis_out),
         axis_into_opening_camera=_json_vec(-axis_out),
         axis_tilt_from_box_z_deg=float(tilt),
+        measured_conic_axis_tilt_deg=float(tilt),
         opening_center_camera_mm=_json_vec(center),
         camera_near_rim=near,
         axis_geometry_quality={
@@ -807,7 +953,7 @@ def draw_m3950_visible_mouth_axis_overlay(
     policy = str(result.get("production_grasp_policy") or "NONE")
     tilt = result.get("axis_tilt_from_box_z_deg")
     tilt_text = "n/a" if tilt is None else f"{float(tilt):.1f}deg"
-    text = f"M39.5.2 {classification} | axis={tilt_text} | READY={ready}"
+    text = f"M39.5.4 {classification} | axis={tilt_text} | READY={ready}"
     detail = f"policy={policy} | signed-axis={'OK' if bool(result.get('axis_solution_reliable', False)) else 'UNRESOLVED'}"
     # This is the authoritative current-version banner.  It is intentionally
     # opaque and two lines tall because older diagnostic stages may also draw

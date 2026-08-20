@@ -1,5 +1,5 @@
 # Foam ring production configuration
-# Current scope at M39.5.0 validation:
+# Current scope at M39.5.4 dense-scene production:
 #   - real ring_mouth visible: frozen FLAT + TILTED production grasp
 #   - no mouth or side-view pseudo mouth: M39.4.0.1 side-axis recovery
 #   - reliable side axis: M39.4.1 camera-facing arc + opening reconstruction
@@ -11,7 +11,7 @@
 #     branch only after full M39.4.2 collision/clearance validation.
 # Historical stage-tuning configs stay outside production.
 schema_version: '7.2'
-task: foam_ring_grasp_m39_5_2_30deg_hybrid_ready_routing
+task: foam_ring_grasp_m39_5_4_dense_scene_exposed_target_search
 classes:
   foam_ring: foam_ring
   ring_mouth: ring_mouth
@@ -250,7 +250,7 @@ geometry_optimization:
   stop_after_first_valid_target: true
   stop_after_first_valid_candidate: true
   minimum_full_candidates_before_accept: 1
-  maximum_pairs_to_fully_analyze: 3
+  maximum_pairs_to_fully_analyze: 12
   maximum_full_candidates_per_pair: 12
   initial_full_candidate_budget: 4
   maximum_full_candidate_budget: 8
@@ -261,6 +261,11 @@ pair_preselection:
   depth_sample_stride: 4
   ring_erode_px: 1
   mouth_exclusion_px: 2
+  # M39.5.4 dense-scene search-order cue.  For fixed clock-3 production,
+  # prioritize rings whose +image-X side has no laterally-overlapping ring.
+  # This is ranking-only; full 3-D neighbor/tool/box collision remains mandatory.
+  clock3_exposure_priority: true
+  clock3_vertical_overlap_ratio_min: 0.25
 clock_search:
   mode: fixed_clock3_only
   preferred_clock_hours:
@@ -472,10 +477,21 @@ m39_5_0_visible_mouth_axis_validation:
   transition_sector_flat_max_deg: 8.0
   transition_peak_to_peak_flat_max_mm: 12.0
 
-  # M39.5.2 production READY split.  Geometric tilt below 30 deg keeps the
+  # M39.5.3 production READY split.  Geometric tilt below 30 deg keeps the
   # proven VISIBLE_INITIAL + preferred clock-3 grasp.  At/above 30 deg the
   # camera-nearest-rim SIDE_INITIAL grasp owns production.
   side_ready_axis_tilt_min_deg: 30.0
+
+  # M39.5.3 flat-workspace stabilization.  A reliable >=30deg conic is not
+  # enough by itself to override an already collision-valid floor-constrained
+  # M38.1 clock-3 candidate.  At least one independent tilt cue must agree.
+  # These values were selected against the 12-point x 3 flat grid together
+  # with the previously saved tilted-visible field sets.
+  flat_anchor_consensus_enabled: true
+  flat_anchor_strong_shape_deficit_min: 0.120
+  flat_anchor_sector_tilt_min_deg: 12.0
+  flat_anchor_sector_peak_to_peak_min_mm: 14.0
+  flat_anchor_measured_plane_severe_min_deg: 20.0
 
   # Signed conic A/B disambiguation.  Large body->mouth displacement uses the
   # semantic axis first.  Mild tilt with nearly concentric centroids falls back
@@ -529,7 +545,7 @@ m39_5_1_tilted_visible_grasp:
 
 production_target_retry:
   enabled: true
-  maximum_visible_target_attempts: 3
+  maximum_visible_target_attempts: 12
   maximum_side_target_attempts: 3
 m39_4_0_side_axis_recovery:
   enabled: true

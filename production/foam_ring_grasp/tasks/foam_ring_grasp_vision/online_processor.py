@@ -991,6 +991,22 @@ class OnlineGeometryProcessor:
             runtime_cfg["production_retry_excluded_ring_ids"] = sorted(excluded_visible_ring_ids)
             attempt_config["_runtime"] = runtime_cfg
 
+            # M39.5.4 dense-scene search contract.  ``maximum_visible_target_attempts``
+            # historically governed only *late* per-target production retries, while
+            # M38.1 independently stopped after three fully analyzed pairs.  In a
+            # cluttered fixed-clock3 scene this meant 9/12 rings could remain
+            # deferred forever even when the operator requested 12 attempts.  Couple
+            # the geometry target-search budget to the visible retry budget so one
+            # trigger really can search up to N visible targets, still exiting on the
+            # first complete collision-checked candidate.
+            geometry_opt_cfg = attempt_config.get("geometry_optimization") or {}
+            geometry_opt_cfg = dict(geometry_opt_cfg) if isinstance(geometry_opt_cfg, Mapping) else {}
+            configured_pair_budget = max(1, int(geometry_opt_cfg.get("maximum_pairs_to_fully_analyze", 3)))
+            effective_pair_budget = max(configured_pair_budget, max_visible_attempts)
+            geometry_opt_cfg["maximum_pairs_to_fully_analyze"] = int(effective_pair_budget)
+            attempt_config["geometry_optimization"] = geometry_opt_cfg
+            attempt_geometry_config = GeometryConfig(attempt_config)
+
             geometry_started = time.perf_counter()
             if self.hybrid_config.enabled:
                 scene = run_hybrid_grasp(
@@ -998,7 +1014,7 @@ class OnlineGeometryProcessor:
                     prepared.depth_geometry,
                     prepared.intrinsics,
                     raw_config=attempt_config,
-                    geometry_config=self.geometry_config,
+                    geometry_config=attempt_geometry_config,
                     analyze_fn=self._analyze_fn,
                 )
             else:
@@ -1006,7 +1022,7 @@ class OnlineGeometryProcessor:
                     prepared.adaptation.instances,
                     prepared.depth_geometry,
                     prepared.intrinsics,
-                    self.geometry_config,
+                    attempt_geometry_config,
                 )
             geometry_elapsed = _perf_ms(geometry_started)
             geometry_total_ms += geometry_elapsed
@@ -1026,10 +1042,28 @@ class OnlineGeometryProcessor:
             except Exception:
                 selected_ring_id_int = None
 
-            # M39.5.x axis/shape source runs BEFORE historical M39.4 pseudo-mouth
-            # arbitration so a genuinely visible tilted mouth is not collapsed
-            # into PURE_SIDE.  The axis stage itself does not mutate
-            # robot_candidate; M39.5.1 production routing consumes it below.
+            # M39.5.3: compute the independent annulus sector-depth tilt evidence
+            # BEFORE the visible-mouth axis router.  M39.5.x already consumes
+            # m39_3_1_tilt_evidence from the selected M38.1 scene item, but older
+            # versions populated that evidence afterwards, leaving the production
+            # router with an empty prior and causing position-dependent FLAT ->
+            # UNCERTAIN / false-TILTED decisions.  M39.3.1 is diagnostic/fail-open
+            # and does not mutate the robot candidate, so this ordering is safe.
+            tilt_started = time.perf_counter()
+            _attach_m3931_online_tilt_diagnostics(
+                scene,
+                list(prepared.adaptation.instances),
+                prepared.depth_geometry,
+                prepared.intrinsics,
+                raw_config=attempt_config,
+                geometry_config=attempt_geometry_config,
+            )
+            tilt_elapsed = _perf_ms(tilt_started)
+            tilt_total_ms += tilt_elapsed
+
+            # M39.5.x axis/shape source still runs BEFORE historical M39.4
+            # pseudo-mouth arbitration so a genuinely visible tilted mouth is not
+            # collapsed into PURE_SIDE.  It now has the M39.3.1 prior available.
             m3950_started = time.perf_counter()
             m3950 = attach_m3950_visible_mouth_axis_validation(
                 scene,
@@ -1037,7 +1071,7 @@ class OnlineGeometryProcessor:
                 prepared.depth_geometry,
                 prepared.intrinsics,
                 raw_config=attempt_config,
-                geometry_config=self.geometry_config,
+                geometry_config=attempt_geometry_config,
             )
             m3950_elapsed = _perf_ms(m3950_started)
             m3950_total_ms += m3950_elapsed
@@ -1050,22 +1084,10 @@ class OnlineGeometryProcessor:
             topology_total_ms += topology_elapsed
             candidate_after_topology = isinstance(scene.get("robot_candidate"), Mapping)
 
-            tilt_started = time.perf_counter()
-            _attach_m3931_online_tilt_diagnostics(
-                scene,
-                list(prepared.adaptation.instances),
-                prepared.depth_geometry,
-                prepared.intrinsics,
-                raw_config=attempt_config,
-                geometry_config=self.geometry_config,
-            )
-            tilt_elapsed = _perf_ms(tilt_started)
-            tilt_total_ms += tilt_elapsed
-
             analytic_started = time.perf_counter()
             _attach_m3934_analytic_conic_diagnostic(
                 scene, list(prepared.adaptation.instances), prepared.depth_geometry, prepared.intrinsics,
-                raw_config=attempt_config, geometry_config=self.geometry_config,
+                raw_config=attempt_config, geometry_config=attempt_geometry_config,
             )
             analytic_elapsed = _perf_ms(analytic_started)
             analytic_total_ms += analytic_elapsed
@@ -1077,18 +1099,17 @@ class OnlineGeometryProcessor:
                 prepared.depth_geometry,
                 prepared.intrinsics,
                 raw_config=attempt_config,
-                geometry_config=self.geometry_config,
+                geometry_config=attempt_geometry_config,
             )
             routing_elapsed = _perf_ms(routing_started)
             routing_total_ms += routing_elapsed
 
-            # M39.5.2 mild-tilt production override.  The M39.5.x signed axis
-            # is authoritative for READY selection.  When the measured axis is
-            # below 30 deg we deliberately use the already collision-checked
-            # M38.1 preferred clock-3 candidate from this exact RGB-D frame,
-            # even if historical M39.3.4.1 classified its analytic surface as
-            # UNCERTAIN.  This does NOT resurrect a candidate that M38.1 itself
-            # rejected: a real source candidate must exist and must be clock 3.
+            # M39.5.3 authoritative VISIBLE production override.  Every
+            # UPRIGHT_VISIBLE policy (strict flat, mild tilt, or flat-anchor
+            # fallback) owns production routing and reuses the already
+            # collision-checked M38.1 preferred clock-3 candidate from this exact
+            # RGB-D frame.  Historical M39.3.4 remains diagnostic-only here.
+            # This never resurrects a candidate that M38.1 itself rejected.
             m3952_mild_override: Dict[str, Any] = {
                 "executed": False,
                 "status": "not_applicable",
@@ -1096,7 +1117,11 @@ class OnlineGeometryProcessor:
             if (
                 isinstance(m3950, Mapping)
                 and str(m3950.get("classification") or "").upper() == "UPRIGHT_VISIBLE"
-                and str(m3950.get("production_grasp_policy") or "") == "VISIBLE_CLOCK3_MILD_TILT"
+                and str(m3950.get("production_grasp_policy") or "") in {
+                    "VISIBLE_CLOCK3",
+                    "VISIBLE_CLOCK3_MILD_TILT",
+                    "VISIBLE_CLOCK3_FLAT_ANCHOR",
+                }
             ):
                 source_candidate = candidate_before_topology
                 if not isinstance(source_candidate, Mapping):
@@ -1152,6 +1177,9 @@ class OnlineGeometryProcessor:
                         "ready_pose": "VISIBLE_INITIAL",
                     }
             scene["m39_5_2_mild_tilt_visible_clock3"] = m3952_mild_override
+            # Compatibility: keep the historical field above, but expose the
+            # current flat-workspace authoritative override explicitly.
+            scene["m39_5_3_flat_visible_clock3_override"] = deepcopy(m3952_mild_override)
 
             # M39.5.1 owns every TILTED_VISIBLE_SIDE production target.  Apply
             # it after the historical M39.3.4.1 route so the old tilted clock-3
@@ -1202,6 +1230,7 @@ class OnlineGeometryProcessor:
                 "routing_route": routing.get("route") if isinstance(routing, Mapping) else None,
                 "routing_reason": routing.get("reason") if isinstance(routing, Mapping) else None,
                 "m39_5_2_mild_clock3_status": m3952_mild_override.get("status"),
+                "m39_5_3_flat_visible_override_status": m3952_mild_override.get("status"),
                 "m39_5_1_executed": bool(m3951.get("executed", False)) if isinstance(m3951, Mapping) else False,
                 "m39_5_1_status": m3951.get("status") if isinstance(m3951, Mapping) else None,
                 "m39_5_1_production_grasp_ready": bool(m3951.get("production_grasp_ready", False)) if isinstance(m3951, Mapping) else False,
@@ -1211,6 +1240,14 @@ class OnlineGeometryProcessor:
                     or (isinstance(routing, Mapping) and routing.get("terminal_reject", False))
                 ),
                 "robot_candidate_survived": isinstance(scene.get("robot_candidate"), Mapping),
+                "geometry_target_search": {
+                    "configured_pair_budget": int(configured_pair_budget),
+                    "effective_pair_budget": int(effective_pair_budget),
+                    "fully_analyzed_pair_count": int((scene.get("geometry_optimization") or {}).get("fully_analyzed_pair_count") or 0),
+                    "deferred_pair_count": int((scene.get("geometry_optimization") or {}).get("deferred_pair_count") or 0),
+                    "full_candidate_evaluated_count": int((scene.get("geometry_optimization") or {}).get("full_candidate_evaluated_count") or 0),
+                    "clock3_exposure_priority": bool((attempt_config.get("pair_preselection") or {}).get("clock3_exposure_priority", False)),
+                },
                 "timing_ms": {
                     "geometry": round(float(geometry_elapsed), 3),
                     "m39_5_0": round(float(m3950_elapsed), 3),
@@ -1564,7 +1601,7 @@ class OnlineGeometryProcessor:
                         cv2.LINE_AA,
                     )
 
-            # M39.5.2.2 overlay arbitration: visible-mouth signed-axis routing
+            # M39.5.3 overlay arbitration: visible-mouth signed-axis routing
             # owns the top status banner. Draw it LAST so historical M39.3/M39.4
             # diagnostic overlays can never overwrite the current decision.
             if isinstance(m3950, Mapping) and bool(m3950.get("enabled", False)):

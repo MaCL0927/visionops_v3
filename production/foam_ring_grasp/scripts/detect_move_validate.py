@@ -1214,6 +1214,53 @@ def wait_for_confirmation(prompt: str = "Press Enter to confirm robot execution 
         print("Please press Enter to confirm, or type 'c' to cancel.")
 
 
+def normalize_ready_after_cycle(
+    robot: RobotClient,
+    *,
+    target_pose_mm: Sequence[float],
+    target_joints: Sequence[float],
+    label: str,
+) -> None:
+    """Leave every completed cycle in the frozen 7-DOF READY identity.
+
+    A Cartesian MoveL back to the same TCP can end in a slightly different
+    redundant joint solution.  That makes the next trigger fail the READY
+    identity gate even though the TCP looks correct.  At the high/safe READY
+    pose, normalize only when needed and verify both joints and TCP.
+    """
+    actual_pose = current_pose_mm(robot)
+    actual_joints = current_joints(robot)
+    dt = _distance_mm(actual_pose, target_pose_mm)
+    dr = _quat_angle_deg(actual_pose[3:7], target_pose_mm[3:7])
+    dj = _max_joint_error_rad(actual_joints, target_joints)
+    print(
+        f"[Ready Normalize] {label}: TCP={dt:.3f}mm/{dr:.3f}deg, "
+        f"joint_max={math.degrees(dj):.3f}deg"
+    )
+    if dt > VERIFY_TRANSLATION_TOL_MM or dr > VERIFY_ROTATION_TOL_DEG:
+        raise RuntimeError(
+            f"cannot normalize {label}: return TCP is not tightly at frozen READY "
+            f"({dt:.3f}mm/{dr:.3f}deg)"
+        )
+    if dj <= VERIFY_READY_JOINT_TOL_RAD:
+        print(f"✓ {label} already has frozen/tight joint identity")
+        return
+    if dj > MAX_TCP_TIGHT_NORMALIZE_JOINT_ERROR_RAD:
+        raise RuntimeError(
+            f"cannot normalize {label}: TCP is tight but max joint error "
+            f"{math.degrees(dj):.3f}deg exceeds normalization envelope "
+            f"{math.degrees(MAX_TCP_TIGHT_NORMALIZE_JOINT_ERROR_RAD):.3f}deg"
+        )
+    move_j_ready(
+        robot,
+        target_pose_mm=target_pose_mm,
+        target_joints=target_joints,
+        label=f"{label.upper()}-CYCLE-NORMALIZE",
+        vel=READY_SWITCH_JOINT_VEL,
+        acc=READY_SWITCH_JOINT_ACC,
+    )
+
+
 def execute_cycle(robot: RobotClient, pre_pose: Sequence[float], grasp_pose: Sequence[float]) -> None:
     # Production validation sequence:
     #   INITIAL/READY --OPEN--> PREGRASP -> GRASP --CLOSE--> PREGRASP -> INITIAL/READY --OPEN
@@ -1259,6 +1306,15 @@ def execute_cycle(robot: RobotClient, pre_pose: Sequence[float], grasp_pose: Seq
     # 5) Only after the robot is verified back at INITIAL/READY, OPEN the gripper.
     set_left_gripper(robot, opened=True, label="READY/INITIAL cycle complete")
 
+    # M39.5.3: MoveL can return the same TCP using a slightly different
+    # redundant 7-DOF solution. Normalize at the safe ready pose so the next
+    # trigger starts from the exact frozen VISIBLE joint identity.
+    normalize_ready_after_cycle(
+        robot,
+        target_pose_mm=VISIBLE_INITIAL_POSE_MM,
+        target_joints=VISIBLE_INITIAL_JOINTS,
+        label="VISIBLE initial",
+    )
 
 
 def execute_side_grasp_cycle(
@@ -1294,6 +1350,12 @@ def execute_side_grasp_cycle(
         move_l_mm(robot, SIDE_COLLISION_AVOIDANCE_POSE_MM, label="SIDE-AVOIDANCE-RETURN", vel=SIDE_TRANSIT_VEL, acc=SIDE_TRANSIT_ACC)
         move_l_mm(robot, SIDE_INITIAL_POSE_MM, label="SIDE-INITIAL", vel=RETURN_VEL, acc=RETURN_ACC)
         set_left_gripper(robot, opened=True, label="SIDE INITIAL cycle complete")
+        normalize_ready_after_cycle(
+            robot,
+            target_pose_mm=SIDE_INITIAL_POSE_MM,
+            target_joints=SIDE_INITIAL_JOINTS,
+            label="SIDE initial",
+        )
     except Exception:
         if closed:
             print("\n! M39.4.2.2 failure AFTER gripper CLOSE.")
@@ -1318,7 +1380,7 @@ def execute_side_grasp_cycle(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="M39.5.2.2 30deg hybrid-ready LEFT robot motion validation with READY normalization")
+    parser = argparse.ArgumentParser(description="M39.5.4 dense-scene-exposed-target LEFT robot motion validation")
     parser.add_argument(
         "--execute",
         action="store_true",
@@ -1415,10 +1477,34 @@ def main() -> int:
                             f"camera_near_rim={near.get('camera_near_rim_midpoint_camera_mm')}"
                         )
                     if m3950_class == "UNCERTAIN":
-                        print(f"vision JSON saved         : {log_path}")
-                        print_debug_artifacts(data)
-                        print("M39.5.0 axis/READY classification is UNCERTAIN; robot will NOT move.")
-                        continue
+                        # M39.5.3: M39.5 axis uncertainty is not a blind hard veto
+                        # for an otherwise authoritative, already collision-checked
+                        # FLAT clock-3 production result.  This case occurs when
+                        # conic/ellipse pose inference is weak at some workspace
+                        # positions while M38.1 + M39.3.1 still provide a validated
+                        # floor-constrained flat grasp.  Let the normal production
+                        # route validator below decide.  Any true terminal reject,
+                        # missing candidate, or non-FLAT route will still be refused.
+                        summary_route = scene_summary.get("m39_3_4_1_tilted_production_routing") if isinstance(scene_summary, Mapping) else None
+                        protected_flat = bool(
+                            data.get("target_found") is True
+                            and data.get("terminal_reject") is not True
+                            and isinstance(summary_route, Mapping)
+                            and str(summary_route.get("classification") or "").upper() == "FLAT"
+                            and str(summary_route.get("route") or "") == EXPECTED_FLAT_ROUTE
+                            and not bool(summary_route.get("terminal_reject", False))
+                        )
+                        if protected_flat:
+                            print(
+                                "[M39.5.3] axis classification UNCERTAIN, but an authoritative "
+                                "collision-checked FLAT clock-3 route exists; continue with "
+                                "VISIBLE_INITIAL production validation."
+                            )
+                        else:
+                            print(f"vision JSON saved         : {log_path}")
+                            print_debug_artifacts(data)
+                            print("M39.5 axis/READY classification is UNCERTAIN and no protected FLAT route exists; robot will NOT move.")
+                            continue
                 m3951 = scene_summary.get("m39_5_1_tilted_visible_grasp") if isinstance(scene_summary, Mapping) else None
                 if isinstance(m3951, Mapping) and bool(m3951.get("executed", False)):
                     if bool(m3951.get("production_grasp_ready", False)):

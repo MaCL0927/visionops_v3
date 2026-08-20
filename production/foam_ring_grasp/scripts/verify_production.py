@@ -130,7 +130,7 @@ def _visible_mouth_scope(raw: Mapping[str, Any]) -> dict[str, Any]:
     flat_tilted = float(m3950.get("flat_reference_axis_ratio_deficit_tilted_min", -1.0))
     if not (0.0 <= flat_upright < flat_tilted):
         raise RuntimeError("M39.5.1 flat-reference shape thresholds must preserve a transition band")
-    # M39.5.2 deliberately has a *single* robot READY split: mild visible
+    # M39.5.3 deliberately has a *single* robot READY split: mild visible
     # tilt below side_ready_axis_tilt_min_deg keeps VISIBLE_INITIAL + clock-3,
     # while tilt at/above the threshold uses SIDE_INITIAL + camera-near-rim.
     # There is no UNCERTAIN gap in the READY split.  The only intentional
@@ -139,10 +139,19 @@ def _visible_mouth_scope(raw: Mapping[str, Any]) -> dict[str, Any]:
     side_ready_tilt = float(m3950.get("side_ready_axis_tilt_min_deg", -1.0))
     if not (10.0 <= side_ready_tilt <= 60.0):
         raise RuntimeError(
-            "M39.5.2 side_ready_axis_tilt_min_deg must stay in the safe configurable range 10..60 deg"
+            "M39.5.3 side_ready_axis_tilt_min_deg must stay in the safe configurable range 10..60 deg"
         )
     if float(m3950.get("pure_side_mouth_axis_ratio_max", 0.0)) >= 0.50:
         raise RuntimeError("M39.5.1 PURE_SIDE mouth gate must not swallow moderately visible tilted mouths")
+    if not bool(m3950.get("flat_anchor_consensus_enabled", False)):
+        raise RuntimeError("M39.5.3 flat_anchor_consensus_enabled must stay enabled in production")
+    flat_anchor_deficit = float(m3950.get("flat_anchor_strong_shape_deficit_min", -1.0))
+    if not (flat_tilted < flat_anchor_deficit <= 0.20):
+        raise RuntimeError("M39.5.3 flat-anchor strong shape deficit must be above transition threshold and <=0.20")
+    flat_anchor_sector = float(m3950.get("flat_anchor_sector_tilt_min_deg", -1.0))
+    flat_anchor_pp = float(m3950.get("flat_anchor_sector_peak_to_peak_min_mm", -1.0))
+    if not (10.0 <= flat_anchor_sector <= 25.0 and 10.0 <= flat_anchor_pp <= 30.0):
+        raise RuntimeError("M39.5.3 flat-anchor sector corroboration thresholds are outside validated bounds")
     m3951 = _mapping(
         raw.get("m39_5_1_tilted_visible_grasp") or {},
         "m39_5_1_tilted_visible_grasp",
@@ -171,6 +180,33 @@ def _visible_mouth_scope(raw: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+
+def _dense_scene_contract(raw: Mapping[str, Any]) -> dict[str, Any]:
+    geometry = _mapping(raw.get("geometry_optimization") or {}, "geometry_optimization")
+    retry = _mapping(raw.get("production_target_retry") or {}, "production_target_retry")
+    pre = _mapping(raw.get("pair_preselection") or {}, "pair_preselection")
+    max_pairs = int(geometry.get("maximum_pairs_to_fully_analyze", 0))
+    max_visible = int(retry.get("maximum_visible_target_attempts", 0))
+    if max_visible < 1:
+        raise RuntimeError("M39.5.4 maximum_visible_target_attempts must be >=1")
+    if max_pairs < max_visible:
+        raise RuntimeError(
+            "M39.5.4 geometry target-search budget must be >= visible retry budget; "
+            f"got maximum_pairs_to_fully_analyze={max_pairs}, maximum_visible_target_attempts={max_visible}"
+        )
+    if not bool(pre.get("clock3_exposure_priority", False)):
+        raise RuntimeError("M39.5.4 clock3_exposure_priority must stay enabled for dense-scene production")
+    overlap = float(pre.get("clock3_vertical_overlap_ratio_min", -1.0))
+    if not (0.10 <= overlap <= 0.60):
+        raise RuntimeError("M39.5.4 clock3 vertical-overlap preselection threshold is outside 0.10..0.60")
+    return {
+        "status": "ok",
+        "maximum_pairs_to_fully_analyze": max_pairs,
+        "maximum_visible_target_attempts": max_visible,
+        "clock3_exposure_priority": True,
+        "clock3_vertical_overlap_ratio_min": overlap,
+    }
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify cleaned foam-ring production configuration")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -187,6 +223,7 @@ def main() -> int:
         "schema_version": raw.get("schema_version"),
         "clock_contract": _clock_contract(raw),
         "scope_contract": _visible_mouth_scope(raw),
+        "dense_scene_contract": _dense_scene_contract(raw),
         "robot_pose_transform": transformer.status(),
     }
     if args.service:

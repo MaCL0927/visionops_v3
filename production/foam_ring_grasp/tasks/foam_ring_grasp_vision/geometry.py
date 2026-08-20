@@ -212,12 +212,87 @@ def _adaptive_clock_batches(config: GeometryConfig) -> Tuple[List[Dict[str, Any]
     return primary, fallback
 
 
+def _clock3_open_side_exposure_metrics(
+    ring: SegmentationInstance,
+    all_rings: Sequence[SegmentationInstance],
+    config: GeometryConfig,
+) -> Dict[str, Any]:
+    """Cheap mask-only estimate of whether fixed clock-3 is exposed.
+
+    This is *ranking only*, never a safety acceptance test.  In dense scenes the
+    historical preselection preferred camera-near depth and repeatedly spent the
+    full 3-D collision budget on interior rings whose +image-X/clock-3 side was
+    visibly occupied.  For the frozen ``fixed_clock3_only`` production policy,
+    prefer targets with no laterally-overlapping ring on the +X side, then let
+    the unchanged 3-D finger/full-gripper collision checks make the final call.
+    """
+    section = config.section("pair_preselection")
+    enabled = bool(section.get("clock3_exposure_priority", False))
+    if not enabled:
+        return {
+            "clock3_exposure_priority_enabled": False,
+            "clock3_open_side_exposed": False,
+            "clock3_right_blocker_count": 0,
+            "clock3_nearest_right_gap_px": 0.0,
+        }
+
+    ys, xs = np.nonzero(ring.mask)
+    if xs.size == 0:
+        return {
+            "clock3_exposure_priority_enabled": True,
+            "clock3_open_side_exposed": False,
+            "clock3_right_blocker_count": 0,
+            "clock3_nearest_right_gap_px": -1.0e6,
+        }
+    x1, x2 = float(xs.min()), float(xs.max())
+    y1, y2 = float(ys.min()), float(ys.max())
+    cx = 0.5 * (x1 + x2)
+    target_h = max(1.0, y2 - y1 + 1.0)
+    overlap_ratio_min = max(0.0, min(1.0, _safe_float(
+        section.get("clock3_vertical_overlap_ratio_min"), 0.25
+    )))
+
+    blocker_gaps: List[float] = []
+    blocker_ids: List[int] = []
+    target_id = int(ring.instance_id)
+    for other in all_rings:
+        if int(other.instance_id) == target_id:
+            continue
+        oys, oxs = np.nonzero(other.mask)
+        if oxs.size == 0:
+            continue
+        ox1, ox2 = float(oxs.min()), float(oxs.max())
+        oy1, oy2 = float(oys.min()), float(oys.max())
+        ocx = 0.5 * (ox1 + ox2)
+        if ocx <= cx:
+            continue
+        other_h = max(1.0, oy2 - oy1 + 1.0)
+        vertical_overlap = max(0.0, min(y2, oy2) - max(y1, oy1) + 1.0)
+        overlap_ratio = vertical_overlap / max(1.0, min(target_h, other_h))
+        if overlap_ratio < overlap_ratio_min:
+            continue
+        blocker_gaps.append(float(ox1 - x2))
+        blocker_ids.append(int(other.instance_id))
+
+    width = float(ring.mask.shape[1])
+    nearest_gap = min(blocker_gaps) if blocker_gaps else max(0.0, width - 1.0 - x2)
+    return {
+        "clock3_exposure_priority_enabled": True,
+        "clock3_open_side_exposed": not blocker_gaps,
+        "clock3_right_blocker_count": int(len(blocker_gaps)),
+        "clock3_nearest_right_gap_px": float(nearest_gap),
+        "clock3_right_blocker_instance_ids": blocker_ids,
+        "clock3_vertical_overlap_ratio_min": float(overlap_ratio_min),
+    }
+
+
 def _pair_preselection_metrics(
     ring: SegmentationInstance,
     mouth: SegmentationInstance,
     association: Mapping[str, Any],
     depth: np.ndarray,
     config: GeometryConfig,
+    all_rings: Sequence[SegmentationInstance] | None = None,
 ) -> Dict[str, Any]:
     """Cheap pair ranking without point-cloud construction or plane fitting."""
     section = config.section("pair_preselection")
@@ -237,6 +312,9 @@ def _pair_preselection_metrics(
     median_mm = float(np.median(valid)) if valid_count else None
     p25_mm = float(np.percentile(valid, 25)) if valid_count else None
     confidence = 0.5 * (float(ring.confidence) + float(mouth.confidence))
+    exposure = _clock3_open_side_exposure_metrics(
+        ring, list(all_rings or [ring]), config
+    )
     return {
         "ring_instance_id": int(ring.instance_id),
         "mouth_instance_id": int(mouth.instance_id),
@@ -248,16 +326,26 @@ def _pair_preselection_metrics(
         "association_score": _safe_float(association.get("association_score"), 0.0),
         "containment": _safe_float(association.get("containment"), 0.0),
         "segmentation_confidence": float(confidence),
+        **exposure,
     }
 
 
 def _pair_preselection_rank(metrics: Mapping[str, Any], prefer_top_layer: bool) -> Tuple[Any, ...]:
     median = metrics.get("sparse_front_depth_median_mm")
     has_depth = median is not None and math.isfinite(float(median))
+    exposure_enabled = bool(metrics.get("clock3_exposure_priority_enabled", False))
+    exposed = bool(metrics.get("clock3_open_side_exposed", False))
+    exposure_gap = _safe_float(metrics.get("clock3_nearest_right_gap_px"), 0.0)
+    # M39.5.4 dense-scene ordering: for the frozen clock-3 grasp policy,
+    # physical open-side exposure is a more useful *search-order* cue than
+    # camera-near depth.  Depth/association still rank candidates inside the
+    # same exposure class; final acceptance remains full 3-D collision checked.
     return (
         bool(has_depth),
-        -float(median) if has_depth and prefer_top_layer else 0.0,
+        bool(exposed) if exposure_enabled else True,
+        float(exposure_gap) if exposure_enabled else 0.0,
         float(metrics.get("sparse_depth_valid_ratio") or 0.0),
+        -float(median) if has_depth and prefer_top_layer else 0.0,
         float(metrics.get("association_score") or 0.0),
         float(metrics.get("segmentation_confidence") or 0.0),
         float(metrics.get("containment") or 0.0),
@@ -5250,7 +5338,9 @@ def analyze_scene(
         preselection_started = time.perf_counter()
         ranked_pairs: List[Dict[str, Any]] = []
         for ring, mouth, metrics in matches:
-            preselection = _pair_preselection_metrics(ring, mouth, metrics, depth, config)
+            preselection = _pair_preselection_metrics(
+                ring, mouth, metrics, depth, config, all_rings=rings
+            )
             ranked_pairs.append({
                 "ring": ring,
                 "mouth": mouth,

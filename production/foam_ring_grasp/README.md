@@ -1,3 +1,7 @@
+# M39.5.4 Dense-Scene Exposed-Target Search
+
+This build keeps the M39.5.3 flat-workspace and M39.5.2.2 READY-normalization logic, and fixes dense multi-ring target search: visible-target geometry can search up to 12 pairs and fixed clock-3 preselection prioritizes targets with an exposed +image-X side before running the unchanged full 3-D collision gates.
+
 # Foam Ring Grasp M39.5.2
 
 M39.5.2 freezes a 30-degree robot READY split for visible mouths:
