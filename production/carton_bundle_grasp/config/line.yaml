@@ -1,0 +1,128 @@
+schema_version: "1.0"
+
+carton_bundle_grasp:
+  device_id: lb3576-carton-bundle-grasp
+  component: carton_bundle_grasp_app
+
+  runtime:
+    url: http://127.0.0.1:28089
+    # TODO: replace with the deployed M41 segmentation model package.
+    # Package must contain model.rknn + model.yaml.
+    model_dir: models/carton_bundle_grasp/current
+    roi_config_path: data/runtime/roi_carton_bundle_grasp.json
+    device_id: lb3576-carton-bundle-grasp-runtime
+    component: rknn_runtime_carton_bundle_grasp
+    accepted_task_types: [segmentation, segment]
+    max_detections: 20
+
+  app:
+    listen_host: 127.0.0.1
+    listen_port: 19215
+    request_timeout_ms: 5000
+    inference_settings_path: /opt/visionops_v3/configs/runtime/generated/carton_bundle_grasp_inference_settings.json
+    # One producer FPS. WebSocket pushes every completed inference result.
+    default_production_inference_fps: 30.0
+
+  collector:
+    listen_host: 0.0.0.0
+    listen_port: 18098
+    device_id: lb3576-carton-bundle-grasp
+    component: collector_carton_bundle_grasp
+    models_root: models/carton_bundle_grasp
+    snapshot_refresh_interval_ms: 200
+    status_refresh_interval_ms: 2000
+    production_inference_source: app
+
+  websocket:
+    listen_host: 0.0.0.0
+    listen_port: 9001
+    path: /vision
+    token: ""
+    auto_start: true
+    status_interval_s: 2.0
+    read_timeout_s: 30.0
+    max_clients: 4
+    max_payload_bytes: 1048576
+    trigger_queue_size: 32
+
+  video:
+    type: mjpeg
+    public_url: http://192.168.20.201:18182/stream.mjpeg
+    sync: soft
+
+  pipeline:
+    enabled: true
+    # M32/M40 validated producer -> capacity-1 latest-only postprocess pipeline.
+    # Explicit robot trigger packets are never replaced by continuous frames.
+    result_queue_size: 1
+    max_result_age_ms: 500
+
+  ipc:
+    # TCP_NODELAY raw local HTTP; JSON decode stays in postprocess thread.
+    raw_http_enabled: true
+    raw_http_fallback_urllib: true
+    max_response_bytes: 33554432
+
+  algorithm:
+    image:
+      width: 1280
+      height: 720
+      require_fixed_size: false
+
+    classes:
+      target_ids: [0]
+      # Update names if model.yaml uses another label; class id 0 is sufficient.
+      target_names: [carton_bundle_top, bundle_top, carton_bundle, box]
+      min_confidence: 0.50
+
+    selection:
+      max_targets: 1
+      mode: confidence
+
+    geometry:
+      require_proto_mask: true
+      min_mask_area_px: 2500
+      epsilon_min: 0.006
+      epsilon_max: 0.12
+      epsilon_steps: 28
+      min_quad_area_ratio: 0.62
+      max_quad_area_ratio: 1.38
+      contour_max_points: 96
+
+    # Confirmed physical dimensions of one tied carton bundle.
+    bundle_prior:
+      length_mm: 715.0
+      width_mm: 525.0
+      length_tolerance_mm: 80.0
+      width_tolerance_mm: 70.0
+      regularize_fixed_size: true
+
+    # Distributed interior depth samples; avoids string/edge depth and fits the
+    # physical top plane rather than using a few independent depth points.
+    top_plane:
+      sample_count: 96
+      erode_px: 18
+      ransac_threshold_mm: 5.0
+      ransac_trials: 96
+      min_valid_samples: 36
+      min_inlier_ratio: 0.70
+      max_rms_mm: 6.0
+
+    depth:
+      enabled: true
+      roi_radius_px: 2
+      percentile: 50.0
+      min_valid_pixels: 1
+      min_depth_mm: 100
+      max_depth_mm: 5000
+      max_age_ms: 1500
+
+    robot_state:
+      # Camera height/waist Z changes do NOT require a visual depth correction.
+      # Leave SDK read disabled until the robot SDK connection/method is supplied.
+      waist_z_required_for_geometry: false
+      sdk_read_enabled: false
+
+  debug:
+    save_every_trigger: false
+    save_root: /tmp/visionops_v3/carton_bundle_grasp/latest
