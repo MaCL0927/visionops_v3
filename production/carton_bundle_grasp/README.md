@@ -1,63 +1,97 @@
-# carton_bundle_grasp — M41
+# carton_bundle_grasp — M41.2
 
-M41 is the first production version for grasping the **top bundle of tied cartons** from an oblique Orbbec 336L robot-eye view.
+Production task for grasping the **top tied bundle of cartons** from an oblique Orbbec Gemini 336L robot-eye view.
 
-## Frozen M41 geometry contract
+## Geometry contract
 
-One bundle is treated as a rectangular top surface with known physical size:
+- segmentation class: `surface` (`class_id=0`)
+- bundle physical size: **715 mm × 525 mm**
+- bundle height: variable
+- camera height: variable with robot waist Z
+- visual output frame: Orbbec color-camera frame, millimetres
+- robot output: two 3-D midpoints of the two **525 mm width edges**
+- robot performs the normal camera-to-robot hand-eye transform
+- visual geometry does **not** apply a separate camera-pitch or waist-Z correction
 
-- length: **715 mm**
-- width: **525 mm**
-- height: variable / not required by the visual algorithm
-- camera height: variable / not compensated in the visual algorithm
+A successful target always has valid finite `position_camera=[X,Y,Z]` for both grasp points. M41.2 does not query depth at the final grasp pixels. If the top surface cannot support a reliable 3-D plane, the target is rejected instead of emitting `[0,0,0]`.
 
-The segmentation model supplies the visible top-surface mask. M41 then performs:
-
-1. perspective quadrilateral extraction from the proto mask;
-2. 96 distributed depth samples from an eroded mask interior;
-3. RANSAC + SVD top-plane fitting in the color-camera coordinate frame;
-4. SDK camera-ray / plane intersections for the four observed corners;
-5. 715 x 525 mm fixed-size rectangular regularisation in the fitted 3-D plane;
-6. output of the **3-D midpoints of the two 525 mm width edges**.
-
-This fixes the perspective error of the old `box_grasp_vision` path where a 2-D edge midpoint was sampled first and only then deprojected.
-
-## Camera pitch and robot waist Z
-
-M41 never converts depth with a separate camera pitch angle. The two output points are always:
+## M41.2 geometry path
 
 ```text
-position_camera = [Xc, Yc, Zc]  # mm, color camera frame
+surface proto mask
+      ↓
+perspective quadrilateral
+      ↓
+96 distributed interior pixels
+      ↓
+Shared Depth: stable target-ROI snapshot
+      ↓
+vectorized 5×5 depth sampling
+      ↓
+vectorized pinhole XYZ for 96 points
+      ↓
+RANSAC + SVD top plane
+      ↓
+4 camera rays from shared color intrinsics
+      ↓
+ray / top-plane intersections
+      ↓
+observed 3-D rectangle
+      ↓
+715×525 mm fixed-size regularization
+      ↓
+2 width-edge 3-D midpoints
 ```
 
-Camera tilt and camera-height changes belong to the camera-to-robot transform. The robot side should apply the normal hand-eye transform to each 3-D point.
+### Why the final grasp pixel does not need depth
 
-Changing the robot waist height changes the observed camera-frame XYZ automatically because every frame is reconstructed from its own RGB-D observation. Therefore **reading waist Z is not required for M41 geometry**.
-
-`algorithm.robot_state.sdk_read_enabled` is intentionally `false`. If later the App should log or use `waist_z_mm`, provide the robot Python SDK connection/login details and the exact API method; it can be attached without changing the M41 geometry contract.
-
-## Required model before online production
-
-The code is complete, but the uploaded M40 repository did not contain the new deployed segmentation package for this task. Before `runtime` can start, provide a package containing:
+Depth is used to reconstruct the **whole top plane**, not to look up the final grasp pixels. Once the plane, bundle center and 3-D axes are known, the two points are computed directly as:
 
 ```text
-model.rknn
-model.yaml
+G_A = C - 715/2 × e_length
+G_B = C + 715/2 × e_length
 ```
 
-at:
+Therefore a local depth hole, strap or edge discontinuity exactly at `G_A/G_B` does not zero the camera coordinates. Enough valid interior depth samples are still required to fit the plane.
+
+## M41.2 performance path
+
+M41.1 failed to use shared depth efficiently because it kept a direct mmap view while processing all sample patches. At ~30 Hz the shared sequence changed during the ~59 ms Python sampling loop, so four retries were wasted before falling back to HTTP.
+
+M41.2 changes this to:
+
+1. read the shared-depth header;
+2. copy only the target depth ROI while the sequence is stable;
+3. re-check sequence immediately after the copy;
+4. perform all depth filtering/percentile calculations on the private ROI snapshot;
+5. process all 96 5×5 patches with vectorized NumPy operations;
+6. compute the four corner rays directly from shared color intrinsics;
+7. use **96 depth points total**; no 16 corner-ray depth probes and no second corner deprojection request.
+
+Expected normal diagnostics:
 
 ```text
-/opt/visionops_v3/models/carton_bundle_grasp/current
+depth_point_count       = 96
+corner_ray_probe_count  = 0
+corner_ray_point_count  = 4
+corner_ray_mode         = intrinsics
+depth_transport         = posix_shared_memory
+snapshot_attempts       ≈ 1
 ```
 
-or set:
+HTTP `sample_deproject` remains a fallback. If it is used, M41.2 still reads the shared-memory header for intrinsics so the corner rays do not need a second depth/deprojection request.
 
-```bash
-export VISIONOPS_CARTON_BUNDLE_GRASP_MODEL_DIR=/path/to/model_package
+## Model
+
+Default deployment path:
+
+```text
+/opt/visionops_v3/models/carton_bundle_grasp/current/
+  model.rknn
+  model.yaml
 ```
 
-Default target class is `class_id=0`; accepted names are configurable in `config/line.yaml`.
+The package contains one class: `surface`.
 
 ## Ports
 
@@ -65,42 +99,64 @@ Default target class is `class_id=0`; accepted names are configurable in `config
 - App HTTP: `19215`
 - Collector: `18098`
 - Robot WebSocket: `9001/vision`
-- Orbbec 336L bridge: existing `18182`
+- Orbbec 336L bridge: `18182`
 
-As with the other production tasks, WebSocket `9001` is intended for one active production profile at a time.
+Only one production profile should own WebSocket port `9001` at a time.
 
-## Start manually
+## Start
 
 ```bash
 cd /opt/visionops_v3
-
 production/carton_bundle_grasp/scripts/start_runtime.sh
 production/carton_bundle_grasp/scripts/start_app.sh
 production/carton_bundle_grasp/scripts/start_collector.sh
 ```
 
-Health / latest decision:
+Or use the installed systemd services.
+
+## Unified test tool
+
+Small-version updates reuse one test script instead of adding version-specific scripts.
+
+### Live performance
 
 ```bash
-curl -s http://127.0.0.1:19215/health | python3 -m json.tool
-curl -s http://127.0.0.1:19215/api/app/latest_decision | python3 -m json.tool
+cd /opt/visionops_v3
+python3 production/carton_bundle_grasp/scripts/test_m41.py performance
 ```
 
-## Performance architecture retained from the validated v3 path
+### App/shared-depth status
 
-- one inference producer thread;
-- capacity-1 latest-only inference-result queue;
-- explicit trigger packets are never overwritten by continuous frames;
-- CPU geometry runs in the postprocess thread and overlaps with the next Runtime request;
-- localhost Runtime uses raw socket HTTP, `TCP_NODELAY`, one `sendall`;
-- Runtime JSON decoding is deferred to postprocess;
-- Orbbec RGB/depth shared-memory fast paths remain enabled;
-- no separate 5 Hz WebSocket throttle: every completed result is pushed;
-- Runtime HTTP worker default for deployment remains `1`.
+```bash
+python3 production/carton_bundle_grasp/scripts/test_m41.py status
+```
 
-## Geometry gates
+### Shared-memory ROI snapshot self-test
 
-Default gates are deliberately production-safe but not excessively strict:
+```bash
+python3 production/carton_bundle_grasp/scripts/test_m41.py selftest
+```
+
+### Saved RGB-D dataset regression
+
+```bash
+python3 production/carton_bundle_grasp/scripts/test_m41.py offline /path/to/dataset
+```
+
+The dataset folder should contain `images/`, `depth/`, `labels/`, and `meta/`.
+
+## Production architecture retained
+
+- inference producer thread + postprocess/geometry thread;
+- capacity-1 latest-only continuous-result queue;
+- explicit robot `trigger/request_id` packets are never overwritten;
+- raw localhost HTTP with `TCP_NODELAY` for Runtime/fallback paths;
+- Runtime JSON decode stays in postprocess;
+- no extra fixed 5 Hz WebSocket throttle;
+- `debug.save_every_trigger: false` for continuous performance tests;
+- Runtime HTTP worker default remains `1`.
+
+## Main geometry gates
 
 ```yaml
 top_plane:
@@ -117,13 +173,10 @@ bundle_prior:
   width_tolerance_mm: 70.0
 ```
 
-The size tolerance is wider than the physical prior because mask labels can terminate slightly inside the physical cardboard boundary. Valid observations are still regularised to the exact 715 x 525 mm rectangle.
+## Robot waist Z
 
-## Future M42/M43 path
+The robot waist Z may later be read through the Python SDK for logging, transform selection, stationary-state checking or multi-frame depth fusion. It is intentionally **not required** by the M41.2 camera-frame XYZ reconstruction. The exact SDK connection/method can be integrated later without changing the visual geometry or robot protocol.
 
-M41 is intentionally `FULL_TOP_FIXED_SIZE`. Later partial-view versions can reuse the same output and communication contract:
+## Future partial-view mode
 
-- `PARTIAL_TOP_EDGE`: one reliable corner + one visible edge direction + plane + fixed L/W;
-- `PARTIAL_TOP_PRIOR_YAW`: one corner + plane + known conveyor/carton yaw + fixed L/W.
-
-One isolated corner with no direction/yaw information is geometrically insufficient to determine a unique rectangular top surface.
+M41.2 freezes the `FULL_TOP_FIXED_SIZE` case. A later partial-view mode can reuse the same output protocol by combining a reliable 3-D corner, top-plane normal, one edge/yaw direction and the known 715×525 mm dimensions.

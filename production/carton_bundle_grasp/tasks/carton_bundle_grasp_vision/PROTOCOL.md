@@ -1,8 +1,8 @@
-# M41 Carton Bundle Grasp Robot Protocol
+# M41.2 Carton Bundle Grasp Robot Protocol
 
 Robot WebSocket endpoint: `ws://<vision-box>:9001/vision`.
 
-M41 keeps the same point-level contract used by `box_grasp_vision`: one physical bundle produces **two elements in `items[]` with the same `id`**.
+M41.2 keeps the same point-level contract used by `box_grasp_vision`: one physical bundle produces **two elements in `items[]` with the same `id`**.
 
 Example:
 
@@ -37,7 +37,7 @@ Example:
 
 - unit: mm;
 - frame: Orbbec color-camera coordinate frame;
-- points: exact M41 fixed-size 3-D midpoints of the two 525 mm width edges;
+- points: exact M41.2 fixed-size 3-D midpoints of the two 525 mm width edges;
 - no camera-pitch or robot-waist correction has been applied.
 
 Robot integration should apply its hand-eye transform to each `position_camera` point. The two points are sorted deterministically by `center_px.x`; no left/right semantic field is required.

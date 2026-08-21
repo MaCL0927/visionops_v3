@@ -1,5 +1,5 @@
 [Unit]
-Description=VisionOps v3 M41 Carton Bundle Grasp Collector Web
+Description=VisionOps v3 M41.2 Carton Bundle Grasp Collector Web
 After=network-online.target visionops-v3-carton-bundle-grasp-runtime.service visionops-v3-carton-bundle-grasp-app.service
 Wants=network-online.target visionops-v3-carton-bundle-grasp-runtime.service visionops-v3-carton-bundle-grasp-app.service
 

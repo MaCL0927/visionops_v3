@@ -6,8 +6,7 @@ carton_bundle_grasp:
 
   runtime:
     url: http://127.0.0.1:28089
-    # TODO: replace with the deployed M41 segmentation model package.
-    # Package must contain model.rknn + model.yaml.
+    # Deployed one-class segmentation package (class 0 = surface).
     model_dir: models/carton_bundle_grasp/current
     roi_config_path: data/runtime/roi_carton_bundle_grasp.json
     device_id: lb3576-carton-bundle-grasp-runtime
@@ -71,8 +70,7 @@ carton_bundle_grasp:
 
     classes:
       target_ids: [0]
-      # Update names if model.yaml uses another label; class id 0 is sufficient.
-      target_names: [carton_bundle_top, bundle_top, carton_bundle, box]
+      target_names: [surface]
       min_confidence: 0.50
 
     selection:
@@ -97,8 +95,9 @@ carton_bundle_grasp:
       width_tolerance_mm: 70.0
       regularize_fixed_size: true
 
-    # Distributed interior depth samples; avoids string/edge depth and fits the
-    # physical top plane rather than using a few independent depth points.
+    # M41.2: 96 distributed interior points define the top plane. Shared depth
+    # is copied as one stable target ROI and sampled vectorially; corner rays use
+    # camera intrinsics directly and therefore consume no corner depth samples.
     top_plane:
       sample_count: 96
       erode_px: 18

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Configuration for M41 carton-bundle top-plane grasp task."""
+"""Configuration for M41.2 carton-bundle top-plane grasp task."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -51,7 +51,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "component": "carton_bundle_grasp_app",
         "runtime": {
             "url": "http://127.0.0.1:28089",
-            # M41 code is ready before the production RKNN package is named.
+            # Deployed M41.2 production segmentation package.
             # Put model.rknn + model.yaml here or override with the env variable.
             "model_dir": _project_path("models", "carton_bundle_grasp", "current"),
             "roi_config_path": _project_path("data", "runtime", "roi_carton_bundle_grasp.json"),
@@ -112,11 +112,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "image": {"width": 1280, "height": 720, "require_fixed_size": False},
             "classes": {
                 "target_ids": [0],
-                "target_names": ["carton_bundle_top", "bundle_top", "carton_bundle", "box"],
+                "target_names": ["surface"],
                 "min_confidence": 0.50,
             },
             "selection": {
-                # M41 simple scene: the highest-confidence complete top face.
+                # M41.2 simple scene: the highest-confidence complete top face.
                 "max_targets": 1,
                 "mode": "confidence",
             },

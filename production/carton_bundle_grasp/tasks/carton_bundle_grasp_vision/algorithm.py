@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""M41 carton-bundle top-plane reconstruction.
+"""M41.2 carton-bundle top-plane reconstruction.
 
 The segmentation model is used only as the semantic/top-surface anchor.  RGB-D
 samples from the interior of the mask are robustly fitted to one 3-D plane in
 camera coordinates.  The visible quadrilateral corners are then intersected
-with that plane through SDK-derived camera rays.  Finally the observed plane
+with that plane through intrinsics-derived camera rays.  Finally the observed plane
 rectangle is regularised with the physical 715 x 525 mm bundle prior and the
 midpoints of the two 525 mm width edges are returned.
 
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -59,7 +60,7 @@ def _point2(value: object) -> Optional[Point2]:
 
 
 def _vec3(value: object) -> Optional[np.ndarray]:
-    if not isinstance(value, (list, tuple)) or len(value) < 3:
+    if not isinstance(value, (list, tuple, np.ndarray)) or len(value) < 3:
         return None
     try:
         arr = np.asarray([float(value[0]), float(value[1]), float(value[2])], dtype=np.float64)
@@ -243,7 +244,7 @@ class ClassifiedMasks:
 
 
 class CartonBundleGraspAlgorithm:
-    """M41 full-top bundle reconstruction and fixed-size regularisation."""
+    """M41.2 full-top bundle reconstruction with ROI-snapshot depth sampling."""
 
     CORNER_NAMES = ("top_left", "top_right", "bottom_right", "bottom_left")
     GRASP_NAMES = ("width_mid_a", "width_mid_b")
@@ -325,57 +326,67 @@ class CartonBundleGraspAlgorithm:
         return [points[int(index)] for index in indexes]
 
     def _interior_samples(self, contour: Polygon, image_width: int, image_height: int) -> List[Point2]:
-        mask = np.zeros((image_height, image_width), dtype=np.uint8)
-        poly = np.asarray(contour, dtype=np.float32)
-        poly[:, 0] = np.clip(poly[:, 0], 0, image_width - 1)
-        poly[:, 1] = np.clip(poly[:, 1], 0, image_height - 1)
-        cv2.fillPoly(mask, [np.rint(poly).astype(np.int32)], 255)
-        working = mask
-        if self.plane_erode_px > 0:
-            k = self.plane_erode_px * 2 + 1
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-            eroded = cv2.erode(mask, kernel)
-            if int(cv2.countNonZero(eroded)) >= self.plane_min_valid_samples * 4:
-                working = eroded
+        """Return distributed interior samples without allocating a full-frame mask.
 
-        ys, xs = np.where(working > 0)
-        if len(xs) < self.plane_min_valid_samples:
-            raise GeometryError("top mask has too little eroded interior for depth plane")
+        M41 used a 1280x720 uint8 mask followed by a 37x37 erosion and a full
+        ``np.where`` scan on every frame.  That is unnecessarily expensive on
+        RK3576.  M41.2 evaluates only a small deterministic grid inside
+        the contour bounding box and uses OpenCV's signed point-to-polygon
+        distance as the erosion criterion.  The geometric meaning is unchanged:
+        sample centres stay ``plane_erode_px`` away from the visible boundary.
+        """
+        if not contour:
+            raise GeometryError("top mask contour is empty")
 
-        x0, x1 = int(xs.min()), int(xs.max())
-        y0, y1 = int(ys.min()), int(ys.max())
-        span_x = max(1, x1 - x0 + 1)
-        span_y = max(1, y1 - y0 + 1)
-        cols = max(3, int(round(math.sqrt(self.plane_sample_count * float(span_x) / float(span_y)))))
-        rows = max(3, int(math.ceil(float(self.plane_sample_count) / float(cols))))
-        gx = np.linspace(x0, x1, cols)
-        gy = np.linspace(y0, y1, rows)
-        samples = []  # type: List[Point2]
-        used = set()
-        for yy in gy:
-            for xx in gx:
-                x = int(round(float(xx)))
-                y = int(round(float(yy)))
-                if 0 <= x < image_width and 0 <= y < image_height and working[y, x] > 0:
-                    key = (x, y)
-                    if key not in used:
+        # Runtime masks are already polygonal.  Limit the pointPolygonTest input
+        # to the same bounded contour representation used for debug output.
+        fast_contour = self._simplify_contour(contour, self.contour_max_points)
+        poly = np.asarray(fast_contour, dtype=np.float32).reshape((-1, 1, 2))
+        poly[:, 0, 0] = np.clip(poly[:, 0, 0], 0, image_width - 1)
+        poly[:, 0, 1] = np.clip(poly[:, 0, 1], 0, image_height - 1)
+        x, y, w, h = cv2.boundingRect(poly)
+        if w <= 1 or h <= 1:
+            raise GeometryError("top mask bounding box is degenerate")
+
+        # Oversample a compact grid so the erosion margin and trapezoid shape do
+        # not leave us short of samples.  This stays O(sample_count), not O(image).
+        desired = int(self.plane_sample_count)
+        candidate_target = max(desired * 4, desired + 32)
+        aspect = float(w) / float(max(1, h))
+        cols = max(4, int(round(math.sqrt(candidate_target * aspect))))
+        rows = max(4, int(math.ceil(float(candidate_target) / float(cols))))
+        gx = np.linspace(float(x), float(x + w - 1), cols)
+        gy = np.linspace(float(y), float(y + h - 1), rows)
+
+        def collect(min_distance_px: float) -> List[Point2]:
+            found = []  # type: List[Point2]
+            used = set()
+            for yy in gy:
+                for xx in gx:
+                    px = float(round(float(xx)))
+                    py = float(round(float(yy)))
+                    key = (int(px), int(py))
+                    if key in used:
+                        continue
+                    signed_distance = float(cv2.pointPolygonTest(poly, (px, py), True))
+                    if signed_distance >= min_distance_px:
                         used.add(key)
-                        samples.append((float(x), float(y)))
-                        if len(samples) >= self.plane_sample_count:
-                            return samples
+                        found.append((px, py))
+            return found
 
-        if len(samples) < self.plane_sample_count:
-            # Deterministic supplemental sampling from all interior pixels.
-            step = max(1, int(len(xs) / max(1, self.plane_sample_count - len(samples))))
-            for index in range(0, len(xs), step):
-                key = (int(xs[index]), int(ys[index]))
-                if key in used:
-                    continue
-                used.add(key)
-                samples.append((float(key[0]), float(key[1])))
-                if len(samples) >= self.plane_sample_count:
-                    break
-        return samples
+        samples = collect(float(self.plane_erode_px))
+        if len(samples) < self.plane_min_valid_samples:
+            # Preserve M41's graceful fallback: if a very narrow/foreshortened
+            # surface cannot sustain the requested erosion, use the true interior.
+            samples = collect(0.5)
+        if len(samples) < self.plane_min_valid_samples:
+            raise GeometryError("top mask has too little interior for depth plane")
+
+        if len(samples) <= desired:
+            return samples
+        # Evenly thin the row-major grid instead of taking only its first rows.
+        indexes = np.linspace(0, len(samples) - 1, desired).round().astype(np.int32)
+        return [samples[int(index)] for index in indexes]
 
     def classify(self, runtime_result: Mapping[str, Any]) -> ClassifiedMasks:
         width, height = self._image_size(runtime_result)
@@ -414,13 +425,17 @@ class CartonBundleGraspAlgorithm:
                 ignored.append({"id": source_id, "reason": "mask_too_small", "area_px": contour_area})
                 continue
             try:
+                quad_started = time.perf_counter()
                 quad, quality = approximate_quadrilateral(
                     contour, self.epsilon_min, self.epsilon_max, self.epsilon_steps
                 )
+                quad_fit_ms = (time.perf_counter() - quad_started) * 1000.0
                 ratio = float(quality.get("quad_to_contour_area_ratio", 0.0))
                 if not self.min_quad_area_ratio <= ratio <= self.max_quad_area_ratio:
                     raise GeometryError("quadrilateral area ratio {:.3f} outside limits".format(ratio))
+                sample_started = time.perf_counter()
                 samples = self._interior_samples(contour, width, height)
+                interior_sample_ms = (time.perf_counter() - sample_started) * 1000.0
             except Exception as error:
                 ignored.append({"id": source_id, "reason": "top_geometry_prepare_failed", "message": str(error)})
                 continue
@@ -436,6 +451,10 @@ class CartonBundleGraspAlgorithm:
                 "plane_sample_points": samples,
                 "quadrilateral_quality": quality,
                 "mask_area_px": contour_area,
+                "prepare_timing_ms": {
+                    "quad_fit_ms": round(float(quad_fit_ms), 3),
+                    "interior_sample_ms": round(float(interior_sample_ms), 3),
+                },
             })
 
         if self.output_order == "largest_area":
@@ -455,29 +474,37 @@ class CartonBundleGraspAlgorithm:
                 "valid plane samples {} < {}".format(len(points), self.plane_min_valid_samples)
             )
         arr = np.asarray(points, dtype=np.float64)
+
+        # Vectorised RANSAC scoring.  M41 evaluated every hypothesis in a Python
+        # loop; M41.2 keeps the same deterministic seed/threshold/trial count but
+        # scores all valid plane hypotheses in one small NumPy matrix operation.
         rng = np.random.RandomState(41)
-        best_mask = None  # type: Optional[np.ndarray]
-        best_count = -1
-        best_error = float("inf")
-        for _ in range(self.plane_ransac_trials):
-            indexes = rng.choice(arr.shape[0], 3, replace=False)
-            a, b, c = arr[indexes]
-            normal = np.cross(b - a, c - a)
-            norm = float(np.linalg.norm(normal))
-            if norm < 1e-8:
-                continue
-            normal = normal / norm
-            d = -float(np.dot(normal, a))
-            distances = np.abs(arr.dot(normal) + d)
-            mask = distances <= self.plane_ransac_threshold_mm
-            count = int(np.count_nonzero(mask))
-            mean_error = float(distances[mask].mean()) if count else float("inf")
-            if count > best_count or (count == best_count and mean_error < best_error):
-                best_mask = mask
-                best_count = count
-                best_error = mean_error
-        if best_mask is None or best_count < 3:
+        trial_count = int(self.plane_ransac_trials)
+        indexes = np.empty((trial_count, 3), dtype=np.int32)
+        for trial in range(trial_count):
+            indexes[trial] = rng.choice(arr.shape[0], 3, replace=False)
+        a = arr[indexes[:, 0]]
+        b = arr[indexes[:, 1]]
+        c = arr[indexes[:, 2]]
+        normals = np.cross(b - a, c - a)
+        norms = np.linalg.norm(normals, axis=1)
+        valid_hypotheses = norms >= 1e-8
+        if not np.any(valid_hypotheses):
             raise GeometryError("RANSAC plane fitting failed")
+        a = a[valid_hypotheses]
+        normals = normals[valid_hypotheses] / norms[valid_hypotheses, None]
+        offsets = -np.einsum("ij,ij->i", normals, a)
+        distances = np.abs(arr.dot(normals.T) + offsets[None, :])
+        masks = distances <= self.plane_ransac_threshold_mm
+        counts = np.count_nonzero(masks, axis=0)
+        safe_counts = np.maximum(counts, 1)
+        mean_errors = np.sum(np.where(masks, distances, 0.0), axis=0) / safe_counts
+        best_count = int(np.max(counts))
+        if best_count < 3:
+            raise GeometryError("RANSAC plane fitting failed")
+        candidates = np.flatnonzero(counts == best_count)
+        best_index = int(candidates[int(np.argmin(mean_errors[candidates]))])
+        best_mask = masks[:, best_index]
 
         inliers = arr[best_mask]
         centroid = inliers.mean(axis=0)
@@ -520,6 +547,58 @@ class CartonBundleGraspAlgorithm:
         }
 
     @staticmethod
+    def corner_rays_from_intrinsics(
+        quad_px: Sequence[Point2],
+        intrinsics: Mapping[str, Any],
+        image_width: int,
+        image_height: int,
+        depth_width: int,
+        depth_height: int,
+        flip_horizontal: bool = False,
+        flip_vertical: bool = False,
+    ) -> List[np.ndarray]:
+        """Build four color-camera rays directly from shared-depth intrinsics.
+
+        Depth is intentionally not sampled at the corners.  The fitted top plane
+        supplies the range; intrinsics supply only the direction.  This means a
+        depth hole at a final grasp/corner pixel cannot zero the output XYZ.
+        """
+        if len(quad_px) != 4:
+            raise GeometryError("exactly four image corners are required")
+        try:
+            fx = float(intrinsics["fx"])
+            fy = float(intrinsics["fy"])
+            cx = float(intrinsics["cx"])
+            cy = float(intrinsics["cy"])
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise GeometryError("camera intrinsics are unavailable for corner rays") from error
+        if not all(math.isfinite(value) for value in (fx, fy, cx, cy)) or fx <= 0.0 or fy <= 0.0:
+            raise GeometryError("camera intrinsics are invalid for corner rays")
+        if image_width <= 1 or image_height <= 1 or depth_width <= 1 or depth_height <= 1:
+            raise GeometryError("camera image dimensions are invalid for corner rays")
+
+        sx = float(depth_width - 1) / float(image_width - 1)
+        sy = float(depth_height - 1) / float(image_height - 1)
+        rays = []  # type: List[np.ndarray]
+        for raw in quad_px:
+            u, v = float(raw[0]), float(raw[1])
+            project_u = min(float(depth_width - 1), max(0.0, u * sx))
+            project_v = min(float(depth_height - 1), max(0.0, v * sy))
+            if flip_horizontal:
+                project_u = float(depth_width - 1) - project_u
+            if flip_vertical:
+                project_v = float(depth_height - 1) - project_v
+            ray = np.asarray([
+                (project_u - cx) / fx,
+                (project_v - cy) / fy,
+                1.0,
+            ], dtype=np.float64)
+            if not np.all(np.isfinite(ray)):
+                raise GeometryError("intrinsics corner ray is invalid")
+            rays.append(ray)
+        return rays
+
+    @staticmethod
     def intersect_corner_rays(
         ray_points: Sequence[Sequence[float]],
         plane: Mapping[str, Any],
@@ -530,7 +609,7 @@ class CartonBundleGraspAlgorithm:
         for raw in ray_points:
             ray = _vec3(raw)
             if ray is None or float(np.linalg.norm(ray)) < 1e-6:
-                raise GeometryError("SDK corner ray is invalid")
+                raise GeometryError("camera corner ray is invalid")
             denominator = float(np.dot(normal, ray))
             if abs(denominator) < 1e-9:
                 raise GeometryError("corner ray is parallel to top plane")

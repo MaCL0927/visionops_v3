@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import queue
 import signal
@@ -454,6 +455,17 @@ class CameraBridgeClient:
                 "position_camera": parsed_position,
                 "project_valid": bool(item.get("valid")),
             })
+
+        # The Bridge HTTP response does not expose color intrinsics.  When the
+        # M41.2 ROI snapshot path falls back to HTTP, read the shared-depth
+        # header only (microsecond-scale) so corner rays remain intrinsics-based
+        # and no second 4-point deprojection request is introduced.
+        if self.shared_depth is not None and not isinstance(response.get("intrinsics"), Mapping):
+            try:
+                context = self.shared_depth.read_geometry_context(image_width, image_height)
+                response.update(context)
+            except (OSError, ValueError, RuntimeError) as error:
+                self.shared_depth.last_error = str(error)
         return output, response
 
 
@@ -1047,23 +1059,66 @@ class CartonBundleGraspVisionService:
         image_width: int,
         image_height: int,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
-        """Recover one physical top plane and fixed-size rectangle per candidate."""
+        """Recover the physical top plane and fixed-size rectangle per target.
+
+        M41.2 sends only the 96 distributed top-plane samples to the depth path.
+        On Orbbec 336L the preferred path takes one stable shared-memory ROI
+        snapshot, vectorises the 5x5 depth sampling/deprojection, then derives the
+        four corner rays directly from the published color intrinsics.  Final
+        corner/grasp pixels therefore never need their own valid depth value.
+        """
         if not items or not self.algorithm.depth_enabled:
-            return [], [], {"mode": "disabled_or_no_target", "point_count": 0}
+            return [], [], {
+                "mode": "disabled_or_no_target",
+                "point_count": 0,
+                "plane_point_count": 0,
+                "corner_ray_point_count": 0,
+                "corner_ray_probe_count": 0,
+                "stage_timing_ms": {},
+            }
+
         external_items = []  # type: List[Dict[str, Any]]
         ignored = []  # type: List[Dict[str, Any]]
         total_points = 0
-        bridge_debug = {"mode": "m41_plane_sample_deproject", "point_count": 0}  # type: Dict[str, Any]
+        total_plane_points = 0
+        total_corner_rays = 0
+        stage_timing = {
+            "request_build_ms": 0.0,
+            "depth_batch_request_ms": 0.0,
+            "plane_fit_ms": 0.0,
+            "corner_ray_build_ms": 0.0,
+            "ray_plane_intersection_ms": 0.0,
+            "rectangle_reconstruct_ms": 0.0,
+            "external_item_build_ms": 0.0,
+        }  # type: Dict[str, float]
+        bridge_debug = {
+            "mode": "m41_2_roi_snapshot_intrinsics_rays",
+            "point_count": 0,
+            "plane_point_count": 0,
+            "corner_ray_point_count": 0,
+            "corner_ray_probe_count": 0,
+            "corner_ray_mode": "intrinsics",
+        }  # type: Dict[str, Any]
+
         for item_index, item in enumerate(items):
             try:
+                request_started = time.perf_counter()
                 plane_pixels = item.get("plane_sample_points") if isinstance(item.get("plane_sample_points"), list) else []
+                if not plane_pixels:
+                    raise GeometryError("no top-plane depth sample pixels")
+                quad = item.get("quad") if isinstance(item.get("quad"), list) else []
+                if len(quad) != 4:
+                    raise GeometryError("top quadrilateral must contain four corners")
+
                 request_points = []  # type: List[List[float]]
                 for raw in plane_pixels:
                     u, v = self._point_xy(raw)
                     request_points.append([u, v, u, v])
-                if not request_points:
-                    raise GeometryError("no top-plane depth sample pixels")
-                samples, response = self.bridge.sample_deproject(
+                plane_count = len(request_points)
+                stage_timing["request_build_ms"] += (time.perf_counter() - request_started) * 1000.0
+
+                depth_started = time.perf_counter()
+                plane_samples, response = self.bridge.sample_deproject(
                     request_points,
                     image_width,
                     image_height,
@@ -1073,27 +1128,64 @@ class CartonBundleGraspVisionService:
                     self.algorithm.min_depth_mm,
                     self.algorithm.max_depth_mm,
                 )
-                total_points += len(request_points)
-                positions = [sample.get("position_camera") or [0.0, 0.0, 0.0] for sample in samples]
-                plane = self.algorithm.fit_plane(positions)
+                stage_timing["depth_batch_request_ms"] += (time.perf_counter() - depth_started) * 1000.0
+                if len(plane_samples) != plane_count:
+                    raise UpstreamError("top-plane depth sample count mismatch")
+                total_points += plane_count
+                total_plane_points += plane_count
 
-                quad = item.get("quad") if isinstance(item.get("quad"), list) else []
-                if len(quad) != 4:
-                    raise GeometryError("top quadrilateral must contain four corners")
-                z_ref = float(plane["z_ref_mm"])
-                corner_requests = [[float(point[0]), float(point[1]), z_ref] for point in quad]
-                ray_points, ray_response = self.bridge.deproject(corner_requests)
-                corners = self.algorithm.intersect_corner_rays(ray_points, plane)
-                rectangle = self.algorithm.reconstruct_rectangle(quad, corners, plane)
-                external_items.append(
-                    self.algorithm.build_external_item(item_index, item, plane, rectangle, samples)
+                plane_started = time.perf_counter()
+                positions = [sample.get("position_camera") or [0.0, 0.0, 0.0] for sample in plane_samples]
+                plane = self.algorithm.fit_plane(positions)
+                stage_timing["plane_fit_ms"] += (time.perf_counter() - plane_started) * 1000.0
+
+                ray_started = time.perf_counter()
+                intrinsics = response.get("intrinsics") if isinstance(response.get("intrinsics"), Mapping) else None
+                if intrinsics is None:
+                    raise GeometryError("camera intrinsics unavailable for M41.2 corner rays")
+                try:
+                    depth_width = int(response.get("depth_width") or image_width)
+                    depth_height = int(response.get("depth_height") or image_height)
+                except (TypeError, ValueError, OverflowError):
+                    depth_width, depth_height = image_width, image_height
+                ray_points = self.algorithm.corner_rays_from_intrinsics(
+                    quad,
+                    intrinsics,
+                    image_width,
+                    image_height,
+                    depth_width,
+                    depth_height,
+                    bool(response.get("flip_horizontal")),
+                    bool(response.get("flip_vertical")),
                 )
+                total_corner_rays += len(ray_points)
+                stage_timing["corner_ray_build_ms"] += (time.perf_counter() - ray_started) * 1000.0
+
+                intersect_started = time.perf_counter()
+                corners = self.algorithm.intersect_corner_rays(ray_points, plane)
+                stage_timing["ray_plane_intersection_ms"] += (time.perf_counter() - intersect_started) * 1000.0
+
+                rectangle_started = time.perf_counter()
+                rectangle = self.algorithm.reconstruct_rectangle(quad, corners, plane)
+                stage_timing["rectangle_reconstruct_ms"] += (time.perf_counter() - rectangle_started) * 1000.0
+
+                build_started = time.perf_counter()
+                external_items.append(
+                    self.algorithm.build_external_item(item_index, item, plane, rectangle, plane_samples)
+                )
+                stage_timing["external_item_build_ms"] += (time.perf_counter() - build_started) * 1000.0
 
                 client_timing = response.get("_client_timing") if isinstance(response.get("_client_timing"), Mapping) else {}
                 bridge_debug.update({
                     "depth_age_ms": response.get("depth_age_ms"),
                     "depth_sequence": response.get("depth_sequence"),
                     "sample_ms": response.get("sample_ms"),
+                    "snapshot_copy_ms": response.get("snapshot_copy_ms"),
+                    "vectorized_sample_ms": response.get("vectorized_sample_ms"),
+                    "vectorized_deproject_ms": response.get("vectorized_deproject_ms"),
+                    "snapshot_attempts": response.get("snapshot_attempts"),
+                    "snapshot_roi_px": response.get("snapshot_roi_px"),
+                    "snapshot_roi_bytes": response.get("snapshot_roi_bytes"),
                     "roundtrip_ms": client_timing.get("roundtrip_ms"),
                     "connect_ms": client_timing.get("connect_ms"),
                     "send_ms": client_timing.get("send_ms"),
@@ -1102,17 +1194,25 @@ class CartonBundleGraspVisionService:
                     "body_read_ms": client_timing.get("body_read_ms"),
                     "json_decode_ms": client_timing.get("json_decode_ms"),
                     "response_bytes": client_timing.get("response_bytes"),
-                    "corner_deproject_ok": bool(ray_response.get("ok")),
+                    "combined_request_ok": bool(response.get("ok")),
+                    "corner_ray_probe_count": 0,
                 })
             except CameraUnavailableError:
                 raise
             except Exception as error:
                 ignored.append({
                     "id": str(item.get("source_id") or "candidate-{}".format(item_index)),
-                    "reason": "m41_geometry_failed",
+                    "reason": "m41_2_geometry_failed",
                     "message": str(error),
                 })
+
         bridge_debug["point_count"] = total_points
+        bridge_debug["plane_point_count"] = total_plane_points
+        bridge_debug["corner_ray_point_count"] = total_corner_rays
+        bridge_debug["corner_ray_probe_count"] = 0
+        bridge_debug["stage_timing_ms"] = {
+            key: round(float(value), 3) for key, value in stage_timing.items()
+        }
         return external_items, ignored, bridge_debug
 
     def _camera_error_if_disconnected(self, error: Exception) -> Exception:
@@ -1172,6 +1272,20 @@ class CartonBundleGraspVisionService:
             classify_started = time.perf_counter()
             classified = self.algorithm.classify(runtime_result)
             timing["classify_ms"] = round((time.perf_counter() - classify_started) * 1000.0, 3)
+            selected_prepare = {
+                "quad_fit_ms": 0.0,
+                "interior_sample_ms": 0.0,
+            }
+            for classified_item in classified.items:
+                prepare = classified_item.get("prepare_timing_ms") if isinstance(classified_item.get("prepare_timing_ms"), Mapping) else {}
+                selected_prepare["quad_fit_ms"] += float(prepare.get("quad_fit_ms") or 0.0)
+                selected_prepare["interior_sample_ms"] += float(prepare.get("interior_sample_ms") or 0.0)
+            timing["quad_fit_ms"] = round(selected_prepare["quad_fit_ms"], 3)
+            timing["interior_sample_ms"] = round(selected_prepare["interior_sample_ms"], 3)
+            timing["classify_other_ms"] = round(
+                max(0.0, timing["classify_ms"] - timing["quad_fit_ms"] - timing["interior_sample_ms"]),
+                3,
+            )
 
             geometry_started = time.perf_counter()
             external_items, geometry_ignored, bridge_debug = self._geometry_for_items(
@@ -1180,10 +1294,35 @@ class CartonBundleGraspVisionService:
                 classified.image_height,
             )
             timing["geometry_3d_ms"] = round((time.perf_counter() - geometry_started) * 1000.0, 3)
-            # Compatibility alias used by existing production dashboards.
-            timing["depth_sample_deproject_ms"] = timing["geometry_3d_ms"]
             if isinstance(bridge_debug, Mapping):
+                stage = bridge_debug.get("stage_timing_ms") if isinstance(bridge_debug.get("stage_timing_ms"), Mapping) else {}
+                timing["geometry_request_build_ms"] = round(float(stage.get("request_build_ms") or 0.0), 3)
+                timing["depth_sample_deproject_ms"] = round(float(stage.get("depth_batch_request_ms") or 0.0), 3)
+                timing["plane_fit_ms"] = round(float(stage.get("plane_fit_ms") or 0.0), 3)
+                timing["corner_ray_build_ms"] = round(float(stage.get("corner_ray_build_ms") or 0.0), 3)
+                timing["ray_plane_intersection_ms"] = round(float(stage.get("ray_plane_intersection_ms") or 0.0), 3)
+                timing["rectangle_reconstruct_ms"] = round(float(stage.get("rectangle_reconstruct_ms") or 0.0), 3)
+                timing["external_item_build_ms"] = round(float(stage.get("external_item_build_ms") or 0.0), 3)
+                accounted_geometry = sum(
+                    float(timing.get(key) or 0.0)
+                    for key in (
+                        "geometry_request_build_ms",
+                        "depth_sample_deproject_ms",
+                        "plane_fit_ms",
+                        "corner_ray_build_ms",
+                        "ray_plane_intersection_ms",
+                        "rectangle_reconstruct_ms",
+                        "external_item_build_ms",
+                    )
+                )
+                timing["geometry_other_ms"] = round(max(0.0, timing["geometry_3d_ms"] - accounted_geometry), 3)
                 timing["depth_bridge_internal_ms"] = round(float(bridge_debug.get("sample_ms") or 0.0), 3)
+                timing["depth_snapshot_copy_ms"] = round(float(bridge_debug.get("snapshot_copy_ms") or 0.0), 3)
+                timing["depth_vectorized_sample_ms"] = round(float(bridge_debug.get("vectorized_sample_ms") or 0.0), 3)
+                timing["depth_vectorized_deproject_ms"] = round(float(bridge_debug.get("vectorized_deproject_ms") or 0.0), 3)
+                timing["depth_snapshot_attempts"] = int(bridge_debug.get("snapshot_attempts") or 0)
+                timing["depth_snapshot_roi_px"] = list(bridge_debug.get("snapshot_roi_px") or [])
+                timing["depth_snapshot_roi_bytes"] = int(bridge_debug.get("snapshot_roi_bytes") or 0)
                 timing["depth_transport"] = str(bridge_debug.get("transport") or bridge_debug.get("mode") or "unknown")
                 timing["depth_connect_ms"] = round(float(bridge_debug.get("connect_ms") or 0.0), 3)
                 timing["depth_send_ms"] = round(float(bridge_debug.get("send_ms") or 0.0), 3)
@@ -1193,6 +1332,10 @@ class CartonBundleGraspVisionService:
                 timing["depth_json_decode_ms"] = round(float(bridge_debug.get("json_decode_ms") or 0.0), 3)
                 timing["depth_response_bytes"] = int(bridge_debug.get("response_bytes") or 0)
                 timing["depth_point_count"] = int(bridge_debug.get("point_count") or 0)
+                timing["depth_plane_point_count"] = int(bridge_debug.get("plane_point_count") or 0)
+                timing["corner_ray_point_count"] = int(bridge_debug.get("corner_ray_point_count") or 0)
+                timing["corner_ray_probe_count"] = int(bridge_debug.get("corner_ray_probe_count") or 0)
+                timing["corner_ray_mode"] = str(bridge_debug.get("corner_ray_mode") or "unknown")
 
             build_started = time.perf_counter()
 
@@ -1217,10 +1360,10 @@ class CartonBundleGraspVisionService:
             if packet.request_id is not None:
                 robot["request_id"] = packet.request_id
 
-            # Runtime segmentation remains untouched; M41 geometry is appended.
+            # Runtime segmentation remains untouched; M41.2 geometry is appended.
             visualization = dict(runtime_result)
             visualization["carton_bundle_grasp"] = {
-                "version": "M41",
+                "version": "M41.2",
                 "geometry_mode": "FULL_TOP_FIXED_SIZE",
                 "items": external_items,
                 "ignored": list(classified.ignored) + list(geometry_ignored),
@@ -1480,7 +1623,7 @@ class CartonBundleGraspVisionService:
                     cv2.putText(image, str(role), (x + 10, y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
             observed_size = item.get("observed_size") if isinstance(item.get("observed_size"), Mapping) else {}
             top_plane = item.get("top_plane") if isinstance(item.get("top_plane"), Mapping) else {}
-            label = "M41 L={:.1f} W={:.1f} RMS={:.2f}".format(
+            label = "M41.2 L={:.1f} W={:.1f} RMS={:.2f}".format(
                 float(observed_size.get("length_mm") or 0.0),
                 float(observed_size.get("width_mm") or 0.0),
                 float(top_plane.get("rms_mm") or 0.0),
@@ -1496,7 +1639,7 @@ class ReusableThreadingHTTPServer(ThreadingHTTPServer):
 
 
 class StatusHandler(BaseHTTPRequestHandler):
-    server_version = "VisionOpsCartonBundleGrasp/1.0"
+    server_version = "VisionOpsCartonBundleGrasp/1.1"
 
     @property
     def service(self) -> CartonBundleGraspVisionService:
@@ -1603,7 +1746,7 @@ def run(config: Mapping[str, Any]) -> int:
     thread.start()
     ws = config["carton_bundle_grasp"]["websocket"]
     print(
-        "Carton Bundle Grasp M41 started: ws={}:{}{} http={}:{} runtime={} video={}".format(
+        "Carton Bundle Grasp M41.2 started: ws={}:{}{} http={}:{} runtime={} video={}".format(
             ws["listen_host"], ws["listen_port"], ws["path"], http["listen_host"], http["listen_port"],
             config["carton_bundle_grasp"]["runtime"]["url"], config["carton_bundle_grasp"]["video"]["public_url"]
         )
@@ -1620,7 +1763,7 @@ def run(config: Mapping[str, Any]) -> int:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="M41 carton bundle top-plane grasp WebSocket service")
+    parser = argparse.ArgumentParser(description="M41.2 carton bundle top-plane grasp WebSocket service")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     args = parser.parse_args(argv)
     return run(load_config(args.config))

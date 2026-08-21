@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Launch Runtime, M41 App or Collector for carton_bundle_grasp."""
+"""Launch Runtime, M41.2 App or Collector for carton_bundle_grasp."""
 from __future__ import annotations
 
 import argparse
@@ -111,7 +111,7 @@ def _collector(config: dict) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="VisionOps M41 carton-bundle-grasp launcher")
+    parser = argparse.ArgumentParser(description="VisionOps M41.2 carton-bundle-grasp launcher")
     parser.add_argument("--config", help="默认 production/carton_bundle_grasp/config/line.yaml")
     parser.add_argument("command", choices=("runtime", "app", "collector", "show-config"))
     return parser

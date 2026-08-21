@@ -1,5 +1,5 @@
 [Unit]
-Description=VisionOps v3 M41 Carton Bundle Grasp RKNN Runtime
+Description=VisionOps v3 M41.2 Carton Bundle Grasp RKNN Runtime
 After=network-online.target visionops-orbbec336l-bridge.service
 Wants=network-online.target visionops-orbbec336l-bridge.service
 
